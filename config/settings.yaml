@@ -1,0 +1,38 @@
+data:
+  root: ./data
+  adjust: qfq
+  sleep_seconds: 0.35
+  exclude_st: true
+
+universe:
+  default_index: "000300"
+
+benchmark: "000300"
+
+backtest:
+  initial_cash: 1000000.0
+  commission_rate: 0.00025
+  commission_min: 5.0
+  stamp_tax_rate: 0.0005
+  transfer_fee_rate: 0.00001
+  slippage_rate: 0.001
+  min_order_value: 1000.0
+
+strategy:
+  name: momentum_rotation
+  top_k: 10
+  lookback_days: 60
+  rebalance_days: 5
+  regime_filter_days: 20
+  use_regime_filter: true
+  max_weight_pct: 0.15
+  min_avg_amount: 50000000
+  liquidity_days: 20
+
+risk:
+  max_position_pct: 0.25
+  max_daily_loss_pct: 0.05
+
+notify:
+  dingtalk_webhook: ""
+  dingtalk_secret: ""

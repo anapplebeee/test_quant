@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+TRADING_DAYS = 252
+
+
+def total_return(equity: pd.Series) -> float:
+    if len(equity) < 2:
+        return 0.0
+    return float(equity.iloc[-1] / equity.iloc[0] - 1.0)
+
+
+def cagr(equity: pd.Series) -> float:
+    if len(equity) < 2:
+        return 0.0
+    years = len(equity) / TRADING_DAYS
+    end, start = float(equity.iloc[-1]), float(equity.iloc[0])
+    if start <= 0 or end <= 0:
+        return 0.0
+    return float((end / start) ** (1.0 / years) - 1.0)
+
+
+def annual_volatility(equity: pd.Series) -> float:
+    rets = equity.pct_change().dropna()
+    if rets.empty:
+        return 0.0
+    return float(rets.std(ddof=1) * np.sqrt(TRADING_DAYS))
+
+
+def sharpe_ratio(equity: pd.Series, rf_annual: float = 0.0) -> float:
+    rets = equity.pct_change().dropna()
+    if rets.empty or rets.std(ddof=1) == 0:
+        return 0.0
+    excess = rets.mean() - rf_annual / TRADING_DAYS
+    return float(excess / rets.std(ddof=1) * np.sqrt(TRADING_DAYS))
+
+
+def max_drawdown(equity: pd.Series) -> tuple[float, pd.Timestamp | None]:
+    if len(equity) < 2:
+        return 0.0, None
+    cummax = equity.cummax()
+    dd = equity / cummax - 1.0
+    trough = dd.idxmin()
+    return float(dd.loc[trough]), trough
+
+
+def calmar_ratio(equity: pd.Series) -> float:
+    mdd, _ = max_drawdown(equity)
+    if mdd == 0:
+        return 0.0
+    return float(cagr(equity) / abs(mdd))
+
+
+def win_rate(returns: pd.Series) -> float:
+    rets = returns.dropna()
+    if rets.empty:
+        return 0.0
+    return float((rets > 0).sum() / len(rets))
+
+
+def summarize(equity: pd.Series, benchmark: pd.Series | None = None) -> dict:
+    rets = equity.pct_change().dropna()
+    mdd, trough = max_drawdown(equity)
+    result = {
+        "start": str(equity.index[0].date()) if len(equity) else None,
+        "end": str(equity.index[-1].date()) if len(equity) else None,
+        "total_return": total_return(equity),
+        "cagr": cagr(equity),
+        "annual_vol": annual_volatility(equity),
+        "sharpe": sharpe_ratio(equity),
+        "max_drawdown": mdd,
+        "mdd_trough": str(trough.date()) if trough is not None else None,
+        "calmar": calmar_ratio(equity),
+        "daily_win_rate": win_rate(rets),
+    }
+    if benchmark is not None and len(benchmark) > 1:
+        result["bench_total_return"] = total_return(benchmark)
+        result["bench_cagr"] = cagr(benchmark)
+        result["excess_cagr"] = result["cagr"] - result["bench_cagr"]
+    return result
+
+
+def format_summary(summary: dict) -> str:
+    pct = lambda v: f"{v * 100:.2f}%"
+    lines = [
+        f"区间          {summary['start']} ~ {summary['end']}",
+        f"累计收益      {pct(summary['total_return'])}",
+        f"年化收益      {pct(summary['cagr'])}",
+        f"年化波动      {pct(summary['annual_vol'])}",
+        f"夏普比率      {summary['sharpe']:.2f}",
+        f"最大回撤      {pct(summary['max_drawdown'])} (谷底 {summary['mdd_trough']})",
+        f"卡玛比率      {summary['calmar']:.2f}",
+        f"日胜率        {pct(summary['daily_win_rate'])}",
+    ]
+    if "bench_total_return" in summary:
+        lines += [
+            f"基准收益      {pct(summary['bench_total_return'])}",
+            f"基准年化      {pct(summary['bench_cagr'])}",
+            f"超额年化      {pct(summary['excess_cagr'])}",
+        ]
+    return "\n".join(lines)
