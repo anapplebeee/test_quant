@@ -127,16 +127,22 @@ def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: P
     raw_weights = strategy.target_weights(i)
 
     risk_cfg = cfg["risk"]
+    cash, positions = load_holdings()
+    last_close = md.closes.iloc[i]
+    equity = cash + sum(
+        sh * last_close[sym]
+        for sym, sh in positions.items()
+        if sym in last_close.index and not pd.isna(last_close[sym])
+    )
     weights, violations = validate_weights(
         raw_weights,
-        md.closes.iloc[i],
-        equity=float(cfg["backtest"]["initial_cash"]),
+        last_close,
+        equity=equity,
         max_position_pct=float(risk_cfg["max_position_pct"]),
     )
-    cash, positions = load_holdings()
-    orders, equity = generate_orders(weights, md.closes.iloc[i], cash, positions)
+    orders, equity = generate_orders(weights, last_close, cash, positions)
     warnings = violations + check_holdings_risk(
-        positions, md.closes.iloc[i], equity, float(risk_cfg["max_position_pct"])
+        positions, last_close, equity, float(risk_cfg["max_position_pct"])
     )
 
     date = md.dates[i]

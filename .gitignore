@@ -3,7 +3,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 *.egg-info/
-data/
+/data/
 logs/
 reports/
 state/
