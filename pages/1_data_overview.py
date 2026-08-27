@@ -7,6 +7,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from common import load_stock_names
+
 st.set_page_config(page_title="数据总览 - Quart", page_icon="🗃️", layout="wide")
 
 st.title("🗃️ 数据总览")
@@ -49,6 +51,9 @@ except Exception:
 
 st.divider()
 
+# 股票名称映射
+stock_names = load_stock_names()
+
 # 最新股票池
 st.subheader("最新股票池成分")
 try:
@@ -57,9 +62,15 @@ try:
         uni_df = pd.read_parquet(os.path.join(universe_dir, latest))
         st.caption(f"文件: {latest} | 成分股数量: {len(uni_df)}")
 
+        # 添加股票名称列
+        display_df = uni_df.copy()
+        display_df["名称"] = display_df["symbol"].map(stock_names).fillna("-")
+        display_df = display_df[["symbol", "名称"]]
+        display_df.columns = ["代码", "名称"]
+
         # 展示前50只
         st.dataframe(
-            uni_df.head(50) if len(uni_df) > 50 else uni_df,
+            display_df.head(50) if len(display_df) > 50 else display_df,
             use_container_width=True,
             hide_index=True,
         )

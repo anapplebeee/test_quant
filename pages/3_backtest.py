@@ -10,6 +10,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from common import load_stock_names
+
 st.set_page_config(page_title="回测中心 - Quart", page_icon="📈", layout="wide")
 
 st.title("📈 回测中心")
@@ -113,16 +115,27 @@ st.divider()
 
 # 交易记录
 st.subheader("最近交易记录")
+stock_names = load_stock_names()
 trade_files = sorted(glob.glob(os.path.join(reports_dir, f"trades_{selected_name}*.csv")))
 if trade_files:
     trades = pd.read_csv(trade_files[-1], parse_dates=["date"])
     trades = trades.sort_values("date", ascending=False)
+
+    # 添加股票名称
+    trades["名称"] = trades["symbol"].map(stock_names).fillna("-")
+    trades = trades.rename(columns={"date": "交易日期"})
+
+    # 调整列顺序：日期、代码、名称、方向、数量、价格、金额、手续费
+    display_cols = ["交易日期", "symbol", "名称", "side", "shares", "price", "amount", "fee"]
+    trades_display = trades[display_cols].copy()
+    trades_display.columns = ["交易日期", "代码", "名称", "方向", "数量", "价格", "金额", "手续费"]
+
     st.dataframe(
-        trades.head(30).style.format({
-            "price": "{:.2f}",
-            "amount": "{:,.0f}",
-            "fee": "{:.2f}",
-            "shares": "{:,.0f}",
+        trades_display.head(30).style.format({
+            "价格": "{:.2f}",
+            "金额": "{:,.0f}",
+            "手续费": "{:.2f}",
+            "数量": "{:,.0f}",
         }),
         use_container_width=True,
         hide_index=True,

@@ -7,6 +7,8 @@ import glob
 import pandas as pd
 import streamlit as st
 
+from common import load_stock_names
+
 st.set_page_config(page_title="每日信号 - Quart", page_icon="📋", layout="wide")
 
 st.title("📋 每日信号")
@@ -40,6 +42,7 @@ st.divider()
 # ML 预测分数
 st.subheader("ML 模型预测分数 (Top 20)")
 scores_path = os.path.join("data", "scores", "preds.csv")
+stock_names = load_stock_names()
 
 if os.path.exists(scores_path):
     scores_df = pd.read_csv(scores_path, parse_dates=["datetime"])
@@ -49,8 +52,13 @@ if os.path.exists(scores_path):
     col1, col2 = st.columns([1, 1])
     with col1:
         st.caption(f"最新预测日期: {latest_date}")
+        # 添加股票名称
+        display_scores = latest_scores.head(20)[["instrument", "score"]].reset_index(drop=True)
+        display_scores["名称"] = display_scores["instrument"].map(stock_names).fillna("-")
+        display_scores.columns = ["代码", "分数", "名称"]
+        display_scores = display_scores[["代码", "名称", "分数"]]
         st.dataframe(
-            latest_scores.head(20)[["instrument", "score"]].reset_index(drop=True),
+            display_scores,
             use_container_width=True,
             hide_index=True,
         )
