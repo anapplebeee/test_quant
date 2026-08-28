@@ -43,7 +43,7 @@ TASKS = {
     "backtest": {
         "name": "运行回测",
         "script": "scripts/run_backtest.py",
-        "args": ["--strategy", "momentum_rotation"],
+        "args": [],                      # 策略由 UI 选择，动态传入
         "icon": "📈",
         "resource": "compute",
         "outputs": {
@@ -52,6 +52,7 @@ TASKS = {
             "交易记录": "reports/trades_*.csv",
         },
         "result_tab": "📈 回测中心",
+        "has_strategy_select": True,
     },
     "signal": {
         "name": "生成信号",
@@ -172,8 +173,12 @@ class TaskQueue:
     # ---------- 公共接口 ----------
 
     def submit(self, task_id: str, on_output: Optional[Callable] = None,
-               on_complete: Optional[Callable] = None) -> tuple[bool, str]:
+               on_complete: Optional[Callable] = None,
+               extra_args: Optional[list] = None) -> tuple[bool, str]:
         """提交任务到队列
+
+        Args:
+            extra_args: 附加命令行参数（如 ["--strategy", "lowvol_composite"]）
 
         Returns:
             (是否成功, 消息)
@@ -193,11 +198,14 @@ class TaskQueue:
             seq = sum(1 for t in self.tasks.values() if t.task_id == task_id) + 1
             instance_id = f"{task_id}#{seq}" if seq > 1 else task_id
 
+            # 合并默认参数和动态参数
+            final_args = list(tpl.get("args", [])) + list(extra_args or [])
+
             task = Task(
                 task_id=instance_id,
                 name=tpl["name"],
                 script=tpl["script"],
-                args=list(tpl.get("args", [])),
+                args=final_args,
                 resource=tpl.get("resource", "compute"),
             )
             self.tasks[instance_id] = task

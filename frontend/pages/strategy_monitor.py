@@ -18,7 +18,7 @@ from frontend.theme import metric_card, page_header
 
 # ---------- 任务执行（流式+队列） ----------
 
-def on_run_task(task_id: str):
+def on_run_task(task_id: str, strategy: str = ""):
     """提交任务到队列并流式显示进度，完成后显示产出结果"""
     if task_id not in TASKS:
         yield "❌ 未知任务", task_queue.get_status_summary(), "", ""
@@ -32,12 +32,19 @@ def on_run_task(task_id: str):
     def _on_complete(tid: str, code: int):
         q.put(("done", tid, code))
 
-    ok, msg = task_queue.submit(task_id, on_output=_on_output, on_complete=_on_complete)
+    # 回测任务：附加策略参数
+    extra_args = None
+    display_name = TASKS[task_id]["name"]
+    if task_id == "backtest" and strategy:
+        extra_args = ["--strategy", strategy]
+        display_name = f"运行回测 [{strategy}]"
+
+    ok, msg = task_queue.submit(task_id, on_output=_on_output, on_complete=_on_complete,
+                                extra_args=extra_args)
     if not ok:
         yield msg, task_queue.get_status_summary(), f"⚠️ {msg}", ""
         return
 
-    task_name = TASKS[task_id]["name"]
     my_done = False
     idle_ticks = 0
 
@@ -61,9 +68,9 @@ def on_run_task(task_id: str):
             code = my_task.returncode if my_task else -1
             icon = "✅" if code == 0 else "❌"
             yield output, status_summary, (
-                f"{icon} {task_name} {'完成' if code == 0 else f'失败(code={code})'}"), ""
+                f"{icon} {display_name} {'完成' if code == 0 else f'失败(code={code})'}"), ""
         else:
-            yield output, status_summary, f"🟡 {task_name} 运行中...", ""
+            yield output, status_summary, f"🟡 {display_name} 运行中...", ""
 
         if my_done and not has_active:
             break
@@ -152,6 +159,14 @@ def render():
             btn_factor = gr.Button("🔬 因子研究", variant="secondary", size="sm")
             btn_status = gr.Button("🔄 刷新状态", variant="secondary", size="sm")
 
+        strategy_choices = ["momentum_rotation", "lowvol_composite", "ml_rank"]
+        strategy_select = gr.Dropdown(
+            label="回测策略选择（仅对 📈 运行回测 生效）",
+            choices=strategy_choices,
+            value="momentum_rotation",
+            info="momentum_rotation=动量轮动 | lowvol_composite=低波复合 | ml_rank=ML排序",
+        )
+
         task_status_bar = gr.Textbox(label="执行状态", interactive=False)
         queue_status = gr.Textbox(label="📋 任务队列", lines=8, interactive=False,
                                   value=task_queue.get_status_summary())
@@ -159,15 +174,15 @@ def render():
         task_artifacts = gr.Markdown(value="*任务完成后此处显示产出文件清单和结果位置*",
                                      label="📦 任务产出")
 
-        btn_refresh.click(on_run_task, inputs=[gr.State("refresh")],
+        btn_refresh.click(on_run_task, inputs=[gr.State("refresh"), strategy_select],
                           outputs=[task_output, queue_status, task_status_bar, task_artifacts])
-        btn_backtest.click(on_run_task, inputs=[gr.State("backtest")],
+        btn_backtest.click(on_run_task, inputs=[gr.State("backtest"), strategy_select],
                            outputs=[task_output, queue_status, task_status_bar, task_artifacts])
-        btn_signal.click(on_run_task, inputs=[gr.State("signal")],
+        btn_signal.click(on_run_task, inputs=[gr.State("signal"), strategy_select],
                          outputs=[task_output, queue_status, task_status_bar, task_artifacts])
-        btn_ml.click(on_run_task, inputs=[gr.State("ml_train")],
+        btn_ml.click(on_run_task, inputs=[gr.State("ml_train"), strategy_select],
                      outputs=[task_output, queue_status, task_status_bar, task_artifacts])
-        btn_factor.click(on_run_task, inputs=[gr.State("factor_research")],
+        btn_factor.click(on_run_task, inputs=[gr.State("factor_research"), strategy_select],
                          outputs=[task_output, queue_status, task_status_bar, task_artifacts])
         btn_status.click(on_refresh_status, outputs=[queue_status])
 
