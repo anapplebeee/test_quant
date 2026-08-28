@@ -1,0 +1,40 @@
+"""每日信号页面"""
+from __future__ import annotations
+
+import os
+import glob
+
+import gradio as gr
+
+from frontend.theme import page_header
+
+
+def _load_signal(date: str) -> str:
+    """加载信号报告"""
+    path = f"reports/signal_{date}.md"
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    return "未找到信号报告"
+
+
+def render():
+    """渲染每日信号 Tab"""
+    with gr.Tab("📋 每日信号"):
+        gr.HTML(page_header("📋 每日信号", "持仓建议 / 调仓信号 / ML预测分数"))
+
+        gr.Markdown("> ⚠️ 信号仅供研究参考，不构成投资建议")
+
+        signal_files = sorted([
+            f.replace("signal_", "").replace(".md", "")
+            for f in os.listdir("reports") if f.startswith("signal_")
+        ])
+
+        if signal_files:
+            signal_date = gr.Dropdown(
+                label="选择日期", choices=signal_files, value=signal_files[-1],
+            )
+            signal_content = gr.Markdown(value=_load_signal(signal_files[-1]))
+            signal_date.change(_load_signal, inputs=signal_date, outputs=signal_content)
+        else:
+            gr.Info("暂无信号报告，运行 scripts/daily_signal.py 生成")
