@@ -412,23 +412,59 @@ def create_app() -> gr.Blocks:
             def on_run_task(task_name):
                 """运行任务并实时输出"""
                 import subprocess
-                import threading
+                import time
                 
-                output_lines = []
+                if task_name not in TASKS:
+                    yield "", "❌ 未知任务"
+                    return
                 
-                def callback(line):
-                    output_lines.append(line)
+                task = TASKS[task_name]
+                command = task["command"]
                 
-                # 启动任务
-                success = run_task(task_name, on_output=callback)
+                yield "", f"🟡 {task['name']} 启动中..."
                 
-                if success:
-                    return "\n".join(output_lines[-50:]), f"✅ {task_name} 已启动"
-                else:
-                    return "", f"❌ 任务启动失败"
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        shell=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    
+                    output_lines = []
+                    for line in process.stdout:
+                        output_lines.append(line.strip())
+                        # 保留最近50行
+                        display_text = "\n".join(output_lines[-50:])
+                        yield display_text, f"🟡 {task['name']} 运行中..."
+                    
+                    process.wait()
+                    
+                    if process.returncode == 0:
+                        yield "\n".join(output_lines[-50:]), f"✅ {task['name']} 完成"
+                    else:
+                        yield "\n".join(output_lines[-50:]), f"❌ {task['name']} 失败 (code={process.returncode})"
+                        
+                except Exception as e:
+                    yield f"错误: {str(e)}", f"❌ {task['name']} 异常"
             
             task_btn_refresh.click(
                 fn=lambda: on_run_task("refresh"),
+                outputs=[task_output, task_status],
+            )
+            task_btn_backtest.click(
+                fn=lambda: on_run_task("backtest"),
+                outputs=[task_output, task_status],
+            )
+            task_btn_signal.click(
+                fn=lambda: on_run_task("signal"),
+                outputs=[task_output, task_status],
+            )
+            task_btn_ml.click(
+                fn=lambda: on_run_task("ml_train"),
                 outputs=[task_output, task_status],
             )
             
