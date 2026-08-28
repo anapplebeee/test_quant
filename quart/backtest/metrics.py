@@ -78,9 +78,9 @@ def window_stats(equity: pd.Series, days: int) -> dict:
         return {"return": None, "mdd": None, "ann_vol": None, "sharpe": None, "days": len(w) - 1}
     rets = w.pct_change().dropna()
     mdd, _ = max_drawdown(w)
-    vol = float(rets.std() * 252**0.5) if len(rets) > 1 else None
+    vol = float(rets.std() * TRADING_DAYS**0.5) if len(rets) > 1 else None
     sharpe = (
-        float(rets.mean() / rets.std() * 252**0.5)
+        float(rets.mean() / rets.std() * TRADING_DAYS**0.5)
         if len(rets) > 1 and rets.std() > 0
         else None
     )
@@ -126,6 +126,10 @@ def summarize(
         "calmar": calmar_ratio(equity),
         "daily_win_rate": win_rate(rets),
     }
+    # 持仓日胜率：剔除零收益日（空仓/停牌）后的胜率。
+    # daily_win_rate 把空仓日计入分母且不算赢，对含择时/空仓期的策略系统性低估（架构评审 4.5）
+    invested = rets[rets != 0]
+    result["invested_win_rate"] = win_rate(invested) if len(invested) else None
     # 近半年/近一年区间指标（收益+回撤），与全周期键并存
     for label, days in WINDOWS:
         ws = window_stats(equity, days)

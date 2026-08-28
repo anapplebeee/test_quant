@@ -57,8 +57,9 @@ def test_group_z_industry_standardization(monkeypatch):
 
     out = strat._group_z(df, min_group_size=2)
     row = out.iloc[0]
-    assert np.isclose(row["A"], -1.0) and np.isclose(row["B"], 1.0)
-    assert np.isclose(row["C"], -1.0) and np.isclose(row["D"], 1.0)
+    # 样本口径（ddof=1，与 _z() 全市场 z 一致）：[1,3] → mean 2, std √2 → z=∓0.7071
+    assert np.isclose(row["A"], -1 / np.sqrt(2)) and np.isclose(row["B"], 1 / np.sqrt(2))
+    assert np.isclose(row["C"], -1 / np.sqrt(2)) and np.isclose(row["D"], 1 / np.sqrt(2))
 
     # 组内样本不足 → NaN（当日剔除）
     out_small = strat._group_z(df, min_group_size=5)

@@ -58,8 +58,9 @@ class LowVolCompositeStrategy(BaseStrategy):
         grp = df.T.groupby(g)
         mu = grp.mean().T  # dates × industries
         cnt = grp.count().T
-        sq = (df.astype("float64") ** 2).T.groupby(g).mean().T
-        sd = np.sqrt((sq - mu.astype("float64") ** 2).clip(lower=0))
+        # 样本口径（ddof=1）与 _z() 一致；弃用 sqrt(E[x²]-E[x]²) 形式
+        # （总体口径 + 灾难性抵消风险，架构评审 4.2）
+        sd = grp.std(ddof=1).T
         sd = sd.where(cnt >= min_group_size)
         sd = sd.replace(0, np.nan)
 
@@ -97,10 +98,9 @@ class LowVolCompositeStrategy(BaseStrategy):
         z_amp = self._z(amp20)
         z_lot = self._z(lotto)
 
-        total = (z_vol.fillna(0) + z_amp.fillna(0) + z_lot.fillna(0))
+        # fillna(0) 是死代码：随后的 where(complete) 会把任一因子缺失的行整行置 NaN
         complete = z_vol.notna() & z_amp.notna() & z_lot.notna()
-        comp = total / 3.0
-        comp = comp.where(complete).astype("float32")
+        comp = ((z_vol + z_amp + z_lot) / 3.0).where(complete).astype("float32")
         if self.industry_z:
             comp = self._group_z(comp)
         self.composite = comp

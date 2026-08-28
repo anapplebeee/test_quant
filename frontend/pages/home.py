@@ -80,7 +80,8 @@ def _summary_html(name: str | None) -> str:
                 metric_card("年化收益", _fmt_pct(s.get("cagr")), _color_by_sign(s.get("cagr"))),
                 metric_card("夏普比率", _fmt_num(s.get("sharpe")), "purple"),
                 metric_card("年化波动", _fmt_pct(s.get("annual_vol")), "gray"),
-                metric_card("日胜率", _fmt_pct(s.get("daily_win_rate")), "teal"),
+                # 持仓日胜率：剔除空仓/零收益日，避免对含择时策略的系统性低估
+                metric_card("日胜率(持仓)", _fmt_pct(s.get("invested_win_rate", s.get("daily_win_rate"))), "teal"),
             ],
         ),
     ]

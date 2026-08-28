@@ -25,7 +25,9 @@ class MLRankStrategy(BaseStrategy):
         self.rebalance_days = int(p.get("rebalance_days", 5))
         self.max_weight = float(p.get("max_weight_pct", 0.15))
         self.min_score = p.get("min_score")
-        self.stale_days = int(p.get("stale_days", 35))
+        # 预测分数保鲜期：5 日 horizon 模型的分数半衰期 <10 天（架构评审 4.4），
+        # 旧默认 35 天会让一个月前的预测继续驱动选股
+        self.stale_days = int(p.get("stale_days", 10))
         self.min_avg_amount = p.get("min_avg_amount")
         self.liquidity_days = int(p.get("liquidity_days", 20))
         self.min_price = p.get("min_price")
