@@ -13,7 +13,7 @@ import subprocess
 import threading
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Callable, Optional
 
@@ -33,21 +33,37 @@ TASKS = {
         "script": "scripts/update_data.py",
         "args": [],
         "icon": "🔄",
-        "resource": "data",          # 占用资源：数据文件
+        "resource": "data",
+        "outputs": {
+            "日线数据": "data/daily/*.parquet",
+            "股票池快照": "data/universe/*.parquet",
+        },
+        "result_tab": "🗃️ 数据总览",
     },
     "backtest": {
         "name": "运行回测",
         "script": "scripts/run_backtest.py",
         "args": ["--strategy", "momentum_rotation"],
         "icon": "📈",
-        "resource": "compute",       # 占用资源：CPU计算
+        "resource": "compute",
+        "outputs": {
+            "回测摘要": "reports/summary_*.json",
+            "净值曲线": "reports/sweep_equity_*.csv",
+            "交易记录": "reports/trades_*.csv",
+        },
+        "result_tab": "📈 回测中心",
     },
     "signal": {
         "name": "生成信号",
         "script": "scripts/daily_signal.py",
         "args": [],
         "icon": "📋",
-        "resource": "data",          # 读取数据+写入报告
+        "resource": "data",
+        "outputs": {
+            "信号报告": "reports/signal_*.md",
+            "ML预测分数": "data/scores/preds.csv",
+        },
+        "result_tab": "📋 每日信号",
     },
     "ml_train": {
         "name": "ML训练",
@@ -55,6 +71,11 @@ TASKS = {
         "args": ["--start", "20240101"],
         "icon": "🤖",
         "resource": "compute",
+        "outputs": {
+            "ML预测分数": "data/scores/preds.csv",
+            "模型元数据": "data/scores/meta.json",
+        },
+        "result_tab": "📋 每日信号",
     },
     "sweep": {
         "name": "参数扫描",
@@ -62,6 +83,11 @@ TASKS = {
         "args": [],
         "icon": "🔍",
         "resource": "compute",
+        "outputs": {
+            "扫描结果": "reports/sweep_*.csv",
+            "扫描净值": "reports/sweep_equity_*.csv",
+        },
+        "result_tab": "📈 回测中心",
     },
     "factor_research": {
         "name": "因子研究",
@@ -69,6 +95,10 @@ TASKS = {
         "args": ["--sample", "monthly"],
         "icon": "🔬",
         "resource": "data",
+        "outputs": {
+            "因子分析输出": "reports/factor_*.csv",
+        },
+        "result_tab": "🔬 因子研究",
     },
 }
 
@@ -345,6 +375,51 @@ class TaskQueue:
 
 # 全局任务队列单例
 task_queue = TaskQueue()
+
+
+def get_task_artifacts(task_id: str, since: Optional[datetime] = None) -> str:
+    """获取任务产出文件清单
+
+    Args:
+        task_id: 任务类型ID（如 'signal'）
+        since: 只列出该时间之后修改的文件（默认用任务开始时间）
+
+    Returns:
+        产出文件 Markdown 列表，无产出时返回提示
+    """
+    tpl = TASKS.get(task_id, {})
+    output_patterns = tpl.get("outputs", {})
+    result_tab = tpl.get("result_tab", "")
+    if not output_patterns:
+        return ""
+
+    import glob as _glob
+
+    # 默认：找该任务最近一次实例的开始时间
+    if since is None:
+        candidates = [t for t in task_queue.tasks.values() if t.task_id.startswith(task_id)]
+        started = [t.started_at for t in candidates if t.started_at]
+        if not started:
+            since = datetime.now() - timedelta(hours=1)
+        else:
+            since = max(started)
+
+    lines = [f"**📦 任务产出**（结果请查看 **{result_tab}** 页签）\n"]
+    found_any = False
+    for label, pattern in output_patterns.items():
+        files = sorted(_glob.glob(pattern), key=os.path.getmtime)
+        new_files = [f for f in files
+                     if datetime.fromtimestamp(os.path.getmtime(f)) >= since]
+        for f in new_files[-3:]:  # 每类最多显示3个最新
+            mtime = datetime.fromtimestamp(os.path.getmtime(f))
+            size_kb = os.path.getsize(f) / 1024
+            lines.append(f"- `{label}`: `{f}` ({size_kb:.1f} KB, {mtime.strftime('%H:%M:%S')})")
+            found_any = True
+
+    if not found_any:
+        lines.append("- *未检测到新产出文件（可能任务无文件输出或输出到其他位置）*")
+
+    return "\n".join(lines)
 
 
 # 兼容旧接口

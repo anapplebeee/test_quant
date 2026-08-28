@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import gradio as gr
 
-from api.task_api import TASKS, task_queue
+from api.task_api import TASKS, task_queue, get_task_artifacts
 from common import load_stock_names
 from frontend.theme import metric_card, page_header
 
@@ -19,9 +19,9 @@ from frontend.theme import metric_card, page_header
 # ---------- 任务执行（流式+队列） ----------
 
 def on_run_task(task_id: str):
-    """提交任务到队列并流式显示进度"""
+    """提交任务到队列并流式显示进度，完成后显示产出结果"""
     if task_id not in TASKS:
-        yield "❌ 未知任务", task_queue.get_status_summary(), ""
+        yield "❌ 未知任务", task_queue.get_status_summary(), "", ""
         return
 
     q: queue.Queue = queue.Queue()
@@ -34,7 +34,7 @@ def on_run_task(task_id: str):
 
     ok, msg = task_queue.submit(task_id, on_output=_on_output, on_complete=_on_complete)
     if not ok:
-        yield msg, task_queue.get_status_summary(), f"⚠️ {msg}"
+        yield msg, task_queue.get_status_summary(), f"⚠️ {msg}", ""
         return
 
     task_name = TASKS[task_id]["name"]
@@ -61,9 +61,9 @@ def on_run_task(task_id: str):
             code = my_task.returncode if my_task else -1
             icon = "✅" if code == 0 else "❌"
             yield output, status_summary, (
-                f"{icon} {task_name} {'完成' if code == 0 else f'失败(code={code})'}")
+                f"{icon} {task_name} {'完成' if code == 0 else f'失败(code={code})'}"), ""
         else:
-            yield output, status_summary, f"🟡 {task_name} 运行中..."
+            yield output, status_summary, f"🟡 {task_name} 运行中...", ""
 
         if my_done and not has_active:
             break
@@ -74,7 +74,12 @@ def on_run_task(task_id: str):
         elif not my_done:
             idle_ticks = 0
 
-    yield task_queue.get_output(task_id, tail=40), task_queue.get_status_summary(), "🏁 队列空闲"
+    # 任务完成后：显示产出文件清单
+    artifacts = get_task_artifacts(task_id)
+    yield (task_queue.get_output(task_id, tail=40),
+           task_queue.get_status_summary(),
+           "🏁 队列空闲",
+           artifacts)
 
 
 def on_refresh_status():
@@ -150,18 +155,20 @@ def render():
         task_status_bar = gr.Textbox(label="执行状态", interactive=False)
         queue_status = gr.Textbox(label="📋 任务队列", lines=8, interactive=False,
                                   value=task_queue.get_status_summary())
-        task_output = gr.Textbox(label="最新任务输出", lines=12, interactive=False)
+        task_output = gr.Textbox(label="最新任务输出（日志）", lines=12, interactive=False)
+        task_artifacts = gr.Markdown(value="*任务完成后此处显示产出文件清单和结果位置*",
+                                     label="📦 任务产出")
 
         btn_refresh.click(on_run_task, inputs=[gr.State("refresh")],
-                          outputs=[task_output, queue_status, task_status_bar])
+                          outputs=[task_output, queue_status, task_status_bar, task_artifacts])
         btn_backtest.click(on_run_task, inputs=[gr.State("backtest")],
-                           outputs=[task_output, queue_status, task_status_bar])
+                           outputs=[task_output, queue_status, task_status_bar, task_artifacts])
         btn_signal.click(on_run_task, inputs=[gr.State("signal")],
-                         outputs=[task_output, queue_status, task_status_bar])
+                         outputs=[task_output, queue_status, task_status_bar, task_artifacts])
         btn_ml.click(on_run_task, inputs=[gr.State("ml_train")],
-                     outputs=[task_output, queue_status, task_status_bar])
+                     outputs=[task_output, queue_status, task_status_bar, task_artifacts])
         btn_factor.click(on_run_task, inputs=[gr.State("factor_research")],
-                         outputs=[task_output, queue_status, task_status_bar])
+                         outputs=[task_output, queue_status, task_status_bar, task_artifacts])
         btn_status.click(on_refresh_status, outputs=[queue_status])
 
         # 自动刷新队列状态（每3秒）
