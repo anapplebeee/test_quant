@@ -21,7 +21,7 @@ from frontend.theme import metric_card, page_header
 def on_run_task(task_id: str):
     """提交任务到队列并流式显示进度"""
     if task_id not in TASKS:
-        yield "❌ 未知任务", "", ""
+        yield "❌ 未知任务", task_queue.get_status_summary(), ""
         return
 
     q: queue.Queue = queue.Queue()
@@ -34,36 +34,46 @@ def on_run_task(task_id: str):
 
     ok, msg = task_queue.submit(task_id, on_output=_on_output, on_complete=_on_complete)
     if not ok:
-        yield msg, task_queue.get_status_summary(), ""
+        yield msg, task_queue.get_status_summary(), f"⚠️ {msg}"
         return
 
     task_name = TASKS[task_id]["name"]
+    my_done = False
+    idle_ticks = 0
 
-    # 流式循环：只要队列中还有运行中/排队的任务就继续刷新
     while True:
         try:
             kind, tid, payload = q.get(timeout=0.5)
+            if tid == task_id and kind == "done":
+                my_done = True
         except queue.Empty:
             pass
 
-        # 检查队列状态
+        has_active = any(
+            t.status.value in ("running", "pending")
+            for t in task_queue.tasks.values()
+        )
+        output = task_queue.get_output(task_id, tail=40)
         status_summary = task_queue.get_status_summary()
-        running = task_queue.tasks.get(task_id)
-        has_active = any(t.status.value in ("running", "pending") for t in task_queue.tasks.values())
 
-        if kind == "out" and running:
-            output = task_queue.get_output(task_id, tail=40)
+        if my_done:
+            my_task = task_queue.tasks.get(task_id)
+            code = my_task.returncode if my_task else -1
+            icon = "✅" if code == 0 else "❌"
+            yield output, status_summary, (
+                f"{icon} {task_name} {'完成' if code == 0 else f'失败(code={code})'}")
+        else:
             yield output, status_summary, f"🟡 {task_name} 运行中..."
-        elif kind == "done":
-            output = task_queue.get_output(task_id, tail=40)
-            icon = "✅" if payload == 0 else "❌"
-            yield output, status_summary, f"{icon} {task_name} {'完成' if payload == 0 else f'失败(code={payload})'}"
 
-        # 如果没有活动任务了，退出循环
-        if not has_active and (kind == "done" or q.empty()):
+        if my_done and not has_active:
             break
+        if my_done and q.empty():
+            idle_ticks += 1
+            if idle_ticks > 3:
+                break
+        elif not my_done:
+            idle_ticks = 0
 
-    # 最终状态
     yield task_queue.get_output(task_id, tail=40), task_queue.get_status_summary(), "🏁 队列空闲"
 
 
