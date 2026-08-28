@@ -15,29 +15,24 @@ from api.backtest_api import (
     get_equity_curve,
     get_trades,
 )
+from api.research_api import list_research_reports, list_sweeps, load_research_report, load_sweep, sweep_headline
+from api.strategy_api import get_strategy_defaults, strategy_choices
 from api.task_api import TASKS, task_queue
 from frontend.theme import metric_card, page_header
 
-# 可选策略（与后端注册表同步）
+# 策略清单单一数据源：REGISTRY 驱动（与首页/策略监控同源）
 try:
-    from quart.strategy import REGISTRY
-
-    STRATEGY_CHOICES = sorted(REGISTRY.keys())
+    STRATEGY_CHOICES = strategy_choices()
 except Exception:
-    STRATEGY_CHOICES = ["momentum_rotation", "lowvol_composite", "dual_ma", "ml_rank"]
+    STRATEGY_CHOICES = ["momentum_rotation", "lowvol_composite", "dual_ma", "ml_rank", "lowvol_indz"]
 
 
-def _default_rebalance(strategy: str) -> int:
-    """读取该策略当前生效的换手频率（config.strategy.overrides 优先）。"""
+def _strategy_defaults(strategy: str) -> dict:
+    """该策略当前生效的默认参数（overrides 优先，与 build_strategy 同语义）。"""
     try:
-        from quart.config import load_config
-
-        cfg = load_config()
-        s = cfg.get("strategy") or {}
-        ov = (s.get("overrides") or {}).get(strategy) or {}
-        return int(ov.get("rebalance_days") or s.get("rebalance_days", 5))
+        return get_strategy_defaults(strategy)
     except Exception:
-        return 5
+        return {"rebalance_days": 5, "top_k": 10}
 
 
 def _cost_md(name: str) -> str:
@@ -201,18 +196,23 @@ def render():
                     label="策略", choices=STRATEGY_CHOICES, value=STRATEGY_CHOICES[0],
                 )
                 rebal_in = gr.Number(
-                    label="换手频率（交易日）", value=_default_rebalance(STRATEGY_CHOICES[0]), precision=0,
+                    label="换手频率（交易日）",
+                    value=_strategy_defaults(STRATEGY_CHOICES[0])["rebalance_days"], precision=0,
                 )
-                topk_in = gr.Number(label="持仓数 top_k", value=10, precision=0)
+                topk_in = gr.Number(
+                    label="持仓数 top_k",
+                    value=_strategy_defaults(STRATEGY_CHOICES[0])["top_k"], precision=0,
+                )
                 start_in = gr.Textbox(label="起始日期", value="2020-01-01")
             run_btn = gr.Button("🚀 运行回测", variant="primary")
             run_out = gr.Markdown()
 
             def _on_strategy_change(name: str):
-                """切换策略时同步该策略当前生效的换手频率"""
-                return gr.update(value=_default_rebalance(name))
+                """切换策略时同步该策略当前生效的默认参数（换手频率/持仓数）"""
+                d = _strategy_defaults(name)
+                return gr.update(value=d["rebalance_days"]), gr.update(value=d["top_k"])
 
-            strategy_in.change(_on_strategy_change, inputs=[strategy_in], outputs=[rebal_in])
+            strategy_in.change(_on_strategy_change, inputs=[strategy_in], outputs=[rebal_in, topk_in])
             run_btn.click(
                 _run_backtest,
                 inputs=[strategy_in, rebal_in, topk_in, start_in],
@@ -258,3 +258,34 @@ def render():
             _refresh_list,
             outputs=[selected_bt, summary_md, equity_plot, dd_plot, trades_table],
         )
+
+        # ---- 参数扫描结果浏览器：reports/sweep_*.csv（数据关联前端化）----
+        with gr.Accordion("🧪 参数扫描结果（reports/sweep_*.csv，按 CAGR 排序）", open=False):
+            sweep_files = list_sweeps()
+            if sweep_files:
+                sweep_dd = gr.Dropdown(
+                    label="选择扫描文件", choices=sweep_files, value=sweep_files[-1],
+                    filterable=True,
+                )
+                sweep_tbl = gr.Dataframe(
+                    value=sweep_headline(load_sweep(sweep_files[-1])), interactive=False,
+                )
+                sweep_dd.change(
+                    lambda f: sweep_headline(load_sweep(f)),
+                    inputs=[sweep_dd], outputs=[sweep_tbl],
+                )
+            else:
+                gr.Markdown("*暂无扫描结果，运行 scripts/sweep.py 后刷新*")
+
+        # ---- 研究报告浏览器：reports/*.md（新验证结论的入口）----
+        with gr.Accordion("📚 研究报告（引擎终审/退市回填/调仓周期/缓冲带等验证结论）", open=False):
+            report_files = list_research_reports()
+            if report_files:
+                rep_dd = gr.Dropdown(
+                    label="选择报告", choices=report_files, value=report_files[-1],
+                    filterable=True,
+                )
+                rep_md = gr.Markdown(value=load_research_report(report_files[-1]))
+                rep_dd.change(load_research_report, inputs=[rep_dd], outputs=[rep_md])
+            else:
+                gr.Markdown("*暂无研究报告*")

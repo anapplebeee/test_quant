@@ -5,7 +5,10 @@ import glob
 import json
 
 import gradio as gr
+import pandas as pd
 
+from api.research_api import latest_sweep_headlines
+from api.strategy_api import strategy_catalog
 from frontend.theme import metric_card
 
 
@@ -22,11 +25,11 @@ def _latest_summary() -> tuple[dict | None, str]:
         return json.load(f), strategy
 
 
-STRATEGY_DESC = {
-    "momentum_rotation": "动量轮动：60日动量排名，持Top10等权，5日调仓，熊市空仓",
-    "lowvol_composite": "低波复合：波动率+振幅+下行波动复合排序，低风险选股",
-    "ml_rank": "ML排序：Alpha158因子 + LightGBM打分，按预测分数选股",
-}
+def _strategy_desc(name: str) -> str:
+    for row in strategy_catalog():
+        if row["name"] == name:
+            return f"{row['label']}：{row['desc']}" if row["desc"] else name
+    return "未知策略（未在 REGISTRY/META 注册）"
 
 
 def render():
@@ -36,7 +39,7 @@ def render():
 
         summary, strategy = _latest_summary()
         if summary:
-            desc = STRATEGY_DESC.get(strategy, "未知策略")
+            desc = _strategy_desc(strategy)
             gr.Info(f"当前展示策略: {strategy} — {desc}")
 
             with gr.Accordion(f"📌 当前展示: {strategy}（点击查看策略说明）", open=True):
@@ -62,14 +65,29 @@ def render():
             gr.Info("暂无回测摘要，请先运行回测")
 
         gr.Markdown("---")
-        gr.Markdown("### 📚 策略库")
-        gr.Markdown(f"""
-        | 策略 | 名称 | 说明 |
-        |------|------|------|
-        | `momentum_rotation` | 动量轮动 | {STRATEGY_DESC['momentum_rotation']} |
-        | `lowvol_composite` | 低波复合 | {STRATEGY_DESC['lowvol_composite']} |
-        | `ml_rank` | ML排序 | {STRATEGY_DESC['ml_rank']} |
-        """)
+
+        # 最新验证结果：每个策略最新一次参数扫描的最优行（数据关联 reports/sweep_*.csv）
+        heads = latest_sweep_headlines()
+        if heads is not None and not heads.empty:
+            gr.Markdown("### 🔬 最新验证结果（来自各策略最新参数扫描，按 CAGR 排序）")
+            show = heads.copy()
+            for c, fmt in (("CAGR", "{:+.1%}"), ("最大回撤", "{:+.1%}")):
+                if c in show.columns:
+                    show[c] = show[c].map(lambda v: fmt.format(v) if pd.notna(v) else "-")
+            if "夏普" in show.columns:
+                show["夏普"] = show["夏普"].map(lambda v: f"{v:.2f}" if pd.notna(v) else "-")
+            if "换手x" in show.columns:
+                show["换手x"] = show["换手x"].map(lambda v: f"{v:.1f}x" if pd.notna(v) else "-")
+            gr.Dataframe(value=show, interactive=False)
+
+        gr.Markdown("### 📚 策略库（由后端 REGISTRY 驱动，与回测中心/策略监控同源）")
+        rows = strategy_catalog()
+        md_rows = ["| 策略 | 名称 | 默认换手/持仓 | 说明 |", "|------|------|------|------|"]
+        for r in rows:
+            md_rows.append(
+                f"| `{r['name']}` | {r['label']} | {r['default_rebalance']}日 / Top{r['default_top_k']} | {r['desc']} |"
+            )
+        gr.Markdown("\n".join(md_rows))
 
         gr.Markdown("### 功能模块")
         gr.Markdown("""
@@ -77,7 +95,7 @@ def render():
         |------|------|
         | 🗃️ 数据总览 | 股票池 / 数据覆盖 / 市场概览 |
         | 🔬 因子研究 | IC/ICIR / 因子表现 / 选股能力 |
-        | 📈 回测中心 | 净值曲线 / 交易记录 / 回撤分析 |
+        | 📈 回测中心 | 净值曲线 / 交易记录 / 成本分解 / 参数扫描 / 研究报告 |
         | 📋 每日信号 | 持仓建议 / 调仓信号 / ML预测 |
         | 📡 策略监控 | 任务执行 / 运行状态 / 持仓分析 |
         | 🧩 归因分析 | Brinson归因 / 行业分布 / 收益分解 |

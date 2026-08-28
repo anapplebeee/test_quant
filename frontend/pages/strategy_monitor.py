@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import gradio as gr
 
+from api.strategy_api import STRATEGY_META, strategy_choices as _strategy_choices
 from api.task_api import TASKS, task_queue, get_task_artifacts
 from common import load_stock_names
 from frontend.theme import metric_card, page_header
@@ -169,12 +170,13 @@ def render():
             btn_factor = gr.Button("🔬 因子研究", variant="secondary", size="sm")
             btn_status = gr.Button("🔄 刷新状态", variant="secondary", size="sm")
 
-        strategy_choices = ["momentum_rotation", "lowvol_composite", "ml_rank"]
+        # 策略清单单一数据源：REGISTRY 驱动（与回测中心/首页同源，新策略自动出现）
+        strategy_choices = _strategy_choices()
         strategy_select = gr.Dropdown(
             label="回测策略选择（仅对 📈 运行回测 生效）",
             choices=strategy_choices,
-            value="momentum_rotation",
-            info="momentum_rotation=动量轮动 | lowvol_composite=低波复合 | ml_rank=ML排序",
+            value=strategy_choices[0],
+            info=" | ".join(f"{k}={v['label']}" for k, v in STRATEGY_META.items()),
         )
 
         task_status_bar = gr.Textbox(label="执行状态", interactive=False)
