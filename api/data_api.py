@@ -94,3 +94,33 @@ def get_sample_data() -> pd.DataFrame | None:
         pass
     
     return None
+
+
+def get_stock_list() -> list[str]:
+    """获取所有股票代码列表"""
+    daily_dir = os.path.join("data", "daily")
+    
+    try:
+        if os.path.exists(daily_dir):
+            stocks = [f.replace(".parquet", "") for f in os.listdir(daily_dir) 
+                     if f.endswith(".parquet")]
+            return sorted(stocks)
+    except Exception:
+        pass
+    
+    return []
+
+
+def get_stock_data(symbol: str) -> pd.DataFrame | None:
+    """获取指定股票的日线数据"""
+    daily_file = f"data/daily/{symbol}.parquet"
+    
+    try:
+        if os.path.exists(daily_file):
+            df = pd.read_parquet(daily_file)
+            if "date" in df.columns:
+                return df
+    except Exception:
+        pass
+    
+    return None

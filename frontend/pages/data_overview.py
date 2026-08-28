@@ -4,7 +4,7 @@ from __future__ import annotations
 import gradio as gr
 import plotly.express as px
 
-from api.data_api import get_stock_stats, get_universe, get_sample_data
+from api.data_api import get_stock_stats, get_universe, get_stock_list, get_stock_data
 from frontend.theme import metric_card, page_header
 
 
@@ -26,15 +26,54 @@ def render():
         gr.Dataframe(value=universe_df, interactive=False)
 
         gr.Markdown("---")
-        gr.Markdown("### 🔍 样本数据 (000001 平安银行)")
-        sample_df = get_sample_data()
-        if sample_df is not None:
-            with gr.Row():
-                gr.Markdown(f"**起始:** {sample_df['date'].iloc[0]}")
-                gr.Markdown(f"**结束:** {sample_df['date'].iloc[-1]}")
-                gr.Markdown(f"**交易日:** {len(sample_df):,}")
-
-            fig = px.line(sample_df, x="date", y="close",
-                          labels={"close": "收盘价", "date": "日期"})
-            fig.update_layout(height=350, margin=dict(l=0, r=0, t=0, b=0))
-            gr.Plot(value=fig)
+        gr.Markdown("### 📈 股票日线数据")
+        
+        stock_list = get_stock_list()
+        stock_selector = gr.Dropdown(
+            label="选择股票",
+            choices=stock_list[:100],  # 显示前100只
+            value="000001",
+            interactive=True,
+        )
+        
+        stock_info = gr.Markdown()
+        stock_plot = gr.Plot()
+        
+        def update_stock_chart(symbol):
+            df = get_stock_data(symbol)
+            if df is None or df.empty:
+                return f"未找到 {symbol} 的数据", None
+            
+            name_map = {}
+            try:
+                from common import load_stock_names
+                name_map = load_stock_names()
+            except Exception:
+                pass
+            
+            stock_name = name_map.get(symbol, "")
+            display_name = f"{symbol} {stock_name}" if stock_name else symbol
+            
+            info = f"**{display_name}** | 起始: {df['date'].iloc[0]} | 结束: {df['date'].iloc[-1]} | 交易日: {len(df):,}"
+            
+            fig = px.line(df, x="date", y="close",
+                         labels={"close": "收盘价", "date": "日期"})
+            fig.update_layout(
+                title=f"{display_name} 价格走势",
+                height=400,
+                margin=dict(l=0, r=0, t=40, b=0),
+                xaxis_title="日期",
+                yaxis_title="收盘价",
+            )
+            return info, fig
+        
+        stock_selector.change(
+            fn=update_stock_chart,
+            inputs=[stock_selector],
+            outputs=[stock_info, stock_plot],
+        )
+        
+        # 初始加载
+        init_info, init_plot = update_stock_chart("000001")
+        stock_info.value = init_info
+        stock_plot.value = init_plot
