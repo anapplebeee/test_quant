@@ -14,16 +14,27 @@ def render():
         gr.HTML(page_header("🗃️ 数据总览", "股票池状态 / 数据覆盖 / 市场概览"))
 
         stats = get_stock_stats()
+        # 指标卡与股票池表改为组件 + 定时/手动刷新（修复：新数据落库后页面停在启动时快照）
         with gr.Row():
-            gr.HTML(metric_card("股票数量", f"{stats['stock_count']:,}", "blue"))
-            gr.HTML(metric_card("股票池快照", str(stats['universe_count']), "green"))
-            gr.HTML(metric_card("指数数量", str(stats['index_count']), "purple"))
-            gr.HTML(metric_card("最新分数日期", stats.get('last_score_date', 'N/A'), "teal"))
+            m1 = gr.HTML(metric_card("股票数量", f"{stats['stock_count']:,}", "blue"))
+            m2 = gr.HTML(metric_card("股票池快照", str(stats['universe_count']), "green"))
+            m3 = gr.HTML(metric_card("指数数量", str(stats['index_count']), "purple"))
+            m4 = gr.HTML(metric_card("最新分数日期", stats.get('last_score_date', 'N/A'), "teal"))
 
-        gr.Markdown("---")
-        gr.Markdown("### 📋 最新股票池成分")
-        universe_df = get_universe()
-        gr.Dataframe(value=universe_df, interactive=False)
+        def _refresh_overview():
+            s = get_stock_stats()
+            return (
+                metric_card("股票数量", f"{s['stock_count']:,}", "blue"),
+                metric_card("股票池快照", str(s['universe_count']), "green"),
+                metric_card("指数数量", str(s['index_count']), "purple"),
+                metric_card("最新分数日期", s.get('last_score_date', 'N/A'), "teal"),
+                get_universe(),
+            )
+
+        refresh_btn = gr.Button("🔄 刷新数据概览", size="sm")
+        universe_df = gr.Dataframe(value=get_universe(), interactive=False)
+        refresh_btn.click(_refresh_overview, outputs=[m1, m2, m3, m4, universe_df])
+        gr.Timer(60).tick(_refresh_overview, outputs=[m1, m2, m3, m4, universe_df])
 
         gr.Markdown("---")
         gr.Markdown("### 📈 股票日线数据")

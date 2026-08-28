@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import threading
 from collections import deque
@@ -28,12 +29,13 @@ class TaskStatus(str, Enum):
 
 # 任务定义
 TASKS = {
-    "refresh": {
-        "name": "数据刷新",
-        "script": "scripts/update_data.py",
-        "args": [],
-        "icon": "🔄",
-        "resource": "data",
+"refresh": {
+"name": "数据刷新",
+"script": "scripts/update_data.py",
+"args": [],
+"icon": "🔄",
+"resource": "data",
+"timeout": 1800,
         "outputs": {
             "日线数据": "data/daily/*.parquet",
             "股票池快照": "data/universe/*.parquet",
@@ -41,11 +43,12 @@ TASKS = {
         "result_tab": "🗃️ 数据总览",
     },
     "backtest": {
-        "name": "运行回测",
-        "script": "scripts/run_backtest.py",
-        "args": [],                      # 策略由 UI 选择，动态传入
-        "icon": "📈",
-        "resource": "compute",
+"name": "运行回测",
+"script": "scripts/run_backtest.py",
+"args": [],                      # 策略由 UI 选择，动态传入
+"icon": "📈",
+"resource": "compute",
+"timeout": 3600,
         "outputs": {
             "回测摘要": "reports/summary_*.json",
             "净值曲线": "reports/sweep_equity_*.csv",
@@ -55,11 +58,12 @@ TASKS = {
         "has_strategy_select": True,
     },
     "signal": {
-        "name": "生成信号",
-        "script": "scripts/daily_signal.py",
-        "args": [],
-        "icon": "📋",
-        "resource": "data",
+"name": "生成信号",
+"script": "scripts/daily_signal.py",
+"args": [],
+"icon": "📋",
+"resource": "data",
+"timeout": 1800,
         "outputs": {
             "信号报告": "reports/signal_*.md",
             "ML预测分数": "data/scores/preds.csv",
@@ -67,11 +71,12 @@ TASKS = {
         "result_tab": "📋 每日信号",
     },
     "ml_train": {
-        "name": "ML训练",
-        "script": "scripts/train_ml.py",
-        "args": ["--start", "20240101"],
-        "icon": "🤖",
-        "resource": "compute",
+"name": "ML训练",
+"script": "scripts/train_ml.py",
+"args": ["--start", "20240101"],
+"icon": "🤖",
+"resource": "compute",
+"timeout": 7200,
         "outputs": {
             "ML预测分数": "data/scores/preds.csv",
             "模型元数据": "data/scores/meta.json",
@@ -79,11 +84,12 @@ TASKS = {
         "result_tab": "📋 每日信号",
     },
     "sweep": {
-        "name": "参数扫描",
-        "script": "scripts/sweep.py",
-        "args": [],
-        "icon": "🔍",
-        "resource": "compute",
+"name": "参数扫描",
+"script": "scripts/sweep.py",
+"args": [],
+"icon": "🔍",
+"resource": "compute",
+"timeout": 7200,
         "outputs": {
             "扫描结果": "reports/sweep_*.csv",
             "扫描净值": "reports/sweep_equity_*.csv",
@@ -91,11 +97,12 @@ TASKS = {
         "result_tab": "📈 回测中心",
     },
     "factor_research": {
-        "name": "因子研究",
-        "script": "scripts/factor_research.py",
-        "args": ["--sample", "monthly"],
-        "icon": "🔬",
-        "resource": "data",
+"name": "因子研究",
+"script": "scripts/factor_research.py",
+"args": ["--sample", "monthly"],
+"icon": "🔬",
+"resource": "data",
+"timeout": 3600,
         "outputs": {
             "因子分析输出": "reports/factor_*.csv",
         },
@@ -119,6 +126,7 @@ class Task:
     script: str
     args: list
     resource: str
+    family: str = ""                 # 任务类型（如 'backtest'），实例 id 可能是 'backtest#2'
     status: TaskStatus = TaskStatus.PENDING
     output_lines: list = field(default_factory=list)
     returncode: Optional[int] = None
@@ -126,6 +134,9 @@ class Task:
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     process: Optional[subprocess.Popen] = None
+    on_output: Optional[Callable] = None    # 回调随任务实例注册，不再依赖首次 submit（修复排队任务收不到事件）
+    on_complete: Optional[Callable] = None
+    cancel_requested: bool = False
 
     @property
     def progress_hint(self) -> str:
@@ -174,28 +185,28 @@ class TaskQueue:
 
     def submit(self, task_id: str, on_output: Optional[Callable] = None,
                on_complete: Optional[Callable] = None,
-               extra_args: Optional[list] = None) -> tuple[bool, str]:
+               extra_args: Optional[list] = None) -> tuple[bool, str, str]:
         """提交任务到队列
 
         Args:
             extra_args: 附加命令行参数（如 ["--strategy", "lowvol_composite"]）
 
         Returns:
-            (是否成功, 消息)
+            (是否成功, 消息, 实例ID)  实例ID 可用于 get_output/cancel/完成事件匹配
         """
         if task_id not in TASKS:
-            return False, f"未知任务: {task_id}"
+            return False, f"未知任务: {task_id}", ""
 
         with self._lock:
             # 检查是否有相同任务在排队/运行
             for t in self.tasks.values():
-                if t.task_id == task_id and t.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
-                    return False, f"'{TASKS[task_id]['name']}' 已在队列中，请等待完成"
+                if t.family == task_id and t.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                    return False, f"'{TASKS[task_id]['name']}' 已在队列中，请等待完成", ""
 
             # 创建任务
             tpl = TASKS[task_id]
             # 用序号区分同名的多次执行
-            seq = sum(1 for t in self.tasks.values() if t.task_id == task_id) + 1
+            seq = sum(1 for t in self.tasks.values() if t.family == task_id) + 1
             instance_id = f"{task_id}#{seq}" if seq > 1 else task_id
 
             # 合并默认参数和动态参数
@@ -207,16 +218,34 @@ class TaskQueue:
                 script=tpl["script"],
                 args=final_args,
                 resource=tpl.get("resource", "compute"),
+                family=task_id,
+                on_output=on_output,
+                on_complete=on_complete,
             )
             self.tasks[instance_id] = task
             self.queue_order.append(instance_id)
+            self._trim_history_locked()
 
-        # 启动调度器（如果未运行）
-        self._ensure_dispatcher(on_output, on_complete)
+        # 启动调度器（如果未运行；带锁单例，修复可重复启动调度线程的问题）
+        self._ensure_dispatcher()
 
         # 触发一次调度
-        self._dispatch(on_output, on_complete)
-        return True, f"已提交: {task.name}"
+        self._dispatch()
+        return True, f"已提交: {task.name}", instance_id
+
+    def _trim_history_locked(self) -> None:
+        """历史任务数量控制（防 tasks/output_lines 无界增长），须持有 _lock 调用"""
+        if len(self.tasks) <= self.max_history:
+            return
+        finished = [t for t in self.tasks.values()
+                    if t.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)]
+        finished.sort(key=lambda t: t.created_at)
+        for t in finished[: len(self.tasks) - self.max_history]:
+            self.tasks.pop(t.task_id, None)
+            try:
+                self.queue_order.remove(t.task_id)
+            except ValueError:
+                pass
 
     def get_status_summary(self) -> str:
         """获取所有任务状态摘要"""
@@ -247,33 +276,38 @@ class TaskQueue:
             return "\n".join(lines)
 
     def get_output(self, task_id: str, tail: int = 60) -> str:
-        """获取任务输出"""
+        """获取任务输出（支持实例 id 或任务族 id，后者取最新实例）"""
         with self._lock:
             task = self.tasks.get(task_id)
+            if task is None:
+                candidates = [t for t in self.tasks.values()
+                              if t.family == task_id or t.task_id.startswith(task_id)]
+                task = max(candidates, key=lambda t: t.created_at, default=None)
         if not task:
             return "任务不存在"
         return "\n".join(task.output_lines[-tail:]) or "等待输出..."
 
     def cancel(self, task_id: str) -> tuple[bool, str]:
-        """取消任务"""
+        """取消任务（运行中则杀整个进程树）"""
         with self._lock:
             task = self.tasks.get(task_id)
-        if not task:
-            return False, "任务不存在"
-        if task.status == TaskStatus.PENDING:
-            task.status = TaskStatus.CANCELLED
-            return True, "已取消排队任务"
-        if task.status == TaskStatus.RUNNING and task.process:
-            task.process.terminate()
-            task.status = TaskStatus.CANCELLED
-            return True, "已终止运行中任务"
-        return False, f"无法取消 (状态={task.status.value})"
+            if not task:
+                return False, "任务不存在"
+            if task.status == TaskStatus.PENDING:
+                task.status = TaskStatus.CANCELLED
+                return True, "已取消排队任务"
+            if task.status == TaskStatus.RUNNING and task.process:
+                task.cancel_requested = True
+                _kill_process_tree(task.process)
+                task.status = TaskStatus.CANCELLED
+                return True, "已终止运行中任务（含子进程）"
+            return False, f"无法取消 (状态={task.status.value})"
 
     # ---------- 内部方法 ----------
 
     def _build_command(self, task: Task) -> list[str]:
         """构建安全命令"""
-        if os.system("uv --version >nul 2>&1") == 0 or os.system("uv --version >/dev/null 2>&1") == 0:
+        if shutil.which("uv"):
             return ["uv", "run", "python", "-u", task.script] + task.args
         venv_python = os.path.join(".venv", "Scripts", "python.exe")
         if os.path.exists(venv_python):
@@ -281,22 +315,23 @@ class TaskQueue:
         import sys
         return [sys.executable, "-u", task.script] + task.args
 
-    def _ensure_dispatcher(self, on_output=None, on_complete=None):
-        """确保调度线程运行"""
-        if self._dispatch_thread and self._dispatch_thread.is_alive():
-            return
-        self._dispatch_thread = threading.Thread(
-            target=self._dispatch_loop, args=(on_output, on_complete), daemon=True)
-        self._dispatch_thread.start()
+    def _ensure_dispatcher(self):
+        """确保调度线程运行（带锁单例，回调从任务实例读取）"""
+        with self._lock:
+            if self._dispatch_thread and self._dispatch_thread.is_alive():
+                return
+            self._dispatch_thread = threading.Thread(
+                target=self._dispatch_loop, daemon=True)
+            self._dispatch_thread.start()
 
-    def _dispatch_loop(self, on_output=None, on_complete=None):
+    def _dispatch_loop(self):
         """后台调度循环"""
         import time
         while not self._shutdown:
-            self._dispatch(on_output, on_complete)
+            self._dispatch()
             time.sleep(0.5)
 
-    def _dispatch(self, on_output=None, on_complete=None):
+    def _dispatch(self):
         """调度：检查资源，启动可运行任务"""
         with self._lock:
             # 统计各资源当前运行数
@@ -318,11 +353,11 @@ class TaskQueue:
                     continue  # 资源满，跳过（保留排队）
 
                 # 启动任务
-                self._start_task(task, on_output, on_complete)
+                self._start_task(task)
                 resource_running[task.resource] = current + 1
 
-    def _start_task(self, task: Task, on_output=None, on_complete=None):
-        """启动单个任务"""
+    def _start_task(self, task: Task):
+        """启动单个任务（回调从任务实例读取，每个提交者都能收到自己的事件）"""
         cmd = self._build_command(task)
         task.status = TaskStatus.RUNNING
         task.started_at = datetime.now()
@@ -346,23 +381,50 @@ class TaskQueue:
                 )
                 task.process = process
 
-                for line in process.stdout:
-                    task.output_lines.append(line.rstrip())
-                    if on_output:
-                        try:
-                            on_output(task.task_id, line.rstrip())
-                        except Exception:
-                            pass
+                # 超时看门狗：stdout 迭代会阻塞，无法在主路径轮询超时，
+                # 用独立 Timer 线程到点强杀进程树
+                timeout_s = int(TASKS.get(task.family, {}).get("timeout", 3600))
+                timed_out: list[bool] = []
 
-                returncode = process.wait()
+                def _on_timeout() -> None:
+                    if task.process and task.process.poll() is None:
+                        timed_out.append(True)
+                        task.output_lines.append(
+                            f"\n⏱️ 任务超过 {timeout_s}s 未完成，已强制终止（可在 TASKS 中调 timeout）")
+                        _kill_process_tree(task.process)
+
+                watchdog = threading.Timer(timeout_s, _on_timeout)
+                watchdog.daemon = True
+                watchdog.start()
+
+                try:
+                    for line in process.stdout:
+                        task.output_lines.append(line.rstrip())
+                        if len(task.output_lines) > 2000:  # 防单任务输出无界增长
+                            del task.output_lines[:1000]
+                        if task.on_output:
+                            try:
+                                task.on_output(task.task_id, line.rstrip())
+                            except Exception:
+                                pass
+
+                    returncode = process.wait()
+                finally:
+                    watchdog.cancel()
+
                 task.returncode = returncode
                 task.ended_at = datetime.now()
-                task.status = TaskStatus.COMPLETED if returncode == 0 else TaskStatus.FAILED
+                # 已取消的任务保持 CANCELLED，不被覆盖为 COMPLETED/FAILED
+                if task.status != TaskStatus.CANCELLED:
+                    if timed_out:
+                        task.status = TaskStatus.FAILED
+                    else:
+                        task.status = TaskStatus.COMPLETED if returncode == 0 else TaskStatus.FAILED
                 task.process = None
 
-                if on_complete:
+                if task.on_complete:
                     try:
-                        on_complete(task.task_id, returncode)
+                        task.on_complete(task.task_id, returncode)
                     except Exception:
                         pass
 
@@ -370,10 +432,11 @@ class TaskQueue:
                 task.output_lines.append(f"错误: {e}")
                 task.returncode = -1
                 task.ended_at = datetime.now()
-                task.status = TaskStatus.FAILED
-                if on_complete:
+                if task.status != TaskStatus.CANCELLED:
+                    task.status = TaskStatus.FAILED
+                if task.on_complete:
                     try:
-                        on_complete(task.task_id, -1)
+                        task.on_complete(task.task_id, -1)
                     except Exception:
                         pass
 
@@ -383,6 +446,30 @@ class TaskQueue:
 
 # 全局任务队列单例
 task_queue = TaskQueue()
+
+
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    """杀掉整个进程树：Windows 下 terminate() 只杀 uv 不杀孙进程 python"""
+    if process is None or process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True, timeout=10,
+            )
+        else:
+            import signal
+            process.send_signal(signal.SIGTERM)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
 
 
 def get_task_artifacts(task_id: str, since: Optional[datetime] = None) -> str:
@@ -433,7 +520,8 @@ def get_task_artifacts(task_id: str, since: Optional[datetime] = None) -> str:
 # 兼容旧接口
 def run_task(task_name: str, on_output=None, on_complete=None) -> tuple[bool, str]:
     """提交任务（兼容旧接口）"""
-    return task_queue.submit(task_name, on_output, on_complete)
+    ok, msg, _ = task_queue.submit(task_name, on_output, on_complete)
+    return ok, msg
 
 
 def get_task_status() -> str:

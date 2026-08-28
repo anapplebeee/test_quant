@@ -37,6 +37,14 @@ CUSTOM_CSS = """
 }
 .page-header h1 { margin: 0; color: white; }
 .page-header p { margin: 0.5rem 0 0 0; color: #B0BEC5; }
+
+/* 隐藏 Gradio 框架标识（底部 Runs/API/Gradio logo） */
+footer { visibility: hidden !important; }
+
+/* 隐藏 Plotly 交互工具栏（看板为只读展示，避免 Zoom/Pan 等按钮干扰） */
+.js-plotly-plot .modebar,
+.modebar-container,
+.modebar { display: none !important; }
 """
 
 
@@ -54,10 +62,19 @@ def page_header(title: str, subtitle: str = "") -> str:
     """创建页面头部 HTML"""
     return f"""
     <div class="page-header">
-        <h1>{title}</h1>
-        <p>{subtitle}</p>
+    <h1>{title}</h1>
+    <p>{subtitle}</p>
     </div>
     """
+
+
+DEMO_BANNER = """
+<div style="background:#FFF3E0;border:2px solid #FF9800;border-radius:8px;
+padding:10px 16px;margin:8px 0;color:#E65100;font-weight:600;">
+⚠️ 演示数据：本页当前展示的是占位/随机数据，非真实回测或因子计算结果。
+请勿据此页面内容做任何交易决策。真实结果见 reports/ 目录输出。
+</div>
+"""
 
 
 def soft_theme() -> gr.themes.Soft:

@@ -39,8 +39,8 @@ def on_run_task(task_id: str, strategy: str = ""):
         extra_args = ["--strategy", strategy]
         display_name = f"运行回测 [{strategy}]"
 
-    ok, msg = task_queue.submit(task_id, on_output=_on_output, on_complete=_on_complete,
-                                extra_args=extra_args)
+    ok, msg, instance_id = task_queue.submit(task_id, on_output=_on_output, on_complete=_on_complete,
+                                             extra_args=extra_args)
     if not ok:
         yield msg, task_queue.get_status_summary(), f"⚠️ {msg}", ""
         return
@@ -51,7 +51,8 @@ def on_run_task(task_id: str, strategy: str = ""):
     while True:
         try:
             kind, tid, payload = q.get(timeout=0.5)
-            if tid == task_id and kind == "done":
+            # 匹配本次提交的实例 ID（第二次提交同名任务是 'xxx#2'，不能用族 ID 全等匹配）
+            if tid == instance_id and kind == "done":
                 my_done = True
         except queue.Empty:
             pass
@@ -60,11 +61,11 @@ def on_run_task(task_id: str, strategy: str = ""):
             t.status.value in ("running", "pending")
             for t in task_queue.tasks.values()
         )
-        output = task_queue.get_output(task_id, tail=40)
+        output = task_queue.get_output(instance_id, tail=40)
         status_summary = task_queue.get_status_summary()
 
         if my_done:
-            my_task = task_queue.tasks.get(task_id)
+            my_task = task_queue.tasks.get(instance_id)
             code = my_task.returncode if my_task else -1
             icon = "✅" if code == 0 else "❌"
             yield output, status_summary, (
@@ -112,9 +113,10 @@ def _get_holdings_data():
     stock_names = load_stock_names()
     pos_data = []
     total_value = cash
+    missing = []
 
     for sym, shares in positions.items():
-        price = 0
+        price = None
         daily_path = f"data/daily/{sym}.parquet"
         if os.path.exists(daily_path):
             try:
@@ -122,6 +124,12 @@ def _get_holdings_data():
                 price = df["close"].iloc[-1]
             except Exception:
                 pass
+        if not price or price <= 0:
+            # 缺数据持仓按 price=0 计入会拉低其余持仓权重，单列提示不计入权重分母
+            missing.append({"代码": sym, "名称": stock_names.get(sym, "-"),
+                            "持股数": shares, "最新价": "数据缺失",
+                            "市值": "-", "权重%": "-"})
+            continue
         value = shares * price
         total_value += value
         pos_data.append({
@@ -133,7 +141,9 @@ def _get_holdings_data():
             "权重%": round(value / total_value * 100, 1) if total_value > 0 else 0,
         })
 
-    pos_df = pd.DataFrame(pos_data).sort_values("市值", ascending=False)
+    pos_df = pd.DataFrame(pos_data + missing).sort_values(
+        "市值", ascending=False, key=lambda s: pd.to_numeric(s, errors="coerce").fillna(-1)
+    )
     summary = {"cash": cash, "equity": total_value - cash, "total": total_value}
     return pos_df, summary
 
@@ -174,6 +184,31 @@ def render():
         task_artifacts = gr.Markdown(value="*任务完成后此处显示产出文件清单和结果位置*",
                                      label="📦 任务产出")
 
+        # ===== 取消运行中任务 =====
+        with gr.Row():
+            cancel_select = gr.Dropdown(label="选择要取消的任务实例",
+                                        choices=[], interactive=True)
+            btn_cancel = gr.Button("⛔ 取消所选任务", variant="stop", size="sm")
+
+        def _active_choices():
+            return [
+                f"{t.task_id}（{t.name}·{t.status.value}）"
+                for t in sorted(task_queue.tasks.values(), key=lambda x: x.created_at, reverse=True)
+                if t.status.value in ("running", "pending")
+            ]
+
+        def _on_cancel(selection: str):
+            if not selection:
+                return task_queue.get_status_summary(), "未选择任务", _active_choices()
+            instance_id = selection.split("（")[0].strip()
+            ok, msg = task_queue.cancel(instance_id)
+            return (task_queue.get_status_summary(),
+                    ("✅ " if ok else "⚠️ ") + msg,
+                    _active_choices())
+
+        btn_cancel.click(_on_cancel, inputs=[cancel_select],
+                         outputs=[queue_status, task_status_bar, cancel_select])
+
         btn_refresh.click(on_run_task, inputs=[gr.State("refresh"), strategy_select],
                           outputs=[task_output, queue_status, task_status_bar, task_artifacts])
         btn_backtest.click(on_run_task, inputs=[gr.State("backtest"), strategy_select],
@@ -186,9 +221,16 @@ def render():
                          outputs=[task_output, queue_status, task_status_bar, task_artifacts])
         btn_status.click(on_refresh_status, outputs=[queue_status])
 
-        # 自动刷新队列状态（每3秒）
+        # 自动刷新队列状态 + 跟随最新任务日志（每3秒，修复任务跑完日志区停在旧输出）
         timer = gr.Timer(3)
         timer.tick(on_refresh_status, outputs=[queue_status])
+        timer.tick(
+            lambda: task_queue.get_output(
+                max(task_queue.tasks.values(), key=lambda t: t.created_at).task_id, tail=40)
+            if task_queue.tasks else "",
+            outputs=[task_output],
+        )
+        timer.tick(_active_choices, outputs=[cancel_select])
 
         gr.Markdown("---")
 

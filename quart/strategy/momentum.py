@@ -3,13 +3,14 @@ from __future__ import annotations
 import pandas as pd
 
 from quart.backtest.engine import FLAT, BaseStrategy, MarketData
-from quart.strategy.filters import apply_liquidity
+from quart.strategy.filters import apply_liquidity, regime_flat_series
 
 
 class MomentumRotationStrategy(BaseStrategy):
     """Rank by N-day momentum, hold top-k equally weighted, rebalance every k days.
 
-    Optional regime filter: go to cash when benchmark close is below its MA.
+    Optional regime filter: go to cash when benchmark close is below its MA
+    (with hysteresis band to avoid whipsaw around the MA).
     """
 
     name = "momentum_rotation"
@@ -28,11 +29,21 @@ class MomentumRotationStrategy(BaseStrategy):
         self.industry_level = str(p.get("industry_level", "first"))
         self.use_regime = bool(p.get("use_regime_filter", True))
         self.regime_days = int(p.get("regime_filter_days", 20))
+        # 缓冲带对动量策略有害（实测 2020-2026: band=0.02 使收益 -56%→-82%，
+        # 高波动持仓下延迟逃命的代价 > 节省的切换摩擦），默认 0 保持即时切换
+        self.regime_band = float(p.get("regime_band", 0.0))
         self.warmup = max(self.lookback, self.regime_days) + 1
-        self.momentum = md.closes.pct_change(self.lookback)
+        # fill_method=None：停牌缺口不填充，避免把停牌期算成 0 收益歪曲动量
+        self.momentum = md.closes.pct_change(self.lookback, fill_method=None)
         self.regime_ma = (
             md.benchmark_close.rolling(self.regime_days).mean()
             if md.benchmark_close is not None
+            else None
+        )
+        # 带缓冲带的择时序列：MA 附近穿越从 ~26 次/年降到 ~8 次/年，减少全清全建摩擦
+        self.regime_flat = (
+            regime_flat_series(md.benchmark_close, self.regime_ma, self.regime_band)
+            if self.regime_ma is not None
             else None
         )
         self._next_rebalance = self.warmup
@@ -43,10 +54,8 @@ class MomentumRotationStrategy(BaseStrategy):
             return {}
         self._next_rebalance = i + self.rebalance_days
 
-        if self.use_regime and self.regime_ma is not None:
-            bench_now = md.benchmark_close.iloc[i]
-            ma_now = self.regime_ma.iloc[i]
-            if pd.isna(bench_now) or pd.isna(ma_now) or bench_now < ma_now:
+        if self.use_regime and self.regime_flat is not None:
+            if bool(self.regime_flat.iloc[i]):
                 return {FLAT: 1.0}
 
         scores = self.momentum.iloc[i].dropna()

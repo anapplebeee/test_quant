@@ -51,10 +51,18 @@ def create_app() -> gr.Blocks:
 
 
 if __name__ == "__main__":
+    import os
+
     app = create_app()
+    # 安全默认：仅本机监听。如需局域网访问，设置 QUART_SERVER_NAME=0.0.0.0
+    # 并务必同时设置 QUART_AUTH="user:password" 启用 basic auth（无鉴权暴露 = 任何人可触发训练/回测/读文件）
+    server_name = os.environ.get("QUART_SERVER_NAME", "127.0.0.1")
+    auth = os.environ.get("QUART_AUTH") or None
+    auth_tuple = tuple(auth.split(":", 1)) if auth else None
     app.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
+        server_name=server_name,
+        server_port=int(os.environ.get("QUART_SERVER_PORT", "7860")),
+        auth=auth_tuple,
         share=False,
         show_error=True,
         css=CUSTOM_CSS,

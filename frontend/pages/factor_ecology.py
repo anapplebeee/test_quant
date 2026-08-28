@@ -6,13 +6,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import gradio as gr
 
-from frontend.theme import page_header
+from frontend.theme import DEMO_BANNER, page_header
 
 
 def render():
     """渲染因子生态 Tab"""
     with gr.Tab("🌿 因子生态"):
         gr.HTML(page_header("🌿 因子生态监控", "IC衰减 / IC时序 / 拥挤度 / 失效预警"))
+        gr.HTML(DEMO_BANNER)
 
         # ===== IC 衰减 =====
         gr.Markdown("### 📉 IC 衰减曲线")

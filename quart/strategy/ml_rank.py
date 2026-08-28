@@ -31,9 +31,18 @@ class MLRankStrategy(BaseStrategy):
         self.min_price = p.get("min_price")
         self.use_regime = bool(p.get("use_regime_filter", True))
         self.regime_days = int(p.get("regime_filter_days", 20))
+        self.regime_band = float(p.get("regime_band", 0.0))
         self.regime_ma = (
             md.benchmark_close.rolling(self.regime_days).mean()
             if md.benchmark_close is not None
+            else None
+        )
+        # 带缓冲带的择时序列（hysteresis）：减少 MA 附近的反复全清全建
+        from quart.strategy.filters import regime_flat_series
+
+        self.regime_flat = (
+            regime_flat_series(md.benchmark_close, self.regime_ma, self.regime_band)
+            if self.regime_ma is not None
             else None
         )
 
@@ -58,10 +67,8 @@ class MLRankStrategy(BaseStrategy):
         if row.empty:
             return {}
 
-        if self.use_regime and self.regime_ma is not None:
-            bench_now = md.benchmark_close.iloc[i]
-            ma_now = self.regime_ma.iloc[i]
-            if pd.isna(bench_now) or pd.isna(ma_now) or bench_now < ma_now:
+        if self.use_regime and self.regime_flat is not None:
+            if bool(self.regime_flat.iloc[i]):
                 return {FLAT: 1.0}
 
         if self.min_score is not None:

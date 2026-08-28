@@ -12,6 +12,7 @@ from rich.table import Table
 from quart.backtest.engine import FLAT, MarketData
 from quart.config import PROJECT_ROOT, load_config
 from quart.data.store import BarStore
+from quart.data.store import drop_incomplete_today
 from quart.data.universe import filter_for_simulation
 from quart.notify.dingtalk import send_markdown
 from quart.risk.rules import check_holdings_risk, validate_weights
@@ -46,6 +47,7 @@ def generate_orders(
     cash: float,
     positions: dict[str, int],
     force_flat: bool = False,
+    warnings: list[str] | None = None,
 ) -> tuple[list[OrderPlan], float]:
     equity = cash + sum(
         sh * latest_close[sym]
@@ -62,26 +64,50 @@ def generate_orders(
                 continue
             orders.append(OrderPlan(sym, "SELL", held, round(float(price), 2), 0.0))
         return orders, equity
-    for sym, w in sorted(weights.items()):
+
+    # 先卖后买：卖出回款计入可用资金（否则可能给出资金买不起的组合）
+    sell_proceeds = 0.0
+    for sym, held in sorted(positions.items()):
         price = latest_close.get(sym)
         if pd.isna(price):
             continue
-        desired = w * equity
-        current = positions.get(sym, 0) * price
-        delta = desired - current
-        lots = int(abs(delta) // (price * 100))
-        if delta >= 0 and lots >= 1:
-            orders.append(OrderPlan(sym, "BUY", lots * 100, round(float(price), 2), w))
-        elif delta < 0:
-            held = positions.get(sym, 0)
-            sell = min(held, lots * 100) if w > 0 else held
-            if sell > 0:
-                orders.append(OrderPlan(sym, "SELL", sell, round(float(price), 2), w))
-    for sym, held in positions.items():
-        if held > 0 and weights.get(sym, 0.0) <= 0:
-            price = latest_close.get(sym)
-            if not pd.isna(price):
-                orders.append(OrderPlan(sym, "SELL", held, round(float(price), 2), 0.0))
+        w = weights.get(sym, 0.0)
+        sell = 0
+        if w <= 0:
+            sell = held
+        else:
+            delta = w * equity - held * price
+            if delta < 0:
+                lots = int(abs(delta) // (price * 100))
+                sell = min(held, lots * 100)
+        if sell > 0:
+            orders.append(OrderPlan(sym, "SELL", sell, round(float(price), 2), w))
+            sell_proceeds += sell * price
+
+    budget = max(cash + sell_proceeds, 0.0)
+    buys: list[OrderPlan] = []
+    for sym, w in sorted(weights.items(), key=lambda kv: -kv[1]):
+        if w <= 0:
+            continue
+        price = latest_close.get(sym)
+        if pd.isna(price):
+            continue
+        delta = w * equity - positions.get(sym, 0) * price
+        if delta <= 0:
+            continue
+        if budget <= 0:
+            if warnings is not None:
+                warnings.append(f"{sym}: 可用资金不足，买入计划被裁剪")
+            continue
+        affordable = min(delta, budget)
+        lots = int(affordable // (price * 100))
+        if lots >= 1:
+            buys.append(OrderPlan(sym, "BUY", lots * 100, round(float(price), 2), w))
+            budget -= lots * 100 * price
+        else:
+            if warnings is not None:
+                warnings.append(f"{sym}: 可用资金不足一手，买入计划被裁剪")
+    orders.extend(buys)
     return orders, equity
 
 
@@ -134,7 +160,9 @@ def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: P
         console.print(f"[yellow]警告: 数据落后 {stale} 天[/yellow]")
 
     bars = store.load(include_index=False)
-    bench = store.load_benchmark(cfg["benchmark"])
+    # 盘中手动触发时剔除当日未收盘 partial bar，防止信号基于未收盘价（与 updater 同口径）
+    bars = drop_incomplete_today(bars)
+    bench = drop_incomplete_today(store.load_benchmark(cfg["benchmark"]))
     if bars.empty or bench.empty:
         raise RuntimeError("本地数据为空，请先运行 scripts/update_data.py")
 
@@ -144,6 +172,7 @@ def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: P
         exclude_star=data_cfg.get("exclude_star", True),
         exclude_chinext=data_cfg.get("exclude_chinext", True),
         exclude_st=data_cfg.get("exclude_st", True),
+        min_list_days=int(data_cfg.get("min_list_days", 0)),
     )
 
     md = MarketData.from_bars(bars, benchmark=bench)
@@ -169,8 +198,8 @@ def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: P
         equity=equity,
         max_position_pct=float(risk_cfg["max_position_pct"]),
     )
-    orders, equity = generate_orders(weights, last_close, cash, positions, force_flat=force_flat)
     warnings = list(violations)
+    orders, equity = generate_orders(weights, last_close, cash, positions, force_flat=force_flat, warnings=warnings)
     if force_flat:
         warnings.append("策略发出择时清仓(FLAT)信号：建议全部卖出")
     warnings += check_holdings_risk(

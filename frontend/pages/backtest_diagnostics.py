@@ -7,13 +7,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 import gradio as gr
 
-from frontend.theme import metric_card, page_header
+from frontend.theme import DEMO_BANNER, metric_card, page_header
 
 
 def render():
     """渲染回测诊断 Tab"""
     with gr.Tab("🔍 回测诊断"):
         gr.HTML(page_header("🔍 回测诊断", "Walk-Forward / 过拟合检验 / 参数稳健性"))
+        gr.HTML(DEMO_BANNER)
 
         # ===== Walk-Forward =====
         gr.Markdown("### 🚶 Walk-Forward 检验")

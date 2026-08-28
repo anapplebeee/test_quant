@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from quart.backtest.engine import FLAT, BaseStrategy, MarketData
-from quart.strategy.filters import apply_liquidity
+from quart.strategy.filters import apply_liquidity, regime_flat_series
 
 
 class LowVolCompositeStrategy(BaseStrategy):
@@ -13,14 +13,61 @@ class LowVolCompositeStrategy(BaseStrategy):
     Research basis (scripts/factor_research.py, 2019-2026 full market):
     these three sibling factors hold |IC|~0.065 with stable halves both monthly and weekly.
     Optional short-reversal tilt via rev_weight.
+
+    industry_z=True（策略名 lowvol_indz）：对复合分做行业内 z-score（statistical
+    cluster 映射，组内样本 <5 只回退全市场分）。依据 R2 因子研究：行业内相对
+    反转 rel_ind_mom20 的 ICIR(-0.38) 高于全市场反转，行业中性化使低波打分
+    摆脱行业间波动率基数差异（如银行 vs 券商）。
     """
 
     name = "lowvol_composite"
+    industry_z = False  # prepare() 中按 params 覆盖；类级默认供注册检查
+
+    @staticmethod
+    def _buffer_select(ranked_syms: list[str], held: set[str], top_k: int, buffer: float) -> list[str]:
+        """带排名缓冲带的选股（换手控制）：
+
+        持仓只要仍位于 top_k*(1+buffer) 名内就继续保留，空出的槽位按当前排名补入新名字。
+        buffer=0 时等价于纯 top_k（因持有者若在 top_k 内本就入选，补入者按名次取）。
+        ranked_syms 必须已按分数降序排列且仅含当日可交易+流动性合格者。
+        """
+        keep_n = int(round(top_k * (1 + buffer)))
+        # 关键：按原序列的排名位置判断（先过滤再切片会打乱位置导致出区持仓被误留）
+        keep = [s for pos, s in enumerate(ranked_syms) if s in held and pos < keep_n]
+        new = [s for s in ranked_syms if s not in held][: top_k - len(keep)]
+        picks = keep + new
+        return picks if len(picks) == top_k else ranked_syms[:top_k]
 
     def _z(self, df: pd.DataFrame) -> pd.DataFrame:
         mu = df.mean(axis=1)
         sd = df.std(axis=1).replace(0, np.nan)
         return df.sub(mu, axis=0).div(sd, axis=0).astype("float32")
+
+    def _group_z(self, df: pd.DataFrame, min_group_size: int = 5) -> pd.DataFrame:
+        """逐日行业内 z-score：z = (x - 行业均值) / 行业标准差。
+
+        组内样本 < min_group_size 或标准差为 0 时回退为 NaN（当日剔除）。
+        """
+        from quart.strategy.industries import load_industry_series
+
+        try:
+            ind = load_industry_series("first")
+        except FileNotFoundError:
+            return df
+        g = pd.Series([ind.get(s, "UNKNOWN") for s in df.columns], index=df.columns)
+        grp = df.T.groupby(g)
+        mu = grp.mean().T  # dates × industries
+        cnt = grp.count().T
+        sq = (df.astype("float64") ** 2).T.groupby(g).mean().T
+        sd = np.sqrt((sq - mu.astype("float64") ** 2).clip(lower=0))
+        sd = sd.where(cnt >= min_group_size)
+        sd = sd.replace(0, np.nan)
+
+        mu_b = mu.reindex(columns=g.values)
+        mu_b.columns = df.columns
+        sd_b = sd.reindex(columns=g.values)
+        sd_b.columns = df.columns
+        return df.div(sd_b, axis=0).sub(mu_b.div(sd_b, axis=0), axis=0).astype("float32")
 
     def prepare(self, md: MarketData) -> None:
         self._md = md
@@ -34,7 +81,10 @@ class LowVolCompositeStrategy(BaseStrategy):
         self.use_regime = bool(p.get("use_regime_filter", False))
         self.regime_days = int(p.get("regime_filter_days", 20))
         self.rev_weight = float(p.get("rev_weight", 0.0))
+        self.rank_buffer = float(p.get("rank_buffer", 0.0))
+        self._held: set[str] = set()
         self.selection = str(p.get("selection", "composite"))
+        self.industry_z = bool(p.get("industry_z", False))
 
         c = md.close_val.astype("float32")
         ret1 = c.pct_change(fill_method=None)
@@ -50,13 +100,23 @@ class LowVolCompositeStrategy(BaseStrategy):
         total = (z_vol.fillna(0) + z_amp.fillna(0) + z_lot.fillna(0))
         complete = z_vol.notna() & z_amp.notna() & z_lot.notna()
         comp = total / 3.0
-        self.composite = comp.where(complete).astype("float32")
+        comp = comp.where(complete).astype("float32")
+        if self.industry_z:
+            comp = self._group_z(comp)
+        self.composite = comp
         del vol20, amp20, lotto, z_vol, z_amp, z_lot
 
         self.reversal = (-ret1.rolling(5).mean()).astype("float32")
 
         self.regime_ma = (
             md.benchmark_close.rolling(self.regime_days).mean() if md.benchmark_close is not None else None
+        )
+        # 带缓冲带的择时序列（hysteresis）：减少 MA 附近的反复全清全建
+        self.regime_band = float(p.get("regime_band", 0.02))
+        self.regime_flat = (
+            regime_flat_series(md.benchmark_close, self.regime_ma, self.regime_band)
+            if self.regime_ma is not None
+            else None
         )
         self._next_rebalance = 0
 
@@ -66,10 +126,9 @@ class LowVolCompositeStrategy(BaseStrategy):
             return {}
         self._next_rebalance = i + self.rebalance_days
 
-        if self.use_regime and self.regime_ma is not None:
-            bench_now = md.benchmark_close.iloc[i]
-            ma_now = self.regime_ma.iloc[i]
-            if pd.isna(bench_now) or pd.isna(ma_now) or bench_now < ma_now:
+        if self.use_regime and self.regime_flat is not None:
+            if bool(self.regime_flat.iloc[i]):
+                self._held = set()  # FLAT 已清仓，同步清空持仓记忆
                 return {FLAT: 1.0}
 
         scores = self.composite.iloc[i]
@@ -92,6 +151,8 @@ class LowVolCompositeStrategy(BaseStrategy):
         if len(scores) < self.top_k:
             return {}
 
-        top = scores.nlargest(self.top_k)
-        weight = min(1.0 / len(top), self.max_weight)
-        return {sym: weight for sym in top.index}
+        ranked = scores.sort_values(ascending=False).index.tolist()
+        picks = self._buffer_select(ranked, self._held, self.top_k, self.rank_buffer)
+        self._held = set(picks)
+        weight = min(1.0 / len(picks), self.max_weight)
+        return {sym: weight for sym in picks}

@@ -44,17 +44,19 @@ def render():
                 gr.Markdown(f"**回测区间**: {summary.get('start','')} ~ {summary.get('end','')}")
                 gr.Markdown(f"**基准**: 沪深300 (IDX000300)")
                 bench_color = "green"
-                if summary["total_return"] < 0:
+                # 旧格式 summary 可能缺键，统一 .get 防整页 KeyError 崩溃
+                total_return = summary.get("total_return", 0)
+                if total_return < 0:
                     bench_color = "red"
                 with gr.Row():
-                    gr.HTML(metric_card("策略累计收益", f"{summary['total_return']*100:.1f}%", bench_color))
-                    gr.HTML(metric_card("基准累计收益", f"{summary['bench_total_return']*100:.1f}%", "gray"))
+                    gr.HTML(metric_card("策略累计收益", f"{total_return*100:.1f}%", bench_color))
+                    gr.HTML(metric_card("基准累计收益", f"{summary.get('bench_total_return',0)*100:.1f}%", "gray"))
                     gr.HTML(metric_card("超额年化", f"{summary.get('excess_cagr',0)*100:.1f}%",
                                         "green" if summary.get('excess_cagr',0) > 0 else "red"))
                 with gr.Row():
-                    gr.HTML(metric_card("年化收益", f"{summary['cagr']*100:.1f}%", "blue"))
-                    gr.HTML(metric_card("夏普比率", f"{summary['sharpe']:.2f}", "purple"))
-                    gr.HTML(metric_card("最大回撤", f"{summary['max_drawdown']*100:.1f}%", "red"))
+                    gr.HTML(metric_card("年化收益", f"{summary.get('cagr',0)*100:.1f}%", "blue"))
+                    gr.HTML(metric_card("夏普比率", f"{summary.get('sharpe',0):.2f}", "purple"))
+                    gr.HTML(metric_card("最大回撤", f"{summary.get('max_drawdown',0)*100:.1f}%", "red"))
                     gr.HTML(metric_card("日胜率", f"{summary.get('daily_win_rate',0)*100:.1f}%", "teal"))
         else:
             gr.Info("暂无回测摘要，请先运行回测")

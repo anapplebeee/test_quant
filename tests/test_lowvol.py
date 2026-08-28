@@ -43,6 +43,39 @@ def test_prefers_calm_stock():
     assert w["A"] == 1.0
 
 
+def test_group_z_industry_standardization(monkeypatch):
+    """行业内 z-score：组内 (x-mean)/std，小样本组回退 NaN。"""
+    import quart.strategy.industries as ind_mod
+
+    monkeypatch.setattr(
+        ind_mod, "load_industry_series",
+        lambda level="first": pd.Series({"A": "I1", "B": "I1", "C": "I2", "D": "I2"}),
+    )
+    strat = LowVolCompositeStrategy()
+    dates = pd.date_range("2024-01-01", periods=3)
+    df = pd.DataFrame({"A": 1.0, "B": 3.0, "C": 10.0, "D": 20.0}, index=dates)
+
+    out = strat._group_z(df, min_group_size=2)
+    row = out.iloc[0]
+    assert np.isclose(row["A"], -1.0) and np.isclose(row["B"], 1.0)
+    assert np.isclose(row["C"], -1.0) and np.isclose(row["D"], 1.0)
+
+    # 组内样本不足 → NaN（当日剔除）
+    out_small = strat._group_z(df, min_group_size=5)
+    assert out_small.iloc[0].isna().all()
+
+
+def test_indz_registry_default():
+    from quart.strategy import build_strategy
+
+    s = build_strategy("lowvol_indz", top_k=1)
+    assert s.params.get("industry_z") is True
+    s2 = build_strategy("lowvol_composite", top_k=1, industry_z=True)
+    assert s2.params.get("industry_z") is True
+    s3 = build_strategy("lowvol_composite", top_k=1)
+    assert "industry_z" not in s3.params
+
+
 def test_returns_empty_before_warmup():
     md = make_md()
     strat = LowVolCompositeStrategy(top_k=1, rebalance_days=5, use_regime_filter=False)

@@ -211,7 +211,7 @@ class BacktestEngine:
                 lim = limit_prices(prev_close.get(sym, price_open), sym)
                 if lim and price_open <= lim[1] + 0.001:
                     continue
-                px = price_open * (1 + self._slip(shares * prev_close.get(sym, price_open), adv_row.get(sym, 0) if adv_row is not None else 0))
+                px = price_open * (1 - self._slip(shares * prev_close.get(sym, price_open), adv_row.get(sym, 0) if adv_row is not None else 0))
                 if not np.isfinite(px):
                     continue
                 amount = shares * px
@@ -236,14 +236,14 @@ class BacktestEngine:
             if weight <= 0:
                 sell_shares = shares
             elif delta < -self.min_order_value:
-                px = price_open * (1 + self._slip(current_value, adv_row.get(sym, 0) if adv_row is not None else 0))
+                px = price_open * (1 - self._slip(current_value, adv_row.get(sym, 0) if adv_row is not None else 0))
                 sell_shares = min(shares, (abs(delta) // (px * LOT)) * LOT)
                 sell_shares = int(sell_shares)
             else:
                 continue
             if sell_shares <= 0:
                 continue
-            px = price_open * (1 + self._slip(current_value, adv_row.get(sym, 0) if adv_row is not None else 0))
+            px = price_open * (1 - self._slip(current_value, adv_row.get(sym, 0) if adv_row is not None else 0))
             if not np.isfinite(px) or not np.isfinite(current_value):
                 continue
             amount = sell_shares * px

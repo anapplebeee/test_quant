@@ -71,15 +71,46 @@ def filter_st(codes: list[str], exclude_st: bool = True) -> list[str]:
     return kept
 
 
+def get_list_dates(force_refresh: bool = False) -> pd.Series:
+    """全市场上市首日表（symbol → first bar date），本地缓存 data/universe/list_dates.parquet。
+
+    用于次新股过滤（前视缓解）：回测窗口内才出现的首根 bar 不代表真实上市日，
+    必须查全历史首日；无记录的 symbol 回退用窗口内首日。
+    """
+    from quart.data.store import BarStore
+
+    cache = data_root() / "universe" / "list_dates.parquet"
+    if cache.exists() and not force_refresh:
+        df = pd.read_parquet(cache)
+        return df.set_index("symbol")["first_date"]
+
+    store = BarStore()
+    rows = []
+    for sym in store.symbols():
+        fd = store.first_date(sym)
+        if fd is not None:
+            rows.append({"symbol": sym, "first_date": pd.Timestamp(fd)})
+    df = pd.DataFrame(rows)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(cache, index=False)
+    logger.info("list_dates cached: {} symbols -> {}", len(df), cache)
+    return df.set_index("symbol")["first_date"]
+
+
 def filter_for_simulation(
     bars: pd.DataFrame,
     exclude_star: bool = True,
     exclude_chinext: bool = True,
     exclude_st: bool = True,
+    min_list_days: int = 0,
 ) -> pd.DataFrame:
     """在模拟（回测/信号）路径上对行情截面统一剔除板块与 ST。
 
     数据下载层保留全市场原始数据，仅在模拟时按配置过滤，避免污染底层数据。
+
+    min_list_days > 0 时剔除上市不满 N 个自然日的次新股行：次新股无涨跌幅
+    限制、筹码结构特殊，且部分回测起始日才“出现”的股票实为早已上市
+    （历史数据缺失），须用全历史首日而非窗口内首日判断。
     """
     if bars.empty:
         return bars
@@ -90,7 +121,22 @@ def filter_for_simulation(
             codes = filter_st(codes)
         except Exception as exc:  # 取不到股票名列表时降级为只做板块过滤
             logger.warning("ST filter skipped in simulation: {}", exc)
-    return bars[bars["symbol"].isin(codes)].copy()
+    out = bars[bars["symbol"].isin(codes)]
+    if min_list_days > 0 and not out.empty:
+        try:
+            ld = get_list_dates()
+        except Exception as exc:
+            logger.warning("list_dates unavailable, skip min-list-days filter: {}", exc)
+            return out.copy()
+        first_visible = out.groupby("symbol")["date"].transform("min")
+        list_ref = out["symbol"].map(ld)
+        list_ref = list_ref.fillna(first_visible)
+        keep = (out["date"] - list_ref).dt.days >= min_list_days
+        dropped = int((~keep).sum())
+        if dropped:
+            logger.info("dropped {} bars of stocks listed < {}d", dropped, min_list_days)
+        out = out[keep]
+    return out.copy()
 
 
 def _fetch_from_csindex(index_code: str) -> list[str]:

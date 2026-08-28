@@ -1,16 +1,75 @@
 """回测中心页面"""
 from __future__ import annotations
 
+import queue
+import time
+
+import pandas as pd
 import plotly.graph_objects as go
 import gradio as gr
 
 from api.backtest_api import (
     get_backtest_list,
     get_backtest_summary,
+    get_cost_breakdown,
     get_equity_curve,
     get_trades,
 )
+from api.task_api import TASKS, task_queue
 from frontend.theme import metric_card, page_header
+
+# 可选策略（与后端注册表同步）
+try:
+    from quart.strategy import REGISTRY
+
+    STRATEGY_CHOICES = sorted(REGISTRY.keys())
+except Exception:
+    STRATEGY_CHOICES = ["momentum_rotation", "lowvol_composite", "dual_ma", "ml_rank"]
+
+
+def _default_rebalance(strategy: str) -> int:
+    """读取该策略当前生效的换手频率（config.strategy.overrides 优先）。"""
+    try:
+        from quart.config import load_config
+
+        cfg = load_config()
+        s = cfg.get("strategy") or {}
+        ov = (s.get("overrides") or {}).get(strategy) or {}
+        return int(ov.get("rebalance_days") or s.get("rebalance_days", 5))
+    except Exception:
+        return 5
+
+
+def _cost_md(name: str) -> str:
+    """交易成本分解：引擎已含佣金/印花税/滑点，此前页面不可见。"""
+    c = get_cost_breakdown(name)
+    if not c:
+        return "*成本明细：无交易记录*"
+
+    s = get_backtest_summary(name) or {}
+    # 年化口径：默认 100 万初始资金，区间年数按 start/end 折算
+    years = 1.0
+    if s.get("start") and s.get("end"):
+        try:
+            years = max((pd.Timestamp(s["end"]) - pd.Timestamp(s["start"])).days / 365.25, 0.01)
+        except Exception:
+            years = 1.0
+    annual_turn = c["turnover_x"] / years
+    slip_ratio = c["slip_cost"] / c["total_fee"] if c["total_fee"] else 0.0
+
+    lines = [
+        f"**交易成本合计: {c['total_cost']:,.0f} 元（占初始资金 {c['cost_pct_init'] * 100:.1f}%）**  ",
+        f"手续费 {c['total_fee']:,.0f} + 滑点 {c['slip_cost']:,.0f}"
+        + (f"（滑点为手续费的 {slip_ratio:.1f} 倍）" if c["total_fee"] else ""),
+        f"*累计成交额 {c['turnover_2way'] / 1e4:,.0f} 万元 = 初始资金的 {c['turnover_x']:.1f} 倍"
+        f"（年均 {annual_turn:.1f} 倍换手）| 成交 {c['n_trades']} 笔"
+        f"（买 {c['n_buy']} / 卖 {c['n_sell']}）*",
+    ]
+    tr = float(s.get("total_return") or 0.0)
+    if tr != 0.0:
+        loss_amt = abs(tr) * 1_000_000
+        lines.append(f"*成本相当于{'亏损' if tr < 0 else '收益'}额的 {c['total_cost'] / loss_amt * 100:.0f}%*")
+    return "  \n".join(lines)
 
 
 def _load_backtest(name: str):
@@ -18,14 +77,14 @@ def _load_backtest(name: str):
     if not name:
         return "未选择回测", None, None, None
 
-    # 摘要
+    # 摘要（旧格式 summary 可能缺键，统一 .get 防整页 KeyError 崩溃）
     s = get_backtest_summary(name)
     if s:
         md = (
-            f"**累计收益:** {s['total_return']*100:.1f}% | "
-            f"**年化:** {s['cagr']*100:.1f}% | "
-            f"**夏普:** {s['sharpe']:.2f} | "
-            f"**最大回撤:** {s['max_drawdown']*100:.1f}% | "
+            f"**累计收益:** {s.get('total_return',0)*100:.1f}% | "
+            f"**年化:** {s.get('cagr',0)*100:.1f}% | "
+            f"**夏普:** {s.get('sharpe',0):.2f} | "
+            f"**最大回撤:** {s.get('max_drawdown',0)*100:.1f}% | "
             f"**卡玛:** {s.get('calmar', 0):.2f}  \n"
             f"*区间: {s.get('start','')} ~ {s.get('end','')}*"
         )
@@ -56,6 +115,8 @@ def _load_backtest(name: str):
         fig_dd.update_layout(title="回撤 (%)", height=250,
                              margin=dict(l=0, r=0, t=40, b=0))
 
+    md += "\n\n" + _cost_md(name)
+
     # 交易
     trades_df = get_trades(name)
     trades_display = trades_df.head(30) if trades_df is not None else None
@@ -63,10 +124,100 @@ def _load_backtest(name: str):
     return md, fig_eq, fig_dd, trades_display
 
 
+def _run_backtest(strategy: str, rebalance_days: float, top_k: float, start: str):
+    """提交回测任务并流式回显日志（换手频率/持仓数等参数由前端传入，覆盖 config）。"""
+    if "backtest" not in TASKS:
+        yield "❌ 未找到回测任务定义"
+        return
+
+    try:
+        rb = int(rebalance_days) if rebalance_days else None
+        tk = int(top_k) if top_k else None
+    except Exception:
+        yield "❌ 参数必须为整数"
+        return
+
+    extra = ["--strategy", strategy, "--start", (start or "2020-01-01")]
+    # 显式参数优先于 config.strategy.overrides（build_strategy 内部合并）
+    if rb:
+        extra += ["--rebalance-days", str(rb)]
+    if tk:
+        extra += ["--top-k", str(tk)]
+
+    q: queue.Queue = queue.Queue()
+
+    def _on_output(tid: str, line: str):
+        q.put(("out", tid, line))
+
+    def _on_complete(tid: str, code: int):
+        q.put(("done", tid, code))
+
+    ok, msg, instance_id = task_queue.submit(
+        "backtest", on_output=_on_output, on_complete=_on_complete, extra_args=extra
+    )
+    if not ok:
+        yield f"⚠️ {msg}"
+        return
+
+    lines = [
+        f"🚀 已提交回测：**{strategy}** | 换手 {rb or '默认'} 日 | "
+        f"持仓 {tk or '默认'} | 起始 {start or '2020-01-01'}",
+        "",
+    ]
+    yield "\n".join(lines)
+
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        try:
+            kind, tid, payload = q.get(timeout=2)
+        except Exception:
+            yield "\n".join(lines[-60:])
+            continue
+        if tid != instance_id:
+            continue
+        if kind == "out":
+            lines.append(str(payload).rstrip())
+        elif kind == "done":
+            lines.append("")
+            lines.append(
+                f"{'✅ 完成' if payload == 0 else f'❌ 失败 (code={payload})'} — 点击上方「🔄 刷新回测列表」查看结果"
+            )
+            yield "\n".join(lines[-60:])
+            return
+        yield "\n".join(lines[-60:])
+
+    yield "\n".join(lines[-60:]) + "\n\n⏱️ 已等待 10 分钟，任务仍在后台运行，请到「📡 策略监控」查看"
+
+
 def render():
     """渲染回测中心 Tab"""
     with gr.Tab("📈 回测中心"):
-        gr.HTML(page_header("📈 回测中心", "净值曲线 / 回撤分析 / 交易记录"))
+        gr.HTML(page_header("📈 回测中心", "参数化运行 / 净值曲线 / 回撤分析 / 交易成本 / 交易记录"))
+
+        # ---- 参数面板：策略与关键参数前端可调 ----
+        with gr.Accordion("⚙️ 运行新回测（参数可调，覆盖 config）", open=False):
+            with gr.Row():
+                strategy_in = gr.Dropdown(
+                    label="策略", choices=STRATEGY_CHOICES, value=STRATEGY_CHOICES[0],
+                )
+                rebal_in = gr.Number(
+                    label="换手频率（交易日）", value=_default_rebalance(STRATEGY_CHOICES[0]), precision=0,
+                )
+                topk_in = gr.Number(label="持仓数 top_k", value=10, precision=0)
+                start_in = gr.Textbox(label="起始日期", value="2020-01-01")
+            run_btn = gr.Button("🚀 运行回测", variant="primary")
+            run_out = gr.Markdown()
+
+            def _on_strategy_change(name: str):
+                """切换策略时同步该策略当前生效的换手频率"""
+                return gr.update(value=_default_rebalance(name))
+
+            strategy_in.change(_on_strategy_change, inputs=[strategy_in], outputs=[rebal_in])
+            run_btn.click(
+                _run_backtest,
+                inputs=[strategy_in, rebal_in, topk_in, start_in],
+                outputs=[run_out],
+            )
 
         backtest_names = get_backtest_list()
         if not backtest_names:
@@ -82,6 +233,15 @@ def render():
                 filterable=True,
             )
 
+        def _refresh_list():
+            """重建回测列表并加载最新一个（新回测跑完后可刷新发现）"""
+            names = get_backtest_list()
+            if not names:
+                return gr.update(choices=[], value=None), "暂无回测结果", None, None, None
+            latest = names[-1]
+            md, fe, fd, tr = _load_backtest(latest)
+            return gr.update(choices=names, value=latest), md, fe, fd, tr
+
         summary_md = gr.Markdown(value=init[0])
         equity_plot = gr.Plot(value=init[1])
         dd_plot = gr.Plot(value=init[2])
@@ -91,4 +251,10 @@ def render():
             _load_backtest,
             inputs=[selected_bt],
             outputs=[summary_md, equity_plot, dd_plot, trades_table],
+        )
+
+        refresh_btn = gr.Button("🔄 刷新回测列表", size="sm")
+        refresh_btn.click(
+            _refresh_list,
+            outputs=[selected_bt, summary_md, equity_plot, dd_plot, trades_table],
         )

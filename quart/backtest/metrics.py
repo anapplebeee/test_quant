@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-TRADING_DAYS = 252
+TRADING_DAYS = 243  # A 股实际年均交易日（2019-2025 实测 242.7；用 252 会低估 CAGR ~3.7%）
 
 
 def total_return(equity: pd.Series) -> float:
@@ -61,7 +61,21 @@ def win_rate(returns: pd.Series) -> float:
     return float((rets > 0).sum() / len(rets))
 
 
-def summarize(equity: pd.Series, benchmark: pd.Series | None = None) -> dict:
+def _bench_metrics(result: dict, name: str, bench: pd.Series) -> None:
+    """写入单个基准的对比指标（支持多基准）。"""
+    if bench is None or len(bench) < 2:
+        return
+    result[f"{name}_total_return"] = total_return(bench)
+    result[f"{name}_cagr"] = cagr(bench)
+    result[f"{name}_excess_cagr"] = result["cagr"] - cagr(bench)
+
+
+def summarize(
+    equity: pd.Series,
+    benchmark: pd.Series | None = None,
+    benchmark2: pd.Series | None = None,
+    benchmark2_name: str = "bench2",
+) -> dict:
     rets = equity.pct_change().dropna()
     mdd, trough = max_drawdown(equity)
     result = {
@@ -76,10 +90,9 @@ def summarize(equity: pd.Series, benchmark: pd.Series | None = None) -> dict:
         "calmar": calmar_ratio(equity),
         "daily_win_rate": win_rate(rets),
     }
-    if benchmark is not None and len(benchmark) > 1:
-        result["bench_total_return"] = total_return(benchmark)
-        result["bench_cagr"] = cagr(benchmark)
-        result["excess_cagr"] = result["cagr"] - result["bench_cagr"]
+    _bench_metrics(result, "bench", benchmark)
+    if benchmark2 is not None:
+        _bench_metrics(result, benchmark2_name, benchmark2)
     return result
 
 
@@ -99,6 +112,12 @@ def format_summary(summary: dict) -> str:
         lines += [
             f"基准收益      {pct(summary['bench_total_return'])}",
             f"基准年化      {pct(summary['bench_cagr'])}",
-            f"超额年化      {pct(summary['excess_cagr'])}",
+            f"超额年化      {pct(summary['bench_excess_cagr'])}",
+        ]
+    if "bench2_total_return" in summary:
+        lines += [
+            f"等权基准收益  {pct(summary['bench2_total_return'])}",
+            f"等权基准年化  {pct(summary['bench2_cagr'])}",
+            f"对等权超额    {pct(summary['bench2_excess_cagr'])}",
         ]
     return "\n".join(lines)

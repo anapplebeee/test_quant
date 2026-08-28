@@ -10,13 +10,14 @@ import plotly.graph_objects as go
 import gradio as gr
 
 from common import load_stock_names
-from frontend.theme import page_header
+from frontend.theme import DEMO_BANNER, page_header
 
 
 def render():
     """渲染归因分析 Tab"""
     with gr.Tab("🧩 归因分析"):
         gr.HTML(page_header("🧩 归因分析", "行业归因 / 交易分布 / 收益时序 / 因子暴露"))
+        gr.HTML(DEMO_BANNER)
 
         # ===== 行业交易分布 =====
         gr.Markdown("### 🏭 行业交易分布")
@@ -63,7 +64,10 @@ def render():
             eq["ret"] = eq[strategy_col].pct_change()
             eq["year"] = eq["date"].dt.year
             eq["month"] = eq["date"].dt.month
-            monthly = (eq.groupby(["year", "month"])["ret"].sum().unstack() * 100).round(1)
+            # 复利口径月收益：(1+日收益)连乘 - 1；算术求和在波动大时严重失真
+            monthly = (
+                eq.groupby(["year", "month"])["ret"].apply(lambda r: (1 + r).prod() - 1).unstack() * 100
+            ).round(1)
 
             import plotly.express as px
             fig_m = px.imshow(monthly, color_continuous_scale="RdYlGn",

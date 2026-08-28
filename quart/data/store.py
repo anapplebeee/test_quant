@@ -54,6 +54,17 @@ class BarStore:
         df["date"] = pd.to_datetime(df["date"])
         for col in ("open", "high", "low", "close", "volume", "amount"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
+        # 保护：qfq 前复权在极端股本变动（重组/债转股）下会把历史价格算成负值，
+        # 收益率/波动率因子随之失真。负价格行置 NaN 并告警（应改用 hfq 重拉）。
+        for sym, g in df.groupby("symbol"):
+            neg = g["close"] <= 0
+            if neg.any():
+                logger.warning(
+                    "{} non-positive close rows detected ({}), set to NaN - "
+                    "consider hfq repair (scripts/repair_qfq_negative.py)",
+                    sym, int(neg.sum()),
+                )
+                df.loc[g.index[neg], ["open", "high", "low", "close"]] = float("nan")
         written = 0
         for symbol, group in df.groupby("symbol"):
             path = self._path(str(symbol))

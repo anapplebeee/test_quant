@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import datetime as dt
+
+import pandas as pd
 from apscheduler.schedulers.blocking import BlockingScheduler
 from loguru import logger
 
@@ -9,7 +12,34 @@ from quart.data.updater import update_universe_data
 from quart.pipeline import run_daily
 
 
+def is_trading_day(today: dt.date | None = None) -> bool:
+    """交易日判断：优先 akshare 交易日历（本地缓存），失败回退周一~周五。
+
+    避免节假日照常生成信号：节前旧收盘价输出的交易计划对使用者有误导。
+    """
+    d = today or dt.date.today()
+    cache = PROJECT_ROOT / "data" / "trade_dates.parquet"
+    try:
+        if cache.exists():
+            dates = set(pd.to_datetime(pd.read_parquet(cache)["trade_date"]).dt.date)
+        else:
+            import akshare as ak
+
+            df = ak.tool_trade_date_hist_sina()
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(cache, index=False)
+            dates = set(df["trade_date"])
+        return d in dates
+    except Exception as exc:
+        logger.warning("trade calendar unavailable, fallback to weekday check: {}", exc)
+        return d.weekday() < 5
+
+
 def job_update() -> None:
+    if not is_trading_day():
+        logger.info("non-trading day, skip data update")
+        return
     logger.info("=== data update start ===")
     try:
         cfg = load_config()
@@ -31,11 +61,21 @@ def job_update() -> None:
 
 
 def job_signal() -> None:
+    if not is_trading_day():
+        logger.info("non-trading day, skip signal pipeline")
+        return
     logger.info("=== daily pipeline start ===")
     try:
         run_daily()
     except Exception:
         logger.exception("pipeline failed")
+        # 失败也要告警：否则信号没发出去无人知晓
+        try:
+            from quart.notify.dingtalk import send_markdown
+
+            send_markdown("Quart 信号失败告警", "⚠️ 每日信号流水线执行失败，请检查 logs/quart.log")
+        except Exception:
+            pass
 
 
 def main() -> None:

@@ -13,6 +13,7 @@ from quart.backtest.engine import BacktestEngine, MarketData
 from quart.backtest.metrics import max_drawdown, summarize
 from quart.config import load_config
 from quart.data.store import BarStore
+from quart.data.universe import filter_for_simulation
 from quart.strategy import REGISTRY, build_strategy
 
 console = Console()
@@ -63,6 +64,12 @@ def run_one(md: MarketData, bench_close: pd.Series, strategy_name: str, base_par
     summary = summarize(equity, benchmark=bench_close)
     summary["label"] = " ".join(label_parts)
     summary["n_trades"] = len(engine.trades)
+    years = len(equity) / 252.0
+    if years > 0 and engine.trades:
+        one_side = sum(t.amount for t in engine.trades)
+        summary["turnover"] = one_side / 2.0 / float(equity.mean()) / years
+    else:
+        summary["turnover"] = 0.0
     summary.update(yearly_stats(equity))
     return equity, summary
 
@@ -85,6 +92,20 @@ def main() -> None:
         raise SystemExit("本地数据为空，请先运行 scripts/update_data.py")
 
     md = MarketData.from_bars(bars, benchmark=bench)
+    # 与 run_backtest/pipeline 同口径：板块/ST/次新股过滤（修复后引擎 + 统一过滤的可比基线）
+    data_cfg = cfg.get("data", {})
+    filtered = filter_for_simulation(
+        bars,
+        exclude_star=data_cfg.get("exclude_star", True),
+        exclude_chinext=data_cfg.get("exclude_chinext", True),
+        exclude_st=data_cfg.get("exclude_st", True),
+        min_list_days=int(data_cfg.get("min_list_days", 0)),
+    )
+    dropped = bars["symbol"].nunique() - filtered["symbol"].nunique()
+    if dropped:
+        console.print(f"universe filter: dropped {dropped} symbols, "
+                      f"kept {filtered['symbol'].nunique()}")
+        md = MarketData.from_bars(filtered, benchmark=bench)
     bench_close = bench.set_index("date")["close"].reindex(md.dates).ffill()
     base_params = {k: v for k, v in cfg["strategy"].items() if k != "name"}
     combos = [parse_combo(c) for c in args.combo] or [{}]
@@ -97,7 +118,7 @@ def main() -> None:
         curves[summary["label"]] = equity
         console.print(f"  done: {summary['label']}  cagr={summary['cagr']:.1%} sharpe={summary['sharpe']:.2f} mdd={summary['max_drawdown']:.1%}")
 
-    metric_cols = ["total_return", "cagr", "sharpe", "max_drawdown", "calmar", "excess_cagr", "n_trades"]
+    metric_cols = ["total_return", "cagr", "sharpe", "max_drawdown", "calmar", "bench_excess_cagr", "turnover", "n_trades"]
     years = sorted({k for r in results for k in r if k.isdigit()})
     table = Table(title=f"Sweep: {args.strategy} ({md.dates[0].date()} ~ {md.dates[-1].date()})")
     table.add_column("params")
@@ -108,8 +129,17 @@ def main() -> None:
     for r in results:
         row = [r["label"]]
         for c in metric_cols:
-            v = r[c]
-            row.append(f"{v:.2f}" if c in ("sharpe", "calmar") else (f"{v}" if c == "n_trades" else f"{v:.1%}"))
+            v = r.get(c)
+            if v is None:
+                row.append("-")
+            elif c == "n_trades":
+                row.append(f"{v}")
+            elif c == "turnover":
+                row.append(f"{v:.1f}x")
+            elif c in ("sharpe", "calmar"):
+                row.append(f"{v:.2f}")
+            else:
+                row.append(f"{v:.1%}")
         for y in years:
             row.append(f"{r.get(y, float('nan')):.1%}")
         table.add_row(*row)

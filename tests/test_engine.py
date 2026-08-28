@@ -151,3 +151,33 @@ def test_momentum_strategy_runs_on_synthetic_panel():
     assert equity.notna().all()
     assert len(engine.trades) > 0
     assert (engine.trades[0].date > dates[20])
+
+
+def test_sell_fills_at_adverse_slippage_price():
+    """回归测试：卖出必须按 open*(1-slip) 不利价成交（修复前误用 1+slip 有利价）。"""
+    dates = pd.date_range("2024-01-01", periods=8)
+    bars = make_bars({"A": 10.0}, dates, step=0.0)
+    md = MarketData.from_bars(bars)
+    fees = Fees(commission_rate=0.0, commission_min=0.0, stamp_tax_rate=0.0,
+                transfer_fee_rate=0.0, slippage_rate=0.01)
+    engine = BacktestEngine(md, FlipFlopStrategy(), fees=fees, initial_cash=100_000)
+    engine.run()
+
+    sells = [t for t in engine.trades if t.side == "SELL"]
+    assert sells, "expected at least one SELL trade"
+    for t in sells:
+        assert t.price == pytest.approx(10.0 * 0.99)
+
+
+class FlipFlopStrategy(BaseStrategy):
+    """day0: hold A; day>=2: FLAT."""
+
+    def prepare(self, md: MarketData) -> None:
+        pass
+
+    def target_weights(self, i: int) -> dict[str, float]:
+        from quart.backtest.engine import FLAT
+
+        if i < 2:
+            return {"A": 1.0}
+        return {FLAT: 1.0}

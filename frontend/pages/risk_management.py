@@ -214,7 +214,9 @@ def render():
                     try:
                         df = pd.read_parquet(daily_path)
                         if len(df) > 60:
-                            returns_data.append(df["close"].pct_change().dropna().tail(60))
+                            # 必须以股票代码命名 Series，否则 concat 后列名全是 "close"，
+                            # 无法按持仓代码对齐（修复前有持仓时此处必然崩溃）
+                            returns_data.append(df["close"].pct_change().dropna().tail(60).rename(sym))
                     except Exception:
                         pass
 
@@ -222,23 +224,26 @@ def render():
                 ret_df = pd.concat(returns_data, axis=1).fillna(0)
                 # 用实际权重加权组合收益
                 aligned = ret_df[[c for c in pos_df["code"] if c in ret_df.columns]]
-                w = pos_df.set_index("code").loc[aligned.columns, "value"]
-                w = w / w.sum()
-                portfolio_ret = (aligned * w.values).sum(axis=1)
+                if aligned.empty:
+                    gr.Info("持仓历史数据不足60天，无法计算VaR")
+                else:
+                    w = pos_df.set_index("code").loc[aligned.columns, "value"]
+                    w = w / w.sum()
+                    portfolio_ret = (aligned * w.values).sum(axis=1)
 
-                var_95 = np.percentile(portfolio_ret, 5)
-                cvar_95 = portfolio_ret[portfolio_ret <= var_95].mean()
-                annual_var = var_95 * np.sqrt(252)
+                    var_95 = np.percentile(portfolio_ret, 5)
+                    cvar_95 = portfolio_ret[portfolio_ret <= var_95].mean()
+                    annual_var = var_95 * np.sqrt(252)
 
-                gr.HTML(_metric_row_html([
-                    ("日 VaR(95%) ⓘ", f"{var_95*100:.2f}%",
-                     "95%置信度下单日最大亏损，基于历史模拟法", "C62828"),
-                    ("日 CVaR(95%) ⓘ", f"{cvar_95*100:.2f}%",
-                     "超过VaR时的尾部期望亏损（Expected Shortfall）", "B71C1C"),
-                    ("年化 VaR ⓘ", f"{annual_var*100:.1f}%",
-                     "日VaR×√252，年化尺度风险外推", "6A1B9A"),
-                ]))
-                gr.Plot(value=_build_var_chart(portfolio_ret))
+                    gr.HTML(_metric_row_html([
+                        ("日 VaR(95%) ⓘ", f"{var_95*100:.2f}%",
+                         "95%置信度下单日最大亏损，基于历史模拟法", "C62828"),
+                        ("日 CVaR(95%) ⓘ", f"{cvar_95*100:.2f}%",
+                         "超过VaR时的尾部期望亏损（Expected Shortfall）", "B71C1C"),
+                        ("年化 VaR ⓘ", f"{annual_var*100:.1f}%",
+                         "日VaR×√252，年化尺度风险外推", "6A1B9A"),
+                    ]))
+                    gr.Plot(value=_build_var_chart(portfolio_ret))
             else:
                 gr.Info("持仓历史数据不足60天，无法计算VaR")
 

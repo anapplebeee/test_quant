@@ -5,6 +5,8 @@ data:
   exclude_st: true
   exclude_star: true
   exclude_chinext: true
+  # 次新股过滤（模拟路径剔除上市不满 N 个自然日的行情行；前视/涨跌幅限制缓解）
+  min_list_days: 120
 
 universe:
   default_index: "000300"
@@ -31,6 +33,21 @@ strategy:
   max_weight_pct: 0.15
   min_avg_amount: 50000000
   liquidity_days: 20
+  # 按策略覆盖（优先于上面的全局值；前端回测中心亦可通过 CLI 覆盖）
+  # 依据 2026-08-28 实测：低波策略换手成本吞噬全部 alpha（零成本 +24.4% vs 含成本 -30.9%），
+  # 换手频率 5→20 日后累计 -30.9%→+1.1%、最大回撤 -42.3%→-18.1%、成交 1764→717 笔。
+  overrides:
+    lowvol_composite:
+      rebalance_days: 20
+    lowvol_indz:
+      rebalance_days: 20
+      industry_z: true
+    # 双均线策略每日换仓为成本杀手，默认降频到 5 日
+    dual_ma:
+      rebalance_days: 5
+    # 动量策略对换手不敏感（零成本也亏，属因子失效），保持原频率
+    momentum_rotation:
+      rebalance_days: 5
   min_price: 2.0
 
 risk:

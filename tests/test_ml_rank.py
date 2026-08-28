@@ -86,12 +86,40 @@ def test_ml_rank_regime_filter_goes_cash(tmp_path):
 
     strat = MLRankStrategy(
         scores_path=str(scores_file), top_k=2, rebalance_days=5,
-        use_regime_filter=True, regime_filter_days=20,
+        use_regime_filter=True, regime_filter_days=20, regime_band=0.0,
     )
     strat.prepare(md)
     i = md.dates.get_loc(pd.Timestamp("2024-04-01"))
     from quart.backtest.engine import FLAT
     assert strat.target_weights(i) == {FLAT: 1.0}
+
+
+def test_regime_hysteresis_band_requires_deeper_break():
+    """带缓冲带时：小幅跌破 MA（<2%）不触发 FLAT；深度跌破（>2%）触发。"""
+    import pandas as pd
+
+    from quart.strategy.filters import regime_flat_series
+
+    dates = pd.date_range("2024-01-01", periods=60)
+    ma = pd.Series(100.0, index=dates)
+    # close = 99（仅低于 MA 1%，在缓冲带内）→ 不应翻空
+    close_shallow = pd.Series(99.0, index=dates)
+    flat_shallow = regime_flat_series(close_shallow, ma, band=0.02)
+    assert not flat_shallow.iloc[-1]
+    # close = 97（低于 MA 3%，超出缓冲带）→ 应翻空
+    close_deep = pd.Series(97.0, index=dates)
+    flat_deep = regime_flat_series(close_deep, ma, band=0.02)
+    assert flat_deep.iloc[-1]
+    # 翻空后 close 回到 99（MA 上方 1%，仍在缓冲带内）→ 保持空仓（hysteresis）
+    close_recover = pd.Series(99.0, index=dates)
+    close_recover.iloc[:30] = 97.0  # 先深度跌破
+    flat_recover = regime_flat_series(close_recover, ma, band=0.02)
+    assert flat_recover.iloc[-1]
+    # close 回到 103（MA 上方 3%，明确超出缓冲带）→ 恢复持仓
+    close_full = pd.Series(103.0, index=dates)
+    close_full.iloc[:30] = 97.0
+    flat_full = regime_flat_series(close_full, ma, band=0.02)
+    assert not flat_full.iloc[-1]
 
 
 def test_missing_scores_file_raises(tmp_path):

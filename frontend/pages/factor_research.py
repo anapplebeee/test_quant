@@ -5,7 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import gradio as gr
 
-from frontend.theme import page_header
+from frontend.theme import DEMO_BANNER, page_header
 
 
 FACTOR_DEFS = pd.DataFrame({
@@ -26,7 +26,36 @@ FACTOR_DEFS = pd.DataFrame({
             "20日最大涨幅(负向)", "20日平均跳空"],
 })
 
-# 因子研究结果（实际应从 factor_research.py 输出读取）
+# 因子研究结果：优先读真实研究输出（reports/factor_research*.csv），无则回退演示数据
+
+def _load_real_results() -> pd.DataFrame | None:
+    """合并 factor_research_ext.csv / ext2.csv 的真实 RankIC 结果"""
+    import glob
+    frames = []
+    for path in sorted(glob.glob("reports/factor_research_ext*.csv")):
+        try:
+            df = pd.read_csv(path)
+            first_col = df.columns[0]
+            df = df.rename(columns={
+                first_col: "因子", "ic": "IC", "icir": "ICIR",
+                "pos%": "正率%", "ls_bp": "多空bp",
+            })
+            keep = [c for c in ["因子", "IC", "ICIR", "正率%", "多空bp"] if c in df.columns]
+            if "因子" in keep and len(keep) >= 3:
+                frames.append(df[keep])
+        except Exception:
+            continue
+    if not frames:
+        return None
+    merged = pd.concat(frames, ignore_index=True)
+    # 同名因子取最新（ext2 覆盖 ext）
+    merged = merged.drop_duplicates(subset="因子", keep="last")
+    return merged.sort_values("ICIR", key=lambda s: s.abs(), ascending=False)
+
+
+REAL_RESULTS = _load_real_results()
+
+# 演示数据（仅在无真实输出时展示）
 FACTOR_RESULTS = pd.DataFrame({
     "因子": ["vol20_neg", "amp20_neg", "lottery20_neg", "rev5", "mom60",
              "sharpe_mom60", "pv_corr20_neg", "net_flow20", "downvol_ratio_neg",
@@ -45,12 +74,17 @@ def render():
     """渲染因子研究 Tab"""
     with gr.Tab("🔬 因子研究"):
         gr.HTML(page_header("🔬 因子研究", "因子IC/ICIR分析 / 选股能力评估"))
+        if REAL_RESULTS is not None:
+            gr.Markdown("> ✅ **真实数据**：以下为本项目因子研究脚本的全市场 RankIC 输出"
+                        "（reports/factor_research_ext*.csv，2020-02~2026-07 月度截面，fwd5d）")
+        else:
+            gr.HTML(DEMO_BANNER)
 
         with gr.Accordion("📖 当前因子列表（15个价量因子）", open=False):
             gr.Dataframe(value=FACTOR_DEFS, interactive=False)
 
         gr.Markdown("### 📊 因子 ICIR")
-        results = FACTOR_RESULTS
+        results = REAL_RESULTS if REAL_RESULTS is not None else FACTOR_RESULTS
         colors = ["#e74c3c" if x < 0 else "#2ecc71" for x in results["ICIR"]]
         fig = go.Figure(go.Bar(
             x=results["因子"], y=results["ICIR"],

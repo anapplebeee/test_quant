@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import os
 import time
 from urllib.parse import quote
 
@@ -10,6 +11,10 @@ import httpx
 from loguru import logger
 
 from quart.config import load_config
+
+# 重试：钉钉偶发限流/网络抖动时避免信号告警静默丢失
+_MAX_RETRIES = 2
+_RETRY_SLEEP_S = 1.0
 
 
 def _signed_url(webhook: str, secret: str) -> str:
@@ -22,20 +27,24 @@ def _signed_url(webhook: str, secret: str) -> str:
 
 def send_markdown(title: str, text: str) -> bool:
     cfg = load_config()["notify"]
-    webhook = cfg.get("dingtalk_webhook") or ""
-    secret = cfg.get("dingtalk_secret") or ""
+    # 环境变量优先：避免 webhook/secret 明文进 settings.yaml 随 git 泄露
+    webhook = os.environ.get("QUART_DINGTALK_WEBHOOK") or cfg.get("dingtalk_webhook") or ""
+    secret = os.environ.get("QUART_DINGTALK_SECRET") or cfg.get("dingtalk_secret") or ""
     if not webhook:
         logger.info("dingtalk webhook 未配置，跳过推送")
         return False
     url = _signed_url(webhook, secret) if secret else webhook
     payload = {"msgtype": "markdown", "markdown": {"title": title, "text": text}}
-    try:
-        resp = httpx.post(url, json=payload, timeout=10)
-        data = resp.json()
-        ok = data.get("errcode") == 0
-        if not ok:
-            logger.warning("dingtalk push failed: {}", data)
-        return ok
-    except Exception as exc:
-        logger.warning("dingtalk push error: {}", exc)
-        return False
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            resp = httpx.post(url, json=payload, timeout=10)
+            data = resp.json()
+            ok = data.get("errcode") == 0
+            if ok:
+                return True
+            logger.warning("dingtalk push failed (attempt {}): {}", attempt + 1, data)
+        except Exception as exc:
+            logger.warning("dingtalk push error (attempt {}): {}", attempt + 1, exc)
+        if attempt < _MAX_RETRIES:
+            time.sleep(_RETRY_SLEEP_S)
+    return False

@@ -6,7 +6,9 @@ import pandas as pd
 from loguru import logger
 
 from quart.config import load_config
+from quart.data.hfq_pins import read_hfq_pins
 from quart.data.source_akshare import fetch_daily, fetch_index_daily, polite_sleep
+from quart.data.store import drop_incomplete_today
 
 
 def _drift_ratio(store, symbol: str, overlap_start: str, fresh: pd.DataFrame) -> float:
@@ -37,14 +39,19 @@ def update_universe_data(
     today = dt.date.today().strftime("%Y%m%d")
     ok, empty, failed, refreshed = 0, 0, 0, 0
 
+    # hfq 钉住：被 qfq 伪影污染后修复过的股票，增量/全量均用 hfq，防止损坏复发
+    hfq_pins = read_hfq_pins()
+
     targets = list(symbols[:max_names] if max_names else symbols)
     for n, symbol in enumerate(targets, 1):
         try:
+            adjust = "hfq" if symbol in hfq_pins else cfg["data"]["adjust"]
             first = store.first_date(symbol)
             needs_full = first is None or (start and pd.Timestamp(start) < first)
 
             if needs_full:
-                df = fetch_daily(symbol, start, today, adjust=cfg["data"]["adjust"])
+                df = fetch_daily(symbol, start, today, adjust=adjust)
+                df = drop_incomplete_today(df)  # 盘中更新剔除当日未收盘 partial bar，防未来函数
                 if df.empty:
                     empty += 1
                 else:
@@ -54,12 +61,14 @@ def update_universe_data(
                 last = store.last_date(symbol)
                 overlap_start = (last - pd.Timedelta(days=20)).strftime("%Y%m%d")
                 next_day = (last + pd.Timedelta(days=1)).strftime("%Y%m%d")
-                df = fetch_daily(symbol, overlap_start, today, adjust=cfg["data"]["adjust"])
+                df = fetch_daily(symbol, overlap_start, today, adjust=adjust)
+                df = drop_incomplete_today(df)  # 盘中更新剔除当日未收盘 partial bar
                 if df.empty:
                     empty += 1
                 elif _drift_ratio(store, symbol, overlap_start, df) > 0.002:
                     logger.info("{} adjustment drift detected, full refresh", symbol)
-                    full = fetch_daily(symbol, start, today, adjust=cfg["data"]["adjust"])
+                    full = fetch_daily(symbol, start, today, adjust=adjust)
+                    full = drop_incomplete_today(full)
                     store.save(full, replace=True)
                     refreshed += 1
                     ok += 1
@@ -77,6 +86,7 @@ def update_universe_data(
             logger.info("progress {}/{}, ok={} empty={} failed={} refreshed={}", n, len(targets), ok, empty, failed, refreshed)
 
     bench_df = fetch_index_daily(index_code, start, today)
+    bench_df = drop_incomplete_today(bench_df)
     if not bench_df.empty:
         store.save(bench_df)
     return {"total": len(targets), "ok": ok, "empty": empty, "failed": failed, "refreshed": refreshed}
