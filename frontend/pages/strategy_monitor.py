@@ -1,68 +1,83 @@
-"""策略监控页面 - 任务执行/运行状态/持仓分析"""
+"""策略监控页面 - 任务队列/运行状态/持仓分析"""
 from __future__ import annotations
 
-import glob
 import json
 import os
+import queue
+import threading
+import time
 from datetime import datetime, timedelta
 
 import pandas as pd
 import gradio as gr
 
-from api.task_api import TASKS, get_task_status, run_task
+from api.task_api import TASKS, task_queue
 from common import load_stock_names
 from frontend.theme import metric_card, page_header
 
 
-# 任务执行回调（流式输出）
+# ---------- 任务执行（流式+队列） ----------
+
 def on_run_task(task_id: str):
-    """运行任务并流式输出"""
-    import queue
-    import threading
-
+    """提交任务到队列并流式显示进度"""
     if task_id not in TASKS:
-        yield "❌ 未知任务", "❌"
+        yield "❌ 未知任务", "", ""
         return
 
-    task = TASKS[task_id]
     q: queue.Queue = queue.Queue()
-    done = threading.Event()
 
-    def on_output(line: str):
-        q.put(("out", line))
+    def _on_output(tid: str, line: str):
+        q.put(("out", tid, line))
 
-    def on_complete(code: int):
-        q.put(("done", code))
-        done.set()
+    def _on_complete(tid: str, code: int):
+        q.put(("done", tid, code))
 
-    started = run_task(task_id, on_output=on_output, on_complete=on_complete)
-    if not started:
-        yield "已有任务在运行，请等待完成", "⚠️ 任务冲突"
+    ok, msg = task_queue.submit(task_id, on_output=_on_output, on_complete=_on_complete)
+    if not ok:
+        yield msg, task_queue.get_status_summary(), ""
         return
 
-    lines = []
-    result = None
-    while result is None:
+    task_name = TASKS[task_id]["name"]
+
+    # 流式循环：只要队列中还有运行中/排队的任务就继续刷新
+    while True:
         try:
-            kind, payload = q.get(timeout=0.3)
-            if kind == "out":
-                lines.append(payload)
-                yield "\n".join(lines[-60:]), f"🟡 {task['name']} 运行中..."
-            elif kind == "done":
-                result = payload
+            kind, tid, payload = q.get(timeout=0.5)
         except queue.Empty:
-            if not result:
-                yield "\n".join(lines[-60:]), f"🟡 {task['name']} 运行中..."
+            pass
 
-    status_text = f"✅ {task['name']} 完成" if result == 0 else f"❌ {task['name']} 失败 (code={result})"
-    yield "\n".join(lines[-60:]), status_text
+        # 检查队列状态
+        status_summary = task_queue.get_status_summary()
+        running = task_queue.tasks.get(task_id)
+        has_active = any(t.status.value in ("running", "pending") for t in task_queue.tasks.values())
 
+        if kind == "out" and running:
+            output = task_queue.get_output(task_id, tail=40)
+            yield output, status_summary, f"🟡 {task_name} 运行中..."
+        elif kind == "done":
+            output = task_queue.get_output(task_id, tail=40)
+            icon = "✅" if payload == 0 else "❌"
+            yield output, status_summary, f"{icon} {task_name} {'完成' if payload == 0 else f'失败(code={payload})'}"
+
+        # 如果没有活动任务了，退出循环
+        if not has_active and (kind == "done" or q.empty()):
+            break
+
+    # 最终状态
+    yield task_queue.get_output(task_id, tail=40), task_queue.get_status_summary(), "🏁 队列空闲"
+
+
+def on_refresh_status():
+    """刷新任务状态面板"""
+    return task_queue.get_status_summary()
+
+
+# ---------- 持仓数据 ----------
 
 def _get_holdings_data():
-    """获取持仓数据（业务逻辑在页面层封装为纯数据）"""
     holdings_path = "state/holdings.json"
     if not os.path.exists(holdings_path):
-        return None, None, None
+        return None, None
 
     with open(holdings_path, encoding="utf-8") as f:
         holdings = json.load(f)
@@ -70,7 +85,7 @@ def _get_holdings_data():
     cash = holdings.get("cash", 0)
     positions = holdings.get("positions", {})
     if not positions:
-        return None, None, None
+        return None, None
 
     stock_names = load_stock_names()
     pos_data = []
@@ -97,49 +112,58 @@ def _get_holdings_data():
         })
 
     pos_df = pd.DataFrame(pos_data).sort_values("市值", ascending=False)
-    summary = {
-        "cash": cash,
-        "equity": total_value - cash,
-        "total": total_value,
-    }
-    return pos_df, summary, None
+    summary = {"cash": cash, "equity": total_value - cash, "total": total_value}
+    return pos_df, summary
 
 
 def render():
     """渲染策略监控 Tab"""
     with gr.Tab("📡 策略监控"):
-        gr.HTML(page_header("📡 策略监控", "任务执行 / 调仓日历 / 持仓分析"))
+        gr.HTML(page_header("📡 策略监控", "任务队列 / 并发执行 / 调仓日历 / 持仓分析"))
 
         # ===== 任务执行 =====
-        gr.Markdown("### ⚡ 任务执行")
+        gr.Markdown("### ⚡ 任务执行（支持队列和并发）")
+        gr.Markdown("""
+        > 💡 **并发规则**: 数据类任务（🔄刷新/📋信号/🔬因子）同一时间只运行1个；
+        > 计算类任务（📈回测/🤖ML/🔍扫描）最多并行2个。
+        > 相同任务重复提交会自动去重。
+        """)
 
         with gr.Row():
-            btn_refresh = gr.Button("🔄 数据刷新", variant="secondary")
-            btn_backtest = gr.Button("📈 运行回测", variant="primary")
-            btn_signal = gr.Button("📋 生成信号", variant="secondary")
-            btn_ml = gr.Button("🤖 ML训练", variant="secondary")
-            btn_factor = gr.Button("🔬 因子研究", variant="secondary")
+            btn_refresh = gr.Button("🔄 数据刷新", variant="secondary", size="sm")
+            btn_backtest = gr.Button("📈 运行回测", variant="primary", size="sm")
+            btn_signal = gr.Button("📋 生成信号", variant="secondary", size="sm")
+            btn_ml = gr.Button("🤖 ML训练", variant="secondary", size="sm")
+            btn_factor = gr.Button("🔬 因子研究", variant="secondary", size="sm")
+            btn_status = gr.Button("🔄 刷新状态", variant="secondary", size="sm")
 
-        task_status = gr.Textbox(label="状态", interactive=False)
-        task_output = gr.Textbox(label="任务输出", lines=15, interactive=False)
+        task_status_bar = gr.Textbox(label="执行状态", interactive=False)
+        queue_status = gr.Textbox(label="📋 任务队列", lines=8, interactive=False,
+                                  value=task_queue.get_status_summary())
+        task_output = gr.Textbox(label="最新任务输出", lines=12, interactive=False)
 
         btn_refresh.click(on_run_task, inputs=[gr.State("refresh")],
-                          outputs=[task_output, task_status])
+                          outputs=[task_output, queue_status, task_status_bar])
         btn_backtest.click(on_run_task, inputs=[gr.State("backtest")],
-                           outputs=[task_output, task_status])
+                           outputs=[task_output, queue_status, task_status_bar])
         btn_signal.click(on_run_task, inputs=[gr.State("signal")],
-                         outputs=[task_output, task_status])
+                         outputs=[task_output, queue_status, task_status_bar])
         btn_ml.click(on_run_task, inputs=[gr.State("ml_train")],
-                     outputs=[task_output, task_status])
+                     outputs=[task_output, queue_status, task_status_bar])
         btn_factor.click(on_run_task, inputs=[gr.State("factor_research")],
-                         outputs=[task_output, task_status])
+                         outputs=[task_output, queue_status, task_status_bar])
+        btn_status.click(on_refresh_status, outputs=[queue_status])
+
+        # 自动刷新队列状态（每3秒）
+        timer = gr.Timer(3)
+        timer.tick(on_refresh_status, outputs=[queue_status])
 
         gr.Markdown("---")
 
         # ===== 调仓日历 =====
         gr.Markdown("### 📅 调仓日历")
-        import yaml
         try:
+            import yaml
             with open("config/settings.yaml", encoding="utf-8") as f:
                 cfg = yaml.safe_load(f)
             rebalance_days = cfg.get("strategy", {}).get("rebalance_days", 5)
@@ -163,7 +187,7 @@ def render():
 
         # ===== 持仓分析 =====
         gr.Markdown("### 💰 当前持仓分析")
-        pos_df, summary, _ = _get_holdings_data()
+        pos_df, summary = _get_holdings_data()
 
         if summary:
             with gr.Row():
@@ -172,9 +196,8 @@ def render():
                 gr.HTML(metric_card("账户总值", f"{summary['total']:,.0f} CNY", "purple"))
             gr.Dataframe(value=pos_df, interactive=False)
 
-            # 风控规则
             gr.Markdown("### 🛡️ 风控规则")
-            gr.Markdown(f"""
+            gr.Markdown("""
             | 参数 | 当前值 | 含义 |
             |------|--------|------|
             | `max_position_pct` | 25% | 单只股票最大持仓权重 |
