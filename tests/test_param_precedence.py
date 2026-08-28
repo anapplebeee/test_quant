@@ -8,14 +8,15 @@ from quart.strategy import build_strategy, resolve_params
 
 
 def test_explicit_params_beat_overrides():
-    # settings.yaml: strategy.overrides.lowvol_indz.rebalance_days=20
+    # 显式参数必须赢过 strategy.overrides.lowvol_indz.rebalance_days=40
     s = build_strategy("lowvol_indz", top_k=5, rebalance_days=45)
     assert s.params["rebalance_days"] == 45
 
 
 def test_override_applies_when_not_explicit():
+    # settings.yaml: strategy.overrides.lowvol_indz.rebalance_days=40（2026-08-28 扫描最优）
     s = build_strategy("lowvol_indz")
-    assert s.params.get("rebalance_days") == 20
+    assert s.params.get("rebalance_days") == 40
     assert s.params.get("industry_z") is True
 
 
