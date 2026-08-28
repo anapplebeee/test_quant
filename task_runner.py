@@ -1,10 +1,10 @@
 """任务执行器 - 共享模块"""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
-import time
 from typing import Callable, Optional
 
 
@@ -55,6 +55,18 @@ TASKS = {
 }
 
 
+def _get_python_cmd(script: str) -> list[str]:
+    """获取执行命令，优先使用 uv run"""
+    # 检查是否有 uv
+    if os.system("uv --version >nul 2>&1") == 0:
+        return ["uv", "run", script]
+    # 回退到虚拟环境 Python
+    venv_python = os.path.join(".venv", "Scripts", "python.exe")
+    if os.path.exists(venv_python):
+        return [venv_python, "-u", script]
+    return [sys.executable, "-u", script]
+
+
 def run_task(
     task_id: str,
     on_output: Optional[Callable[[str], None]] = None,
@@ -70,9 +82,12 @@ def run_task(
 
     def _run():
         try:
-            cmd = [sys.executable, script] + (extra_args or [])
-            # 使用项目虚拟环境的 Python
-            env = __import__("os").environ.copy()
+            cmd = _get_python_cmd(script) + (extra_args or [])
+            on_output(f"$ {' '.join(cmd)}")
+
+            env = os.environ.copy()
+            # 强制 Python 无缓冲输出
+            env["PYTHONUNBUFFERED"] = "1"
 
             process = subprocess.Popen(
                 cmd,

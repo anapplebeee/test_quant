@@ -67,9 +67,71 @@ uv run python run_scheduler.py
 - **多源容灾**：东方财富接口失败自动切换腾讯源，全局 socket 超时防挂死
 - **同一套代码**：研究回测与每日实盘信号共用 Strategy 实现，杜绝两套逻辑漂移
 
+## 前端界面 (Streamlit)
+
+平台提供基于 Streamlit 的 Web 界面，包含以下模块：
+
+### 界面架构
+
+```
+streamlit_app.py          主入口 - 策略概览 + 导航
+pages/
+├── 1_data_overview.py    数据总览 - 股票池/数据状态
+├── 2_factor_research.py  因子研究 - IC/ICIR分析
+├── 3_backtest.py         回测中心 - 净值/交易/参数扫描
+├── 4_daily_signal.py     每日信号 - 持仓建议/ML分数
+├── 5_strategy_monitor.py 策略监控 - 任务执行/持仓分析
+├── 6_attribution.py      归因分析 - Brinson/因子暴露
+├── 7_risk_management.py  风险管理 - VaR/流动性/集中度
+├── 8_factor_ecology.py   因子生态 - IC衰减/拥挤度
+├── 9_backtest_diagnostics.py 回测诊断 - WFA/Monte Carlo
+└── 10_parameter_glossary.py  参数词典 - 量化参数说明
+ui_components.py          UI组件库 - 统一样式/可复用组件
+.streamlit/config.toml    Streamlit主题配置
+```
+
+### 前端优化特性
+
+1. **统一样式系统**
+   - 渐变色指标卡片（蓝/绿/橙/红/紫/青）
+   - 响应式导航卡片
+   - 状态徽章和信息盒子
+
+2. **交互增强**
+   - 数据导出按钮（CSV）
+   - 图表悬停交互
+   - 可折叠区域
+
+3. **数据可视化**
+   - Plotly图表统一配置
+   - 表格条件格式化
+   - 热力图/柱状图/折线图
+
+### 启动界面
+
+```powershell
+# 方式1: 启动 Gradio 界面 (推荐，交互性更强)
+uv run python run_gradio.py
+
+# 方式2: 直接启动 Gradio
+uv run python app.py
+
+# 方式3: 启动 Streamlit 界面 (旧版)
+uv run streamlit run streamlit_app.py
+```
+
+### Gradio 新增功能
+
+- ✅ 实时任务监控（后台执行+实时输出）
+- ✅ 参数滑块即时回测
+- ✅ 交互式图表（缩放/悬停/导出）
+- ✅ 响应式布局（移动端适配）
+- ✅ 更好的状态管理
+
 ## Roadmap
 
 - [x] Qlib 集成：Alpha158 因子 + LightGBM 滚动训练（见下）
+- [x] 前端界面优化：统一样式/组件库/响应式布局
 - [ ] walk-forward 滚动参数验证、子区间稳定性评估
 - [ ] MiniQMT(xtquant) 自动执行通道（需券商权限）
 - [ ] ClickHouse 云端化迁移
