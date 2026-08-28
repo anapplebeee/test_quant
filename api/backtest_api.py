@@ -173,11 +173,81 @@ def get_sweep_results(name: str) -> pd.DataFrame | None:
     """获取参数扫描结果"""
     reports_dir = "reports"
     sweep_files = sorted(glob.glob(os.path.join(reports_dir, f"sweep_{name}*.csv")))
-    
+
     try:
         if sweep_files:
             return pd.read_csv(sweep_files[-1])
     except Exception as e:
         _warn("get_sweep_results", e)
-    
+
     return None
+
+
+# ---------------- 区间窗口（近半年/近一年）----------------
+
+_BENCH_CACHE: pd.Series | None = None
+
+
+def _benchmark_series() -> pd.Series:
+    """基准收盘序列（模块级缓存；失败时返回空序列）。"""
+    global _BENCH_CACHE
+    if _BENCH_CACHE is None:
+        try:
+            from quart.config import load_config
+            from quart.data.store import BarStore
+
+            cfg = load_config()
+            b = BarStore().load_benchmark(cfg["benchmark"])
+            b = b.copy()
+            b["date"] = pd.to_datetime(b["date"])
+            _BENCH_CACHE = b.set_index("date")["close"].astype(float).sort_index()
+        except Exception as e:
+            _warn("benchmark_series", e)
+            _BENCH_CACHE = pd.Series(dtype=float)
+    return _BENCH_CACHE
+
+
+def get_window_stats(name: str) -> dict | None:
+    """所选回测的近半年/近一年区间指标（策略 + 基准同期）。
+
+    旧摘要 json 缺少窗口键，此函数从 equity csv 实时补算，与新摘要
+    （metrics.summarize 已内置 last_6m/last_1y）同一套口径。
+    """
+    from quart.backtest.metrics import WINDOWS, max_drawdown, window_stats
+
+    eq_df = get_equity_curve(name)
+    if eq_df is None or eq_df.empty or "equity" not in eq_df.columns:
+        return None
+    try:
+        eq = pd.Series(
+            eq_df["equity"].astype(float).values,
+            index=pd.to_datetime(eq_df["date"]),
+        ).dropna()
+    except Exception as e:
+        _warn("get_window_stats", e)
+        return None
+    if len(eq) < 2:
+        return None
+
+    bench = _benchmark_series()
+    out: dict = {}
+    for label, days in WINDOWS:
+        ws = window_stats(eq, days)
+        entry = {
+            "days": ws["days"],
+            "return": ws["return"],
+            "mdd": ws["mdd"],
+            "ann_vol": ws["ann_vol"],
+            "sharpe": ws["sharpe"],
+        }
+        # 基准取与策略窗口相同的日历区间，保证同期可比
+        if not bench.empty and ws["return"] is not None and ws["days"] > 0:
+            start = eq.index[-(days + 1)]
+            end = eq.index[-1]
+            bwin = bench[(bench.index >= start) & (bench.index <= end)].dropna()
+            if len(bwin) >= 2:
+                entry["bench_return"] = float(bwin.iloc[-1] / bwin.iloc[0] - 1.0)
+                bmdd, _ = max_drawdown(bwin)
+                entry["bench_mdd"] = bmdd
+        out[label] = entry
+    return out

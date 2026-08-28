@@ -112,11 +112,13 @@ def _load_backtest(name: str):
 
     md += "\n\n" + _cost_md(name)
 
-    # 交易
+    # 交易（完整记录，不再截断；表格内滚动）
     trades_df = get_trades(name)
-    trades_display = trades_df.head(30) if trades_df is not None else None
+    n_trades = len(trades_df) if trades_df is not None else 0
+    if trades_df is not None:
+        md += f"\n\n**共 {n_trades} 笔成交**（下表为完整记录，可滚动）"
 
-    return md, fig_eq, fig_dd, trades_display
+    return md, fig_eq, fig_dd, trades_df
 
 
 def _run_backtest(strategy: str, rebalance_days: float, top_k: float, start: str):
@@ -245,7 +247,7 @@ def render():
         summary_md = gr.Markdown(value=init[0])
         equity_plot = gr.Plot(value=init[1])
         dd_plot = gr.Plot(value=init[2])
-        trades_table = gr.Dataframe(value=init[3], interactive=False)
+        trades_table = gr.Dataframe(value=init[3], interactive=False, max_height=420)
 
         selected_bt.change(
             _load_backtest,

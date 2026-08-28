@@ -61,13 +61,49 @@ def win_rate(returns: pd.Series) -> float:
     return float((rets > 0).sum() / len(rets))
 
 
+# 区间窗口：键名 + 交易日数（126≈半年，252≈一年）。摘要/前端/诊断共用同一套口径
+WINDOWS: tuple[tuple[str, int], ...] = (("last_6m", 126), ("last_1y", 252))
+
+
+def window_stats(equity: pd.Series, days: int) -> dict:
+    """近 N 个交易日的区间指标：区间收益 / 区间最大回撤 / 年化波动 / 夏普。
+
+    交易日计数（非日历日）；样本不足时 return/mdd 为 None，调用方按缺省展示。
+    """
+    eq = equity.dropna()
+    if len(eq) < 2:
+        return {"return": None, "mdd": None, "ann_vol": None, "sharpe": None, "days": 0}
+    w = eq.iloc[-(days + 1):]  # 含窗口首日作为基期
+    if len(w) < 2:
+        return {"return": None, "mdd": None, "ann_vol": None, "sharpe": None, "days": len(w) - 1}
+    rets = w.pct_change().dropna()
+    mdd, _ = max_drawdown(w)
+    vol = float(rets.std() * 252**0.5) if len(rets) > 1 else None
+    sharpe = (
+        float(rets.mean() / rets.std() * 252**0.5)
+        if len(rets) > 1 and rets.std() > 0
+        else None
+    )
+    return {
+        "return": float(w.iloc[-1] / w.iloc[0] - 1.0),
+        "mdd": mdd,
+        "ann_vol": vol,
+        "sharpe": sharpe,
+        "days": len(w) - 1,
+    }
+
+
 def _bench_metrics(result: dict, name: str, bench: pd.Series) -> None:
-    """写入单个基准的对比指标（支持多基准）。"""
+    """写入单个基准的对比指标（支持多基准，含区间窗口）。"""
     if bench is None or len(bench) < 2:
         return
     result[f"{name}_total_return"] = total_return(bench)
     result[f"{name}_cagr"] = cagr(bench)
     result[f"{name}_excess_cagr"] = result["cagr"] - cagr(bench)
+    for label, days in WINDOWS:
+        ws = window_stats(bench, days)
+        result[f"{name}_{label}_return"] = ws["return"]
+        result[f"{name}_{label}_mdd"] = ws["mdd"]
 
 
 def summarize(
@@ -90,6 +126,11 @@ def summarize(
         "calmar": calmar_ratio(equity),
         "daily_win_rate": win_rate(rets),
     }
+    # 近半年/近一年区间指标（收益+回撤），与全周期键并存
+    for label, days in WINDOWS:
+        ws = window_stats(equity, days)
+        result[f"{label}_return"] = ws["return"]
+        result[f"{label}_mdd"] = ws["mdd"]
     _bench_metrics(result, "bench", benchmark)
     if benchmark2 is not None:
         _bench_metrics(result, benchmark2_name, benchmark2)
