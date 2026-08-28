@@ -13,6 +13,7 @@ from quart.backtest.engine import BacktestEngine, MarketData
 from quart.backtest.metrics import format_summary, summarize
 from quart.config import load_config
 from quart.data.store import BarStore
+from quart.data.universe import filter_for_simulation
 from quart.strategy import build_strategy
 
 console = Console()
@@ -34,6 +35,16 @@ def main() -> None:
     bench = bench[(bench["date"] >= args.start) & (args.end is None or bench["date"] <= args.end)]
     if bars.empty:
         raise SystemExit("本地数据为空，请先运行 scripts/update_data.py")
+
+    data_cfg = cfg.get("data", {})
+    bars = filter_for_simulation(
+        bars,
+        exclude_star=data_cfg.get("exclude_star", True),
+        exclude_chinext=data_cfg.get("exclude_chinext", True),
+        exclude_st=data_cfg.get("exclude_st", True),
+    )
+    if bars.empty:
+        raise SystemExit("过滤板块/ST 后无可用标的，请检查 data 配置或本地数据")
 
     params = dict(cfg["strategy"])
     params.pop("name", None)

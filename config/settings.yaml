@@ -3,6 +3,8 @@ data:
   adjust: qfq
   sleep_seconds: 0.35
   exclude_st: true
+  exclude_star: true
+  exclude_chinext: true
 
 universe:
   default_index: "000300"

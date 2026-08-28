@@ -12,6 +12,7 @@ from rich.table import Table
 from quart.backtest.engine import FLAT, MarketData
 from quart.config import PROJECT_ROOT, load_config
 from quart.data.store import BarStore
+from quart.data.universe import filter_for_simulation
 from quart.notify.dingtalk import send_markdown
 from quart.risk.rules import check_holdings_risk, validate_weights
 from quart.strategy import build_strategy
@@ -136,6 +137,14 @@ def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: P
     bench = store.load_benchmark(cfg["benchmark"])
     if bars.empty or bench.empty:
         raise RuntimeError("本地数据为空，请先运行 scripts/update_data.py")
+
+    data_cfg = cfg.get("data", {})
+    bars = filter_for_simulation(
+        bars,
+        exclude_star=data_cfg.get("exclude_star", True),
+        exclude_chinext=data_cfg.get("exclude_chinext", True),
+        exclude_st=data_cfg.get("exclude_st", True),
+    )
 
     md = MarketData.from_bars(bars, benchmark=bench)
     strategy_params = {k: v for k, v in cfg["strategy"].items() if k != "name"}
