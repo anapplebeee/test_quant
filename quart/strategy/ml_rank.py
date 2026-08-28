@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from quart.backtest.engine import BaseStrategy, MarketData
+from quart.backtest.engine import FLAT, BaseStrategy, MarketData
 from quart.config import PROJECT_ROOT
 from quart.strategy.filters import apply_liquidity
 
@@ -28,6 +28,7 @@ class MLRankStrategy(BaseStrategy):
         self.stale_days = int(p.get("stale_days", 35))
         self.min_avg_amount = p.get("min_avg_amount")
         self.liquidity_days = int(p.get("liquidity_days", 20))
+        self.min_price = p.get("min_price")
         self.use_regime = bool(p.get("use_regime_filter", True))
         self.regime_days = int(p.get("regime_filter_days", 20))
         self.regime_ma = (
@@ -61,7 +62,7 @@ class MLRankStrategy(BaseStrategy):
             bench_now = md.benchmark_close.iloc[i]
             ma_now = self.regime_ma.iloc[i]
             if pd.isna(bench_now) or pd.isna(ma_now) or bench_now < ma_now:
-                return {}
+                return {FLAT: 1.0}
 
         if self.min_score is not None:
             row = row[row > float(self.min_score)]
@@ -71,7 +72,7 @@ class MLRankStrategy(BaseStrategy):
         volume_row = md.volumes.iloc[i]
         tradable = volume_row[volume_row.fillna(0) > 0].index
         row = row.loc[row.index.intersection(tradable)]
-        row = apply_liquidity(row, md, i, self.min_avg_amount, self.liquidity_days)
+        row = apply_liquidity(row, md, i, self.min_avg_amount, self.liquidity_days, self.min_price)
         if row.empty:
             return {}
 

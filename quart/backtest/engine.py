@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from quart.config import load_config
@@ -15,6 +16,7 @@ class Fees:
     stamp_tax_rate: float = 0.0005
     transfer_fee_rate: float = 0.00001
     slippage_rate: float = 0.001
+    impact_coef: float = 0.0
 
     @classmethod
     def from_config(cls) -> "Fees":
@@ -25,6 +27,7 @@ class Fees:
             stamp_tax_rate=cfg["stamp_tax_rate"],
             transfer_fee_rate=cfg["transfer_fee_rate"],
             slippage_rate=cfg["slippage_rate"],
+            impact_coef=cfg.get("impact_coef", 0.0),
         )
 
     def buy_cost(self, amount: float) -> float:
@@ -115,6 +118,25 @@ class Trade:
 
 LOT = 100
 MIN_ORDER_VALUE = 1000.0
+FLAT = "__FLAT__"
+
+
+def price_limit_pct(symbol: str) -> float:
+    code = symbol.split(".")[0]
+    if code.startswith(("300", "301", "688", "689")):
+        return 0.20
+    if code.startswith(("43", "82", "83", "87", "88", "92")):
+        return 0.30
+    return 0.10
+
+
+def limit_prices(prev_close: float, symbol: str) -> tuple[float, float] | None:
+    if pd.isna(prev_close) or prev_close <= 0:
+        return None
+    pct = price_limit_pct(symbol)
+    up = round(prev_close * (1 + pct) + 1e-9, 2)
+    down = round(prev_close * (1 - pct) - 1e-9, 2)
+    return up, down
 
 
 class BacktestEngine:
@@ -139,10 +161,23 @@ class BacktestEngine:
         for i in range(len(dates)):
             date = dates[i]
             if pending_targets is not None and i > 0:
+                was_flat = bool(pending_targets.get(FLAT))
                 cash = self._rebalance(cash, positions, pending_targets, i)
+                if was_flat and positions:
+                    pending_targets = {FLAT: 1.0}
+                    equity = cash + self._market_value(positions, i)
+                    equity_values.append(equity)
+                    continue
+                pending_targets = None
             equity = cash + self._market_value(positions, i)
             equity_values.append(equity)
-            pending_targets = self.strategy.target_weights(i) or None
+            raw = self.strategy.target_weights(i)
+            if raw and FLAT in raw:
+                pending_targets = {FLAT: 1.0}
+            elif raw:
+                pending_targets = raw
+            else:
+                pending_targets = None
 
         return pd.Series(equity_values, index=dates, name="equity")
 
@@ -150,11 +185,41 @@ class BacktestEngine:
         close_row = self.md.close_val.iloc[i]
         return sum(shares * close_row[sym] for sym, shares in positions.items() if shares > 0 and not pd.isna(close_row.get(sym)))
 
+    def _slip(self, notional: float, adv: float) -> float:
+        base = self.fees.slippage_rate
+        if self.fees.impact_coef <= 0 or adv <= 0:
+            return base
+        participation = min(notional / adv, 1.0)
+        return base + self.fees.impact_coef * float(np.sqrt(participation))
+
     def _rebalance(self, cash: float, positions: dict[str, int], targets: dict[str, float], i: int) -> float:
         md = self.md
         prev_close = md.close_val.iloc[i - 1]
         open_row = md.opens.iloc[i]
+        adv_row = None
+        if md.amounts is not None:
+            lo = max(0, i - 5)
+            adv_row = md.amounts.iloc[lo:i].mean()
         equity_mark = cash + self._market_value(positions, i - 1)
+
+        if targets.get(FLAT):
+            for sym in sorted(positions.keys()):
+                shares = positions[sym]
+                price_open = open_row.get(sym)
+                if shares <= 0 or pd.isna(price_open):
+                    continue
+                lim = limit_prices(prev_close.get(sym, price_open), sym)
+                if lim and price_open <= lim[1] + 0.001:
+                    continue
+                px = price_open * (1 + self._slip(shares * prev_close.get(sym, price_open), adv_row.get(sym, 0) if adv_row is not None else 0))
+                if not np.isfinite(px):
+                    continue
+                amount = shares * px
+                fee = self.fees.sell_cost(amount)
+                cash += amount - fee
+                del positions[sym]
+                self.trades.append(Trade(date=md.dates[i], symbol=sym, side="SELL", shares=shares, price=round(px, 4), amount=round(amount, 2), fee=round(fee, 2)))
+            return cash
 
         for sym in sorted(positions.keys()):
             weight = targets.get(sym, 0.0)
@@ -162,20 +227,25 @@ class BacktestEngine:
             price_open = open_row.get(sym)
             if shares <= 0 or pd.isna(price_open):
                 continue
+            lim = limit_prices(prev_close.get(sym, price_open), sym)
+            if lim and price_open <= lim[1] + 0.001:
+                continue
             current_value = shares * prev_close.get(sym, price_open)
             desired_value = weight * equity_mark
             delta = desired_value - current_value
             if weight <= 0:
                 sell_shares = shares
             elif delta < -self.min_order_value:
-                px = self.fees.sell_price(price_open)
+                px = price_open * (1 + self._slip(current_value, adv_row.get(sym, 0) if adv_row is not None else 0))
                 sell_shares = min(shares, (abs(delta) // (px * LOT)) * LOT)
                 sell_shares = int(sell_shares)
             else:
                 continue
             if sell_shares <= 0:
                 continue
-            px = self.fees.sell_price(price_open)
+            px = price_open * (1 + self._slip(current_value, adv_row.get(sym, 0) if adv_row is not None else 0))
+            if not np.isfinite(px) or not np.isfinite(current_value):
+                continue
             amount = sell_shares * px
             fee = self.fees.sell_cost(amount)
             cash += amount - fee
@@ -186,16 +256,23 @@ class BacktestEngine:
                 del positions[sym]
             self.trades.append(Trade(date=md.dates[i], symbol=sym, side="SELL", shares=sell_shares, price=round(px, 4), amount=round(amount, 2), fee=round(fee, 2)))
 
-        buy_syms = [s for s, w in sorted(targets.items(), key=lambda kv: -kv[1]) if w > 0]
+        buy_syms = [s for s, w in sorted(targets.items(), key=lambda kv: -kv[1]) if w > 0 and s != FLAT]
         for sym in buy_syms:
             shares_held = positions.get(sym, 0)
             price_open = open_row.get(sym)
             if pd.isna(price_open):
                 continue
-            px = self.fees.buy_price(price_open)
+            lim = limit_prices(prev_close.get(sym, price_open), sym)
+            if lim and price_open >= lim[0] - 0.001:
+                continue
             current_value = shares_held * prev_close.get(sym, price_open)
             desired_value = targets[sym] * equity_mark
             budget = min(desired_value - current_value, cash * 0.995)
+            if budget < max(self.min_order_value, LOT * price_open):
+                continue
+            px = price_open * (1 + self._slip(min(budget, desired_value - current_value), adv_row.get(sym, 0) if adv_row is not None else 0))
+            if not np.isfinite(px) or not np.isfinite(budget):
+                continue
             if budget < max(self.min_order_value, LOT * px):
                 continue
             est_unit_cost = px * (1 + self.fees.commission_rate + self.fees.transfer_fee_rate)

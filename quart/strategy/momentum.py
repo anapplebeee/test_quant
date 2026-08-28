@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quart.backtest.engine import BaseStrategy, MarketData
+from quart.backtest.engine import FLAT, BaseStrategy, MarketData
 from quart.strategy.filters import apply_liquidity
 
 
@@ -23,6 +23,7 @@ class MomentumRotationStrategy(BaseStrategy):
         self.max_weight = float(p.get("max_weight_pct", 0.15))
         self.min_avg_amount = p.get("min_avg_amount")
         self.liquidity_days = int(p.get("liquidity_days", 20))
+        self.min_price = p.get("min_price")
         self.industry_neutral = bool(p.get("industry_neutral", False))
         self.industry_level = str(p.get("industry_level", "first"))
         self.use_regime = bool(p.get("use_regime_filter", True))
@@ -46,13 +47,13 @@ class MomentumRotationStrategy(BaseStrategy):
             bench_now = md.benchmark_close.iloc[i]
             ma_now = self.regime_ma.iloc[i]
             if pd.isna(bench_now) or pd.isna(ma_now) or bench_now < ma_now:
-                return {}
+                return {FLAT: 1.0}
 
         scores = self.momentum.iloc[i].dropna()
         volume_row = md.volumes.iloc[i]
         tradable = volume_row[volume_row.fillna(0) > 0].index
         scores = scores.loc[scores.index.intersection(tradable)]
-        scores = apply_liquidity(scores, md, i, self.min_avg_amount, self.liquidity_days)
+        scores = apply_liquidity(scores, md, i, self.min_avg_amount, self.liquidity_days, self.min_price)
         if self.industry_neutral:
             from quart.strategy.industries import industry_neutralize, load_industry_series
             try:

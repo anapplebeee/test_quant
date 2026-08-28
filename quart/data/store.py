@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import duckdb
 import pandas as pd
 from loguru import logger
 
 from quart.config import data_root
+
+CN_TZ = ZoneInfo("Asia/Shanghai")
 
 BAR_COLUMNS = ["date", "symbol", "open", "high", "low", "close", "volume", "amount"]
 
@@ -16,9 +20,9 @@ def drop_incomplete_today(df: pd.DataFrame) -> pd.DataFrame:
     """盘中调用时剔除当天未收盘的K线，只保留已完成的历史bar."""
     if df is None or df.empty:
         return df
-    now = dt.datetime.now()
-    market_open_minutes = 15 * 60 + 30
-    if now.hour * 60 + now.minute >= market_open_minutes:
+    now = dt.datetime.now(CN_TZ)
+    market_close_minutes = 15 * 60 + 30
+    if now.hour * 60 + now.minute >= market_close_minutes:
         return df
     today_midnight = pd.Timestamp(now.date())
     return df[df["date"] < today_midnight]
@@ -58,7 +62,9 @@ class BarStore:
                 group = pd.concat([existing, group], ignore_index=True)
                 group = group.drop_duplicates(subset=["date", "symbol"], keep="last")
             group = group.sort_values("date").reset_index(drop=True)
-            group.to_parquet(path, index=False)
+            tmp = path.with_suffix(".parquet.tmp")
+            group.to_parquet(tmp, index=False)
+            os.replace(tmp, path)
             written += len(group)
         return written
 
@@ -78,12 +84,12 @@ class BarStore:
         if not files:
             return EMPTY_BARS.copy()
         quoted = "[" + ", ".join(f"'{f.as_posix()}'" for f in sorted(files)) + "]"
-        conds = []
+        conds = ["date IS NOT NULL"]
         if start:
             conds.append(f"date >= '{start}'")
         if end:
             conds.append(f"date <= '{end}'")
-        where = ("WHERE " + " AND ".join(conds)) if conds else ""
+        where = "WHERE " + " AND ".join(conds)
         query = f"SELECT * FROM read_parquet({quoted}) {where} ORDER BY date, symbol"
         return duckdb.sql(query).df()
 
@@ -138,3 +144,23 @@ class BarStore:
 
     def symbols(self) -> list[str]:
         return sorted(p.stem for p in self.daily_dir.glob("*.parquet"))
+
+    def freshness_days(self, reference: str | None = None) -> int | None:
+        """Newest bar age in calendar days vs CN-now (or given YYYYMMDD)."""
+        import datetime as _dt
+
+        if reference:
+            today = pd.Timestamp(_dt.datetime.strptime(reference, "%Y%m%d").date())
+        else:
+            today = pd.Timestamp(dt.datetime.now(CN_TZ).date())
+        latest = None
+        for d in (self.daily_dir, self.index_dir):
+            for p in d.glob("*.parquet"):
+                try:
+                    mx = pd.read_parquet(p, columns=["date"])["date"].max()
+                except Exception:
+                    continue
+                latest = mx if latest is None or mx > latest else latest
+        if latest is None:
+            return None
+        return int((today - pd.Timestamp(latest).normalize()).days)

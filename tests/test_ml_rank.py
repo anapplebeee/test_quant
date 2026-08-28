@@ -90,7 +90,8 @@ def test_ml_rank_regime_filter_goes_cash(tmp_path):
     )
     strat.prepare(md)
     i = md.dates.get_loc(pd.Timestamp("2024-04-01"))
-    assert strat.target_weights(i) == {}
+    from quart.backtest.engine import FLAT
+    assert strat.target_weights(i) == {FLAT: 1.0}
 
 
 def test_missing_scores_file_raises(tmp_path):

@@ -7,11 +7,11 @@ import pytest
 from quart.backtest.engine import BaseStrategy, BacktestEngine, Fees, MarketData
 
 
-def make_bars(specs: dict[str, float], dates) -> pd.DataFrame:
+def make_bars(specs: dict[str, float], dates, step: float = 1.0) -> pd.DataFrame:
     frames = []
     for symbol, base_price in specs.items():
         n = len(dates)
-        ramp = np.arange(n) * 1.0
+        ramp = np.arange(n) * step
         frames.append(pd.DataFrame({
             "date": pd.to_datetime(dates),
             "symbol": symbol,
@@ -59,7 +59,7 @@ class RotateStrategy(BaseStrategy):
 
 def test_no_lookahead_first_trade_on_next_open():
     dates = pd.date_range("2024-01-01", periods=10)
-    bars = make_bars({"600001": 10.0}, dates)
+    bars = make_bars({"600001": 10.0}, dates, step=0.5)
     md = MarketData.from_bars(bars)
     engine = BacktestEngine(md, OnceStrategy("600001"), fees=ZERO_FEES, initial_cash=100_000)
     equity = engine.run()
@@ -67,22 +67,22 @@ def test_no_lookahead_first_trade_on_next_open():
     assert len(engine.trades) == 1
     t = engine.trades[0]
     assert t.date == pd.Timestamp("2024-01-02")
-    assert t.price == pytest.approx(11.0)
-    assert t.shares == 9000
-    assert equity.iloc[-1] == pytest.approx(1000 + 9000 * 19.0)
+    assert t.price == pytest.approx(10.5)
+    assert t.shares == 9400
+    assert equity.iloc[-1] == pytest.approx(1300 + 9400 * 14.5)
 
 
 def test_rotation_sells_then_buys_with_lots():
     dates = pd.date_range("2024-01-01", periods=6)
-    bars = make_bars({"A": 10.0, "B": 10.0}, dates)
+    bars = make_bars({"A": 10.0, "B": 10.0}, dates, step=0.0)
     md = MarketData.from_bars(bars)
     engine = BacktestEngine(md, RotateStrategy(), fees=ZERO_FEES, initial_cash=100_000)
     engine.run()
 
     sells = [t for t in engine.trades if t.side == "SELL"]
     buys = [t for t in engine.trades if t.side == "BUY"]
-    assert any(t.symbol == "A" and t.shares == 9000 for t in sells)
-    assert any(t.symbol == "B" and t.shares == 8300 for t in buys)
+    assert any(t.symbol == "A" and t.shares == 9900 for t in sells)
+    assert any(t.symbol == "B" and t.shares == 9900 for t in buys)
     b = next(t for t in buys if t.symbol == "B")
     assert b.date == pd.Timestamp("2024-01-04")
 

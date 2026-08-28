@@ -16,6 +16,7 @@ backtest:
   stamp_tax_rate: 0.0005
   transfer_fee_rate: 0.00001
   slippage_rate: 0.001
+  impact_coef: 0.10
   min_order_value: 1000.0
 
 strategy:
@@ -28,6 +29,7 @@ strategy:
   max_weight_pct: 0.15
   min_avg_amount: 50000000
   liquidity_days: 20
+  min_price: 2.0
 
 risk:
   max_position_pct: 0.25

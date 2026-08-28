@@ -38,6 +38,7 @@ def sharpe_ratio(equity: pd.Series, rf_annual: float = 0.0) -> float:
 
 
 def max_drawdown(equity: pd.Series) -> tuple[float, pd.Timestamp | None]:
+    equity = equity.dropna()
     if len(equity) < 2:
         return 0.0, None
     cummax = equity.cummax()

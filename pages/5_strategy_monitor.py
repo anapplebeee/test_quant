@@ -11,10 +11,81 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from common import load_stock_names
+from task_runner import TASKS, run_task
 
 st.set_page_config(page_title="策略监控 - Quart", page_icon="📡", layout="wide")
 
 st.title("📡 策略监控")
+
+# ========== 任务执行面板 ==========
+st.subheader("任务执行")
+
+# 初始化 session state 用于日志输出
+if "task_log" not in st.session_state:
+    st.session_state.task_log = []
+if "task_running" not in st.session_state:
+    st.session_state.task_running = False
+if "task_result" not in st.session_state:
+    st.session_state.task_result = None
+
+
+def _on_output(line: str):
+    """回调：收到输出"""
+    st.session_state.task_log.append(line)
+
+
+def _on_complete(returncode: int):
+    """回调：任务完成"""
+    st.session_state.task_running = False
+    st.session_state.task_result = returncode
+
+
+# 任务按钮网格
+task_ids = list(TASKS.keys())
+# 每行4个按钮
+for i in range(0, len(task_ids), 4):
+    batch = task_ids[i : i + 4]
+    cols_list = st.columns(len(batch))
+    for j, tid in enumerate(batch):
+        t = TASKS[tid]
+        with cols_list[j]:
+            if st.button(
+                f"{t['icon']} {t['name']}",
+                key=f"btn_{tid}",
+                disabled=st.session_state.task_running,
+                use_container_width=True,
+            ):
+                # 清空日志并开始执行
+                st.session_state.task_log = []
+                st.session_state.task_running = True
+                st.session_state.task_result = None
+                st.session_state["_current_task"] = tid
+                run_task(
+                    tid,
+                    on_output=_on_output,
+                    on_complete=_on_complete,
+                )
+                st.rerun()
+
+# 显示执行日志
+if st.session_state.task_log or st.session_state.task_running:
+    task_name = TASKS.get(st.session_state.get("_current_task", ""), {}).get("name", "任务")
+    status_text = "🟡 运行中..." if st.session_state.task_running else (
+        f"✅ 完成 (code={st.session_state.task_result})" if st.session_state.task_result == 0
+        else f"❌ 失败 (code={st.session_state.task_result})" if st.session_state.task_result is not None
+        else ""
+    )
+    st.markdown(f"**{task_name} 输出** {status_text}")
+
+    # 日志输出区域
+    log_text = "\n".join(st.session_state.task_log[-100:])  # 最多显示最后100行
+    st.code(log_text, language=None, line_numbers=False)
+
+    # 运行时自动刷新
+    if st.session_state.task_running:
+        st.rerun()
+
+st.divider()
 
 # ========== 运行状态 ==========
 st.subheader("任务运行状态")
@@ -30,19 +101,56 @@ log_files = {
 col1, col2, col3, col4 = st.columns(4)
 cols = [col1, col2, col3, col4]
 
+
+def _check_task_status(log_path: str, err_path: str) -> tuple[str, str]:
+    """检查任务状态，返回 (状态, 详情)"""
+    import re
+
+    # 检查 log 文件
+    if not os.path.exists(log_path):
+        if os.path.exists(err_path):
+            return "⚪ 仅错误日志", "无标准日志"
+        return "⚪ 未运行", "无日志文件"
+
+    with open(log_path, encoding="utf-8") as f:
+        log_lines = f.readlines()
+
+    if not log_lines:
+        return "⚪ 空日志", "日志为空"
+
+    last_line = log_lines[-1].strip()
+
+    # 检查 .err 文件是否有真正的 ERROR 级别日志
+    has_real_error = False
+    error_count = 0
+    if os.path.exists(err_path) and os.path.getsize(err_path) > 0:
+        with open(err_path, encoding="utf-8", errors="ignore") as f:
+            err_content = f.read()
+        # 统计真正的 ERROR 行（排除进度条、INFO等）
+        for line in err_content.split("\n"):
+            if re.search(r"\b(ERROR|Exception|Traceback|FAILED)\b", line, re.IGNORECASE):
+                has_real_error = True
+                error_count += 1
+
+    # 检查 log 最后一行是否包含成功标志
+    success_keywords = ["完成", "成功", "done", "success", "finished", "saved", "exported"]
+    has_success = any(kw in last_line.lower() for kw in success_keywords)
+
+    if has_real_error:
+        return "⚠️ 有错误", f"{error_count}个错误 | {last_line[-25:]}"
+    elif has_success:
+        return "🟢 完成", last_line[-30:]
+    elif len(log_lines) > 0:
+        return "🟢 运行过", last_line[-30:]
+    else:
+        return "⚪ 未知", "-"
+
+
 for idx, (name, logfile) in enumerate(log_files.items()):
     log_path = os.path.join(logs_dir, logfile)
     err_path = os.path.join(logs_dir, logfile.replace(".log", ".err"))
-    try:
-        with open(log_path, encoding="utf-8") as f:
-            lines = f.readlines()
-        last_line = lines[-1].strip() if lines else "无日志"
-        # 检查是否有错误
-        has_error = os.path.exists(err_path) and os.path.getsize(err_path) > 0
-        status = "🔴 异常" if has_error else "🟢 正常"
-        cols[idx].metric(name, status, last_line[-30:] if len(last_line) > 30 else last_line)
-    except FileNotFoundError:
-        cols[idx].metric(name, "⚪ 未运行", "-")
+    status, detail = _check_task_status(log_path, err_path)
+    cols[idx].metric(name, status, detail)
 
 st.divider()
 

@@ -9,7 +9,7 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
-from quart.backtest.engine import MarketData
+from quart.backtest.engine import FLAT, MarketData
 from quart.config import PROJECT_ROOT, load_config
 from quart.data.store import BarStore
 from quart.notify.dingtalk import send_markdown
@@ -44,6 +44,7 @@ def generate_orders(
     latest_close: pd.Series,
     cash: float,
     positions: dict[str, int],
+    force_flat: bool = False,
 ) -> tuple[list[OrderPlan], float]:
     equity = cash + sum(
         sh * latest_close[sym]
@@ -51,6 +52,15 @@ def generate_orders(
         if sym in latest_close.index and not pd.isna(latest_close[sym])
     )
     orders: list[OrderPlan] = []
+    if force_flat:
+        for sym, held in sorted(positions.items()):
+            if held <= 0:
+                continue
+            price = latest_close.get(sym)
+            if pd.isna(price):
+                continue
+            orders.append(OrderPlan(sym, "SELL", held, round(float(price), 2), 0.0))
+        return orders, equity
     for sym, w in sorted(weights.items()):
         price = latest_close.get(sym)
         if pd.isna(price):
@@ -114,6 +124,14 @@ def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: P
     cfg = load_config()
     strategy_name = strategy_name or cfg["strategy"]["name"]
     store = BarStore()
+    stale = store.freshness_days()
+    if stale is None:
+        raise RuntimeError("本地数据为空，请先运行 scripts/update_data.py")
+    if stale > 5:
+        raise RuntimeError(f"数据已过期 {stale} 天，信号不可信。请先运行 scripts/update_data.py")
+    if stale > 2:
+        console.print(f"[yellow]警告: 数据落后 {stale} 天[/yellow]")
+
     bars = store.load(include_index=False)
     bench = store.load_benchmark(cfg["benchmark"])
     if bars.empty or bench.empty:
@@ -125,6 +143,8 @@ def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: P
     strategy.prepare(md)
     i = len(md.dates) - 1
     raw_weights = strategy.target_weights(i)
+    force_flat = FLAT in raw_weights
+    raw_weights = {} if force_flat else dict(raw_weights)
 
     risk_cfg = cfg["risk"]
     cash, positions = load_holdings()
@@ -140,8 +160,11 @@ def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: P
         equity=equity,
         max_position_pct=float(risk_cfg["max_position_pct"]),
     )
-    orders, equity = generate_orders(weights, last_close, cash, positions)
-    warnings = violations + check_holdings_risk(
+    orders, equity = generate_orders(weights, last_close, cash, positions, force_flat=force_flat)
+    warnings = list(violations)
+    if force_flat:
+        warnings.append("策略发出择时清仓(FLAT)信号：建议全部卖出")
+    warnings += check_holdings_risk(
         positions, last_close, equity, float(risk_cfg["max_position_pct"])
     )
 
