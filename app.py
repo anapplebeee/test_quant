@@ -412,7 +412,6 @@ def create_app() -> gr.Blocks:
             def on_run_task(task_name):
                 """运行任务并实时输出"""
                 import subprocess
-                import time
                 
                 if task_name not in TASKS:
                     yield "", "❌ 未知任务"
@@ -437,7 +436,6 @@ def create_app() -> gr.Blocks:
                     output_lines = []
                     for line in process.stdout:
                         output_lines.append(line.strip())
-                        # 保留最近50行
                         display_text = "\n".join(output_lines[-50:])
                         yield display_text, f"🟡 {task['name']} 运行中..."
                     
@@ -452,19 +450,23 @@ def create_app() -> gr.Blocks:
                     yield f"错误: {str(e)}", f"❌ {task['name']} 异常"
             
             task_btn_refresh.click(
-                fn=lambda: on_run_task("refresh"),
+                fn=on_run_task,
+                inputs=[gr.State("refresh")],
                 outputs=[task_output, task_status],
             )
             task_btn_backtest.click(
-                fn=lambda: on_run_task("backtest"),
+                fn=on_run_task,
+                inputs=[gr.State("backtest")],
                 outputs=[task_output, task_status],
             )
             task_btn_signal.click(
-                fn=lambda: on_run_task("signal"),
+                fn=on_run_task,
+                inputs=[gr.State("signal")],
                 outputs=[task_output, task_status],
             )
             task_btn_ml.click(
-                fn=lambda: on_run_task("ml_train"),
+                fn=on_run_task,
+                inputs=[gr.State("ml_train")],
                 outputs=[task_output, task_status],
             )
             
