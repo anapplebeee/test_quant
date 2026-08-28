@@ -121,8 +121,8 @@ if trade_files:
     trades = pd.read_csv(trade_files[-1], parse_dates=["date"])
     trades = trades.sort_values("date", ascending=False)
 
-    # 添加股票名称
-    trades["名称"] = trades["symbol"].map(stock_names).fillna("-")
+    # 添加股票名称：将整数代码补零为6位字符串后再映射
+    trades["名称"] = trades["symbol"].apply(lambda x: f"{int(x):06d}").map(stock_names).fillna("-")
     trades = trades.rename(columns={"date": "交易日期"})
 
     # 调整列顺序：日期、代码、名称、方向、数量、价格、金额、手续费

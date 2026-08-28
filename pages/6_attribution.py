@@ -53,7 +53,7 @@ if trade_files:
 
     if industries is not None:
         # 计算各行业交易贡献
-        trades["industry"] = trades["symbol"].map(industries).fillna("未知")
+        trades["industry"] = trades["symbol"].apply(lambda x: f"{int(x):06d}").map(industries).fillna("未知")
 
         # 按行业汇总买卖金额
         buy_trades = trades[trades["side"] == "BUY"].groupby("industry")["amount"].sum()
