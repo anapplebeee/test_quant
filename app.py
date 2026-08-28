@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import load_stock_names
 from api.data_api import get_stock_stats, get_universe, get_sample_data
 from api.backtest_api import get_backtest_summary, get_equity_curve, get_trades
-from api.task_api import run_task, get_task_status
+from api.task_api import run_task, get_task_status, TASKS
 
 
 # ========== 全局样式 ==========
