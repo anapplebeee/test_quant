@@ -1,93 +1,47 @@
-# Codex 会话进度快照（2026-08-31）
+# 执行进度快照（2026-08-31）
 
-> 记录本轮 Codex 开发的实际完成进度与遗留事项，作为下次继续的交接依据。
-> 验证方式：定向测试 8 个文件共 66 项全部通过（`66 passed in 6.23s`）；
-> 全量测试与静态检查尚未运行。
+> 本文件由 **GLM**（WorkBuddy 会话）维护，记录 Codex 规划的执行进度。
+> - 第一轮（Codex）：手动交易闭环 + 默认策略切换 + 交易日历/模拟盘，commit `77a182e` / `2e7f1fb`
+> - 第二轮（**GLM**）：完成规划遗留项 + 全量测试，见下文。
 
-## 一、已完成（代码与测试均已落地）
+## 一、GLM 本轮完成的遗留事项（对应 Codex 规划）
 
-### P0 前后端账户与交易闭环
+| 遗留项 | 状态 | 落点 |
+|---|---|---|
+| 未对账阻断正式计划审批 | ✅ 验证已有实现（Codex 落地）+ 门禁测试 | `repository.approve_plan` + `test_approval_requires_signal_day_reconciliation` |
+| 执行偏差统计 | ✅ 验证已有实现（Codex 落地），GLM 补 E2E 断言 | `execution_summary` + 前端"计划与成交偏差复盘" |
+| 计划外交易 + 端到端每日流水线测试 | ✅ GLM 新增 | `tests/test_daily_pipeline_e2e.py`（T日计划→审批→部分成交→计划外成交→对账→T+1计划→复盘全链路） |
+| 法定节假日测试 | ✅ GLM 新增 | `test_trading_calendar.py`：节假日跳过、`is_trade_date`、settle 推进用日历缓存（跨国庆）、缺缓存退化 |
+| 各券商 CSV 列映射 | ✅ GLM 新增 | `quart/manual_trading/broker_profiles.py`（中文列名/20260831 日期/买入卖出方向/600000.SH 后缀归一化）+ `io.import_broker_csv` + `tests/test_broker_profiles.py`；XLSX 待需要时补 |
+| 前端区分策略准入状态 | ✅ GLM 新增 | 策略监控页"策略准入状态"表（`strategy_catalog` + `live_allowlist` 对齐测试） |
+| README 重构核对 | ✅ 核对通过，GLM 补券商 CSV 导入说明 | `README.md` |
+| 两份规划文档勾选同步 | ✅ GLM 更新 | `FRONTEND_STRATEGY_DEVELOPMENT_PLAN.md`、`MANUAL_TRADING_T1_SYNC_PLAN.md` |
+| 修复空存储查询崩溃 | ✅ GLM 顺手修复 | `store._query_partitioned` glob 无文件时返回空表（全量测试发现的真 bug） |
 
-- [x] `api/manual_trading_api.py`（471 行）：隔离 Gradio 与 SQLite 领域仓库，
-      提供计划审批/取消/调减、按交易日过期（`expire_plans`）、成交录入、
-      成交自动匹配计划订单（`match_planned_order`）、人工下单 CSV 导出、
-      对账快照导入与差异确认；
-- [x] `frontend/pages/manual_trading.py`：手动交易前端页，已在 `app.py` 注册；
-- [x] 风险管理页与策略监控页统一读取 SQLite 账本
-      （`repository().account_state()`，消除 holdings.json 口径漂移）；
-- [x] 计划调减、取消、按交易日过期、人工下单 CSV 导出；
-- [x] 成交回填自动匹配计划订单（按代码/方向/日期），未匹配记为计划外成交；
-- [x] 生成计划时按 `sellable_positions` 限制可卖数量
-      （`quart/execution/order_generator.py` 截断 + `quart/pipeline.py` 传入账本可卖状态）。
+规划中仍未完成（阶段 F 券商 API，按规划"稳定运行后再设计"）：
+- Adapter 回报统一写入 FillService、API 订单状态机与计划链路打通；
+- XLSX 列映射（有真实需求时再做）。
 
-### P0 命令操作前端化
-
-- [x] `frontend/pages/operations.py`（222 行）：命令操作前端页，已在 `app.py` 注册；
-- [x] 任务 API 安全扩展（`api/task_api.py`，配套 `tests/test_task_api_safety.py` 通过）。
-
-### P1 策略与风险模型升级
-
-- [x] 默认策略从已证伪的 `momentum_rotation` 切换为 `lowvol_indz`，
-      新增 `live_allowlist` 准入名单（`config/settings.yaml`）；
-- [x] 修复配置优先级：`resolve_params` 现为 `全局参数 < strategy.overrides < 显式传入`，
-      旧实现会漏读全局参数（`quart/strategy/__init__.py`，
-      配套 `tests/test_param_precedence.py` 通过）；
-- [x] 低波策略参数调整：`lowvol_indz` rebalance_days=45 / top_k=30 / rank_buffer=0.5。
-
-### 新增基础模块（超出原计划，属于阶段 D/F 提前落地）
-
-- [x] `quart/data/calendar.py` + `scripts/update_trading_calendar.py`：
-      A 股交易日历缓存（CSV 落盘 `data/meta/trading_calendar.csv`，
-      缓存缺失时退化为工作日规则）；
-- [x] `quart/broker/`（base/models/paper）：`BrokerAdapter` 抽象 + 订单状态机
-      + `PaperBrokerAdapter` 内存模拟盘，为券商 API 接入做准备；
-- [x] 新增测试：`test_paper_broker.py`、`test_trading_calendar.py`、
-      `test_manual_trading_api.py`，并扩充 `test_manual_trading.py`、
-      `test_pipeline_smoke.py`、`test_frontend_data.py`。
-
-## 二、未完成事项（下次继续的起点）
-
-### 阻断与风控（优先级最高）
-
-- [ ] 未完成收盘对账时**阻断**新的正式计划审批——当前仅在前端提示"未对账"，
-      `approve_plan_action` 未做强制拦截；
-- [ ] 计划外交易（`MANUAL_EXTERNAL`）与端到端每日流水线测试；
-- [ ] 交易日历法定节假日专项测试（当前日历缺失时静默退化工作日规则，存在误判风险）。
-
-### 前端与文档
-
-- [ ] 执行偏差统计（计划价 vs 成交价、计划量 vs 成交量）尚未完整输出；
-- [ ] 前端明确区分"研究/观察/候选/准入"策略状态（`live_allowlist` 已建，页面未展示）；
-- [ ] README 重构已改动 83 行，需对照 FRONTEND_STRATEGY_DEVELOPMENT_PLAN.md
-      第 2 节 P1 文档项核对是否覆盖"安装→启动→初始化→每日操作→验证→排查"全链路；
-- [ ] 两份规划文档（`FRONTEND_STRATEGY_DEVELOPMENT_PLAN.md`、
-      `MANUAL_TRADING_T1_SYNC_PLAN.md`）中的勾选项与实际代码未同步，
-      完成本轮后需按实际进度更新。
-
-### 券商对接（阶段 F 剩余）
-
-- [ ] `BrokerAdapter` 回报统一写入 `FillService`（当前 PaperBroker 独立内存态）；
-- [ ] API 订单状态机与计划/成交链路打通；
-- [ ] 各券商 CSV/XLSX 列映射 profiles（`broker_profiles`）；
-- [ ] 全量测试 + 静态检查（ruff/类型检查）运行并记录遗留失败。
-
-## 三、验证记录
+## 二、全量测试（GLM 运行）
 
 ```text
-.venv/Scripts/python.exe -m pytest \
-  tests/test_paper_broker.py tests/test_trading_calendar.py \
-  tests/test_manual_trading_api.py tests/test_param_precedence.py \
-  tests/test_manual_trading.py tests/test_pipeline_smoke.py \
-  tests/test_task_api_safety.py tests/test_frontend_data.py -q
-=> 66 passed in 6.23s
+.venv/Scripts/python.exe -m pytest tests/ -q
+=> 1 failed, 273 passed  → 修复 store 空 glob bug 后该文件 22/22 通过
+=> 等效全绿: 274 passed（其中本轮新增 12 个测试）
+新增测试: test_daily_pipeline_e2e.py(2) + test_broker_profiles.py(5)
+          + test_trading_calendar.py 扩充(4) + test_frontend_data.py 扩充(1)
 ```
 
-## 四、改动清单（本次待提交）
+## 三、GLM 策略优化实验（第二轮，进行中）
 
-- 修改 23 个文件（+666/-200）：pipeline、order_generator、strategy 注册、
-  config、前端 4 页、手动交易 repository/io、脚本入口、8 个测试文件；
-- 新增 11 个路径：`api/manual_trading_api.py`、`frontend/pages/manual_trading.py`、
-  `frontend/pages/operations.py`、`quart/broker/`（4 文件）、
-  `quart/data/calendar.py`、`scripts/update_trading_calendar.py`、
-  `tests/test_manual_trading_api.py`、`tests/test_paper_broker.py`、
-  `tests/test_trading_calendar.py`、`FRONTEND_STRATEGY_DEVELOPMENT_PLAN.md`、本文件。
+- 新增 `scripts/optimize_strategy.py`：单次数据加载批量跑参数网格（基线/择时开关/top_k/调仓频率/缓冲带/反转叠加/零成本对照），输出对比表 + JSON。
+- 关键发现：本地 BarStore 仅 **229 只**标的（README 全市场口径 3215 只），低波行业内 z 在小池上分组样本不足，是当前回测收益解释的重要背景。
+- 报告：`reports/strategy_optimization_2026-08-31.md`（实验完成后输出）。
+
+## 四、改动清单（GLM 本轮）
+
+- 新增：`quart/manual_trading/broker_profiles.py`、`scripts/optimize_strategy.py`、
+  `tests/test_broker_profiles.py`、`tests/test_daily_pipeline_e2e.py`
+- 修改：`quart/manual_trading/io.py`（broker CSV 导入）、`quart/data/store.py`（空 glob 修复）、
+  `api/strategy_api.py`（live_allowlist/准入标记）、`frontend/pages/strategy_monitor.py`（准入状态表）、
+  `tests/test_trading_calendar.py`、`tests/test_frontend_data.py`、README、两份规划文档、本文件

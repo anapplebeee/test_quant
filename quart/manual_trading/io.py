@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import csv
 import json
+import tempfile
 from pathlib import Path
 
 from quart.execution.fees import Fees
 from quart.execution.models import BUY, SELL
+from quart.manual_trading.broker_profiles import convert_broker_csv
 from quart.manual_trading.models import FillInput
 from quart.manual_trading.repository import TradingRepository
 
@@ -92,6 +94,35 @@ def import_fills_csv(
             except Exception as exc:
                 raise ValueError(f"成交 CSV 第 {line_number} 行导入失败: {exc}") from exc
     return fill_ids
+
+
+def import_broker_csv(
+    repository: TradingRepository,
+    account_id: int,
+    path: Path | str,
+    profile: str | None = None,
+    estimate_missing_fees: bool = True,
+) -> list[int]:
+    """导入券商导出的成交 CSV：先归一化列名/取值，再复用通用导入。
+
+    支持常见券商导出格式（中文列名、20260831/2026/8/31 日期、
+    买入/证券买入方向、600000.SH 代码后缀）。列无法识别时显式报错。
+    """
+    source = Path(path)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", suffix="_broker_normalized.csv", delete=False
+    ) as handle:
+        normalized_path = Path(handle.name)
+    try:
+        convert_broker_csv(source, normalized_path, profile=profile)
+        return import_fills_csv(
+            repository,
+            account_id,
+            normalized_path,
+            estimate_missing_fees=estimate_missing_fees,
+        )
+    finally:
+        normalized_path.unlink(missing_ok=True)
 
 
 def export_plan_csv(repository: TradingRepository, plan_id: str, path: Path | str) -> Path:
@@ -194,4 +225,10 @@ def _normalize_symbol(value: str) -> str:
     return text.zfill(6) if text.isdigit() else text
 
 
-__all__ = ["export_plan_csv", "import_fills_csv", "load_snapshot_json", "write_fill_template"]
+__all__ = [
+    "export_plan_csv",
+    "import_broker_csv",
+    "import_fills_csv",
+    "load_snapshot_json",
+    "write_fill_template",
+]

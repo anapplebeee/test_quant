@@ -68,18 +68,28 @@ def get_strategy_defaults(name: str) -> dict:
 
 def strategy_catalog() -> list[dict]:
     """策略库表数据：REGISTRY ∩ META（防 META 漏配时缺行）。"""
+    allowlist = live_allowlist()
     out = []
     for name in strategy_choices():
         meta = STRATEGY_META.get(name, {})
         d = get_strategy_defaults(name)
+        admitted = not allowlist or name in allowlist
         out.append(
             {
                 "name": name,
                 "label": meta.get("label", name),
                 "status": meta.get("status", "研究"),
+                "admitted": "✅ 准入" if admitted else "🔬 研究",
                 "desc": meta.get("desc", ""),
                 "default_rebalance": d["rebalance_days"],
                 "default_top_k": d["top_k"],
             }
         )
     return out
+
+
+def live_allowlist() -> list[str]:
+    """正式信号策略白名单（config.strategy.live_allowlist）。"""
+    from quart.config import load_config
+
+    return list((load_config().get("strategy") or {}).get("live_allowlist") or [])

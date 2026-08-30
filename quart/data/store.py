@@ -216,6 +216,13 @@ class BarStore:
         except ImportError:
             return self._query_globs_pandas(globs, start, end)
 
+        # glob 可能一个文件都匹配不到（空存储/年份目录为空），
+        # DuckDB 的 read_parquet 对空列表直接抛 IOException，需先探测。
+        import glob as _glob
+
+        if not any(_glob.glob(g) for g in globs):
+            return EMPTY_BARS.copy()
+
         listing = ", ".join(f"'{g}'" for g in globs)
         conds = ["date IS NOT NULL"]
         if start:

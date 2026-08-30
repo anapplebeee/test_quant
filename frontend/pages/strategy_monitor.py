@@ -11,6 +11,7 @@ import pandas as pd
 from api.manual_trading_api import manual_settings, repository
 from api.strategy_api import (
     STRATEGY_META,
+    strategy_catalog,
 )
 from api.strategy_api import (
     strategy_choices as _strategy_choices,
@@ -182,6 +183,33 @@ def render():
             choices=strategy_choices,
             value=strategy_choices[0],
             info=" | ".join(f"{k}={v['label']}" for k, v in STRATEGY_META.items()),
+        )
+
+        # ===== 策略准入状态（research/candidate/admitted 与 live_allowlist 对齐） =====
+        gr.Markdown("### 🎯 策略准入状态")
+        gr.Markdown(
+            "> **准入** = 允许生成正式 T+1 实盘信号（`strategy.live_allowlist`）；"
+            "**研究** = 仅回测/扫描，禁止实盘信号。策略升级必须通过回测、成本压力和 Walk-Forward 验证。"
+        )
+        catalog_rows = [
+            {
+                "策略": item["label"],
+                "标识": item["name"],
+                "实盘准入": item["admitted"],
+                "研究状态": item["status"],
+                "默认调仓(日)": item["default_rebalance"],
+                "默认持仓数": item["default_top_k"],
+                "说明": item["desc"],
+            }
+            for item in strategy_catalog()
+        ]
+        gr.Dataframe(
+            value=pd.DataFrame(
+                catalog_rows,
+                columns=["策略", "标识", "实盘准入", "研究状态", "默认调仓(日)", "默认持仓数", "说明"],
+            ),
+            interactive=False,
+            max_height=300,
         )
 
         task_status_bar = gr.Textbox(label="执行状态", interactive=False)

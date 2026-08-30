@@ -8,6 +8,7 @@ from quart.strategy import REGISTRY
 from api.strategy_api import (
     STRATEGY_META,
     get_strategy_defaults,
+    live_allowlist,
     live_signal_choices,
     strategy_catalog,
     strategy_choices,
@@ -43,6 +44,18 @@ def test_catalog_defaults_consistent():
         assert row["name"] in REGISTRY
         assert isinstance(row["default_rebalance"], int) and row["default_rebalance"] > 0
         assert isinstance(row["default_top_k"], int) and row["default_top_k"] > 0
+
+
+def test_catalog_marks_admitted_strategies():
+    """准入状态必须与 live_allowlist 严格对齐，防止前端口径漂移。"""
+    allowlist = set(live_allowlist())
+    for row in strategy_catalog():
+        expected = "✅ 准入" if (not allowlist or row["name"] in allowlist) else "🔬 研究"
+        assert row["admitted"] == expected
+    admitted_names = {
+        row["name"] for row in strategy_catalog() if row["admitted"] == "✅ 准入"
+    }
+    assert admitted_names == set(live_signal_choices())
 
 
 def test_defaults_lowvol_indz_uses_override():

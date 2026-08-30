@@ -20,13 +20,13 @@
 
 仍待落地：
 
-- Gradio 手动交易操作页；
-- 计划订单调减的前端/CLI 操作；
-- 人工下单 CSV 导出；
-- 各券商 CSV/XLSX 列映射；
-- 权威 A 股交易日历；
-- 未对账账户对正式计划的强制阻断；
-- 券商 API、自动报单和订单回报。
+- ~~Gradio 手动交易操作页~~（已完成）；
+- ~~计划订单调减的前端/CLI 操作~~（已完成）；
+- ~~人工下单 CSV 导出~~（已完成）；
+- ~~各券商 CSV/XLSX 列映射~~（CSV 已完成 `quart/manual_trading/broker_profiles.py`；XLSX 待需要时补）；
+- ~~权威 A 股交易日历~~（已完成 `quart/data/calendar.py` + 操作中心更新入口）；
+- ~~未对账账户对正式计划的强制阻断~~（已完成，approve_plan 门禁 + 测试）；
+- 券商 API、自动报单和订单回报（阶段 F 剩余：Adapter 回报接入 FillService、订单状态机与计划链路打通）。
 
 ## 1. 建设目标
 
@@ -610,7 +610,7 @@ API 模式：BrokerAdapter 下单 -> 回报订阅/查询 -> FillService
 - [x] 定义 SQLite Schema；
 - [x] 实现账户和快照 Repository；
 - [x] 从 `holdings.json` 迁移；
-- [ ] 前端显示当前账户状态；
+- [x] 前端显示当前账户状态；
 - [x] 增加 JSON 快照导入和校验。
 
 验收：无需直接编辑 JSON 即可初始化和查看账户。
@@ -620,8 +620,8 @@ API 模式：BrokerAdapter 下单 -> 回报订阅/查询 -> FillService
 - [x] 将每日信号保存为 `TradePlan`；
 - [x] 保存策略建议数量和用户批准数量；
 - [x] 增加审批和取消状态；
-- [ ] 增加按交易日自动过期；
-- [ ] 导出人工下单 CSV；
+- [x] 增加按交易日自动过期；
+- [x] 导出人工下单 CSV；
 - [x] 报告和推送中显示 plan_id。
 
 验收：每份人工下单计划都有唯一 ID、来源和审批记录。
@@ -633,7 +633,8 @@ API 模式：BrokerAdapter 下单 -> 回报订阅/查询 -> FillService
 - [x] 通过 planned_order_id 匹配计划订单；
 - [x] 防止重复导入；
 - [x] 按成交更新账户账本。
-- [ ] 增加基于代码、方向、日期的自动模糊匹配。
+- [x] 增加基于代码、方向、日期的自动模糊匹配（match_planned_order，唯一匹配才自动关联）。
+- [x] 各券商 CSV 列映射（`broker_profiles.py`：中文列名/日期格式/方向/代码后缀归一化）。
 
 验收：部分成交、多笔成交和计划外交易均能正确处理。
 
@@ -641,11 +642,11 @@ API 模式：BrokerAdapter 下单 -> 回报订阅/查询 -> FillService
 
 - [x] 实现持仓批次；
 - [x] 实现工作日结算推进和显式 settle_date；
-- [ ] 接入权威 A 股交易日历；
-- [ ] 生成计划时限制可卖数量；
-- [ ] 显示延期卖出数量；
+- [x] 接入权威 A 股交易日历（`quart/data/calendar.py`，缓存缺失退化为工作日规则）；
+- [x] 生成计划时限制可卖数量（order_generator 按 sellable_positions 截断）；
+- [x] 显示延期卖出数量（deferred_quantity 贯穿计划/前端/复盘）；
 - [x] 添加周末和 T+1 测试；
-- [ ] 添加法定节假日测试。
+- [x] 添加法定节假日测试（calendar 节假日跳过 + settle 推进使用日历缓存）。
 
 验收：当日买入不会被同日卖出计划使用，下一交易日按规则转为可卖。
 
@@ -654,15 +655,15 @@ API 模式：BrokerAdapter 下单 -> 回报订阅/查询 -> FillService
 - [x] 导入 JSON 券商账户快照；
 - [x] 自动比较现金和持仓；
 - [x] 差异分类和人工确认；
-- [ ] 未对账阻断正式计划；
-- [ ] 输出计划与真实成交偏差。
+- [x] 未对账阻断正式计划（approve_plan 信号日对账门禁）；
+- [x] 输出计划与真实成交偏差（execution_summary：完成率/均价/方向调整滑点/费用偏差）。
 
 验收：下一日计划只使用已对账账户，且账户状态可由账本重建。
 
 ### 阶段 F：券商 API 准备
 
-- [ ] 定义 `BrokerAdapter`；
-- [ ] 建立模拟 Adapter；
+- [x] 定义 `BrokerAdapter`；
+- [x] 建立模拟 Adapter（PaperBrokerAdapter 内存状态机）；
 - [ ] 将人工导入和 Adapter 回报统一写入 FillService；
 - [ ] 实现 API 订单状态机；
 - [ ] 保留人工模式作为应急通道。
@@ -676,13 +677,13 @@ API 模式：BrokerAdapter 下单 -> 回报订阅/查询 -> FillService
 - [x] 新建 `state/trading.db` Schema 和 Repository；
 - [x] 实现从 `holdings.json` 创建初始已对账快照；
 - [x] 将 `run_daily` 输出同时保存为 `DRAFT TradePlan`；
-- [ ] 增加计划确认前端界面（CLI 已完成）；
+- [x] 增加计划确认前端界面（CLI 已完成）；
 - [x] 增加通用成交 CSV 模板和导入功能；
 - [x] 根据成交计算账户和持仓批次；
 - [x] 增加收盘账户快照导入和对账；
 - [x] 下一日信号改为读取最近已对账账户；
 - [x] 增加 T+1、部分成交和重复导入测试；
-- [ ] 增加计划外交易与端到端每日流水线测试；
+- [x] 增加计划外交易与端到端每日流水线测试（`tests/test_daily_pipeline_e2e.py`）；
 - [ ] 稳定运行后再设计具体券商 Adapter。
 
 ## 15. 本阶段完成定义

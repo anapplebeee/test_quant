@@ -148,6 +148,8 @@ uv run python scripts/manual_trade.py fills-template
 uv run python scripts/manual_trade.py fills-import state/fills_template.csv
 ```
 
+券商客户端导出的成交 CSV（中文列名、`20260831`/`2026/8/31` 日期、`买入`/`证券卖出` 方向、`600000.SH` 代码后缀）可直接导入，列名经 `quart/manual_trading/broker_profiles.py` 归一化；无法识别的列会显式报错而不是静默丢弃。
+
 真实成交是账户变化的依据；未成交计划不会自动改变持仓。支持部分成交、计划外交易和重复成交编号拦截。
 
 ### 4. 查看 T+1 账户状态
