@@ -5,7 +5,7 @@ import gradio as gr
 import plotly.express as px
 
 from api.data_api import get_index_coverage, get_stock_stats, get_universe, get_stock_list, get_stock_data
-from frontend.theme import metric_card, page_header, info_card
+from frontend.theme import metric_card, page_header
 
 
 def _board_text(stats: dict) -> str:

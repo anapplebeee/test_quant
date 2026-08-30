@@ -6,8 +6,6 @@
 """
 from __future__ import annotations
 
-import glob
-
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
