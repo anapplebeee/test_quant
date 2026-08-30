@@ -76,7 +76,8 @@ def render():
         ))
         fig.add_hline(y=0, line_dash="dash", line_color="gray")
         fig.update_layout(title="因子 RankIC（fwd5d，全市场）", height=380,
-                          xaxis_tickangle=-45, margin=dict(l=0, r=0, t=40, b=0))
+                          xaxis_tickangle=-45, margin=dict(l=0, r=0, t=40, b=0),
+                          template="plotly_white")
         gr.Plot(value=fig)
 
         gr.Markdown("### 📝 读法说明")

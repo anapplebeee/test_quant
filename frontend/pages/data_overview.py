@@ -4,8 +4,14 @@ from __future__ import annotations
 import gradio as gr
 import plotly.express as px
 
-from api.data_api import get_stock_stats, get_universe, get_stock_list, get_stock_data
+from api.data_api import get_index_coverage, get_stock_stats, get_universe, get_stock_list, get_stock_data
 from frontend.theme import metric_card, page_header
+
+
+def _board_text(stats: dict) -> str:
+    return " / ".join(
+        f"{board} {count}" for board, count in stats.get("index_boards", {}).items() if count
+    ) or "无"
 
 
 def render():
@@ -20,6 +26,7 @@ def render():
             m2 = gr.HTML(metric_card("股票池快照", str(stats['universe_count']), "green"))
             m3 = gr.HTML(metric_card("指数数量", str(stats['index_count']), "purple"))
             m4 = gr.HTML(metric_card("最新分数日期", stats.get('last_score_date', 'N/A'), "teal"))
+        board_md = gr.Markdown(f"> **指数板块覆盖**：{_board_text(stats)}（明细见下方表格）")
 
         def _refresh_overview():
             s = get_stock_stats()
@@ -28,13 +35,23 @@ def render():
                 metric_card("股票池快照", str(s['universe_count']), "green"),
                 metric_card("指数数量", str(s['index_count']), "purple"),
                 metric_card("最新分数日期", s.get('last_score_date', 'N/A'), "teal"),
+                f"> **指数板块覆盖**：{_board_text(s)}（明细见下方表格）",
                 get_universe(),
             )
 
         refresh_btn = gr.Button("🔄 刷新数据概览", size="sm")
         universe_df = gr.Dataframe(value=get_universe(), interactive=False)
-        refresh_btn.click(_refresh_overview, outputs=[m1, m2, m3, m4, universe_df])
-        gr.Timer(60).tick(_refresh_overview, outputs=[m1, m2, m3, m4, universe_df])
+        refresh_btn.click(_refresh_overview, outputs=[m1, m2, m3, m4, board_md, universe_df])
+        gr.Timer(60).tick(_refresh_overview, outputs=[m1, m2, m3, m4, board_md, universe_df])
+
+        gr.Markdown("---")
+        gr.Markdown("### 📊 指数覆盖（按板块分类）")
+        gr.Markdown(
+            "*上证/深证/创业板/中证/科创等常用指数。⬜ 未拉取时可在 🧰 操作中心运行"
+            "「更新交易日历」同级的 `scripts/update_indices.py` 批量补齐。*"
+        )
+        coverage = get_index_coverage()
+        gr.Dataframe(value=coverage, interactive=False, max_height=320)
 
         gr.Markdown("---")
         gr.Markdown("### 📈 股票日线数据")
@@ -84,6 +101,7 @@ def render():
                 margin=dict(l=0, r=0, t=40, b=0),
                 xaxis_title="日期",
                 yaxis_title="收盘价",
+                template="plotly_white",
             )
             return info, fig
         

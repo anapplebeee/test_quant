@@ -94,7 +94,8 @@ def render():
         fig.add_hline(y=0, line_dash="dash", line_color="gray")
         fig.add_hline(y=0.5, line_dash="dot", line_color="green", annotation_text="有效阈值")
         fig.update_layout(title="因子 ICIR（按绝对值排序）", height=400,
-                          margin=dict(l=0, r=0, t=40, b=0))
+                          margin=dict(l=0, r=0, t=40, b=0),
+                          template="plotly_white")
         gr.Plot(value=fig)
 
         gr.Markdown("### 详细指标")

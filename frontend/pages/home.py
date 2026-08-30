@@ -7,7 +7,7 @@ import pandas as pd
 from api.backtest_api import get_backtest_list, get_backtest_summary, get_window_stats
 from api.research_api import latest_sweep_headlines
 from api.strategy_api import strategy_catalog
-from frontend.theme import metric_card
+from frontend.theme import metric_card, page_header
 
 
 def _fmt_pct(v, digits: int = 1) -> str:
@@ -103,7 +103,7 @@ def _summary_html(name: str | None) -> str:
 def render():
     """渲染首页 Tab"""
     with gr.Tab("🏠 首页"):
-        gr.Markdown("# 📊 Quart 量化研究平台\n> A-share 量化策略研究 · 因子挖掘 · 回测分析 · 风险管理")
+        gr.HTML(page_header("📊 Quart 量化研究平台", "A-share 量化策略研究 · 因子挖掘 · 回测分析 · 风险管理"))
 
         names = get_backtest_list()
         default = names[-1] if names else None

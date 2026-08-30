@@ -118,7 +118,8 @@ def render():
                     fig.add_trace(go.Bar(x=ind_summary.index, y=ind_summary["卖出"],
                                          name="卖出", marker_color="#43A047"))
                     fig.update_layout(barmode="group", xaxis_tickangle=-45,
-                                      height=400, margin=dict(l=0, r=0, t=30, b=80))
+                                      height=400, margin=dict(l=0, r=0, t=30, b=80),
+                                      template="plotly_white")
                     gr.Plot(value=fig)
             else:
                 gr.Info("未找到行业分类数据")
@@ -144,7 +145,8 @@ def render():
             fig_m = px.imshow(monthly, color_continuous_scale="RdYlGn",
                               text_auto=".1f", aspect="auto",
                               labels=dict(x="月份", y="年份", color="月收益%"))
-            fig_m.update_layout(height=300, margin=dict(l=0, r=0, t=0, b=0))
+            fig_m.update_layout(height=300, margin=dict(l=0, r=0, t=0, b=0),
+                               template="plotly_white")
             gr.Plot(value=fig_m)
 
         # ===== 因子暴露 =====
@@ -167,5 +169,6 @@ def render():
                 fig_e.add_trace(go.Bar(x=valid["因子"], y=valid["基准暴露"],
                                        name="等权基准", marker_color="#90A4AE"))
                 fig_e.update_layout(barmode="group", height=350,
-                                    margin=dict(l=0, r=0, t=30, b=0))
+                                    margin=dict(l=0, r=0, t=30, b=0),
+                                    template="plotly_white")
                 gr.Plot(value=fig_e)

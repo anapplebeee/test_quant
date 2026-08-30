@@ -107,9 +107,13 @@ def _load_backtest(name: str):
         fig_eq.add_hline(y=1_000_000, line_dash="dash", line_color="gray",
                          annotation_text="初始资金")
         fig_eq.update_layout(title="策略净值", height=400,
-                             margin=dict(l=0, r=0, t=40, b=0))
+                             margin=dict(l=0, r=0, t=40, b=0),
+                             template="plotly_white",
+                             hovermode="x unified")
         fig_dd.update_layout(title="回撤 (%)", height=250,
-                             margin=dict(l=0, r=0, t=40, b=0))
+                             margin=dict(l=0, r=0, t=40, b=0),
+                             template="plotly_white",
+                             hovermode="x unified")
 
     md += "\n\n" + _cost_md(name)
 

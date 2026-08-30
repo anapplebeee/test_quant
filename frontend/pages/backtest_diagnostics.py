@@ -87,7 +87,8 @@ def render():
         ))
         fig.add_hline(y=0, line_dash="dash", line_color="gray")
         fig.update_layout(title="逐折样本外夏普（OOS）", height=320,
-                          margin=dict(l=0, r=0, t=40, b=0))
+                          margin=dict(l=0, r=0, t=40, b=0),
+                          template="plotly_white")
         gr.Plot(value=fig)
 
         # 过拟合诊断
@@ -101,5 +102,6 @@ def render():
             )
             fig2 = px.histogram(ratios, nbins=10, labels={"value": "衰减比"},
                                 title="衰减比分布")
-            fig2.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0))
+            fig2.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0),
+                              template="plotly_white")
             gr.Plot(value=fig2)
