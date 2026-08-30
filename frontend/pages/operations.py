@@ -112,6 +112,10 @@ def _run_trading_calendar():
     yield from _stream_operation("trading_calendar", [], "交易日历更新")
 
 
+def _run_indices():
+    yield from _stream_operation("update_indices", [], "常用指数更新")
+
+
 def render() -> None:
     """渲染操作中心。"""
     strategies = strategy_choices()
@@ -190,6 +194,7 @@ def render() -> None:
                 industries_button = gr.Button("更新行业映射")
                 financial_button = gr.Button("更新财务因子")
                 calendar_button = gr.Button("更新交易日历")
+                indices_button = gr.Button("更新常用指数")
             industries_button.click(
                 _run_industries,
                 outputs=[operation_output],
@@ -200,6 +205,10 @@ def render() -> None:
             )
             calendar_button.click(
                 _run_trading_calendar,
+                outputs=[operation_output],
+            )
+            indices_button.click(
+                _run_indices,
                 outputs=[operation_output],
             )
 

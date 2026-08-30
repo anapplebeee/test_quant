@@ -144,6 +144,7 @@ def _build_var_chart(returns: pd.Series) -> go.Figure:
         xaxis_title="日收益 (%)", yaxis_title="频次",
         height=380, margin=dict(l=10, r=10, t=50, b=10),
         bargap=0.05,
+        template="plotly_white",
     )
     return fig
 

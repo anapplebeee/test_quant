@@ -183,6 +183,16 @@ TASKS = {
         "outputs": {"交易日历": "data/meta/trading_calendar.csv"},
         "result_tab": "🧰 操作中心",
     },
+    "update_indices": {
+        "name": "更新常用指数",
+        "script": "scripts/update_indices.py",
+        "args": [],
+        "icon": "📈",
+        "resource": "data",
+        "timeout": 3600,
+        "outputs": {"指数日线": "data/index/year=*/IDX*.parquet"},
+        "result_tab": "🗃️ 数据总览",
+    },
 }
 
 # 资源冲突矩阵：同一资源同一时间只能有 1 个任务
@@ -248,6 +258,7 @@ ALLOWED_ARGS: dict[str, dict[str, str]] = {
     "industries": {"--refresh": None},
     "financial_factors": {},
     "trading_calendar": {},
+    "update_indices": {"--codes": r"^[0-9,]+$"},
 }
 
 # 开关型参数（不带值）

@@ -10,6 +10,8 @@ import pandas as pd
 
 from common import degraded, index_dir, universe_dir
 
+from quart.data.index_catalog import BOARDS
+
 
 def _count_parquet(directory) -> int:
     if not directory.exists():
@@ -32,6 +34,47 @@ def _bar_store():
     return BarStore()
 
 
+def get_index_coverage() -> pd.DataFrame:
+    """指数覆盖明细：按板块分类（上证/深证/创业板/中证/科创/沪深300）。
+
+    2026-08-31 优化：此前只显示"指数数量"总数，无法区分指数归属板块。
+    每个指数检查本地文件是否存在 + 最新交易日。
+    """
+    from quart.data.index_catalog import BOARDS, INDEX_CATALOG
+    from quart.data.store import BarStore
+
+    store = _bar_store()
+    codes = [item["code"] for item in INDEX_CATALOG]
+    latest_by_symbol: dict[str, str] = {}
+    try:
+        bars = store.load(symbols=[f"IDX{code}" for code in codes], include_index=True)
+        if not bars.empty:
+            bars["_date"] = pd.to_datetime(bars["date"])
+            for symbol, group in bars.groupby("symbol"):
+                latest_by_symbol[str(symbol).removeprefix("IDX")] = (
+                    group["_date"].max().date().isoformat()
+                )
+    except Exception:
+        pass
+
+    rows = []
+    for item in INDEX_CATALOG:
+        latest = latest_by_symbol.get(item["code"])
+        rows.append({
+            "板块": item["board"],
+            "代码": item["code"],
+            "名称": item["name"],
+            "状态": "✅ 已覆盖" if latest else "⬜ 未拉取",
+            "最新交易日": latest or "-",
+        })
+    frame = pd.DataFrame(rows)
+    order = {board: i for i, board in enumerate(BOARDS)}
+    if not frame.empty:
+        frame["_order"] = frame["板块"].map(order).fillna(99)
+        frame = frame.sort_values("_order").drop(columns="_order")
+    return frame
+
+
 def get_stock_stats() -> dict:
     """获取股票统计数据（BarStore 双布局兼容）"""
     scores_path = _scores_path()
@@ -40,6 +83,7 @@ def get_stock_stats() -> dict:
         "stock_count": 0,
         "universe_count": 0,
         "index_count": 0,
+        "index_boards": {},
         "last_score_date": "N/A",
     }
 
@@ -57,6 +101,17 @@ def get_stock_stats() -> dict:
         stats["index_count"] = _count_partitioned(index_dir())
     except Exception as e:
         degraded("index_count", e)
+
+    try:
+        coverage = get_index_coverage()
+        if not coverage.empty:
+            covered = coverage[coverage["状态"].str.startswith("✅")]
+            stats["index_boards"] = {
+                board: int((covered["板块"] == board).sum())
+                for board in BOARDS
+            }
+    except Exception as e:
+        degraded("index_boards", e)
 
     try:
         if scores_path.exists():
