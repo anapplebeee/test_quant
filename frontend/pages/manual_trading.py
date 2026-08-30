@@ -30,6 +30,32 @@ def _plan_snapshot(as_of: str):
     return frame, gr.update(choices=choices, value=value)
 
 
+def _refresh_plan_bundle(choice: str | None, as_of: str):
+    """计划相关面板级联刷新：计划列表 + 详情 + 执行复盘。
+
+    背景（2026-08-31 前端体验审查）：审批/取消/调减后计划状态已变，
+    但列表、详情和复盘面板停留在旧状态，用户以为操作失败。
+    """
+    frame, choices = plans_view(as_of=as_of)
+    value = choice if choice in choices else (choices[0] if choices else None)
+    plan_md, orders = plan_view(value)
+    exec_md, exec_table = execution_view(value)
+    return (
+        frame,
+        gr.update(choices=choices, value=value),
+        plan_md,
+        orders,
+        exec_md,
+        exec_table,
+    )
+
+
+def _refresh_account_bundle(as_of: str):
+    """账户与成交面板级联刷新：成交录入/导入/对账后账本已变。"""
+    summary, positions = account_view(as_of)
+    return summary, positions, fills_view()
+
+
 def render() -> None:
     """渲染手动交易 Tab。"""
     today = date.today().isoformat()
@@ -83,7 +109,7 @@ def render() -> None:
             plans_table = gr.Dataframe(value=initial_plans, interactive=False, max_height=280)
             plan_summary = gr.Markdown(value=initial_plan_md)
             orders_table = gr.Dataframe(value=initial_orders, interactive=False, max_height=360)
-            plan_selector.change(plan_view, inputs=[plan_selector], outputs=[plan_summary, orders_table])
+            # 计划切换的详情+复盘联动统一在文件末尾注册（组件就绪后）
             refresh_plans.click(
                 _plan_snapshot,
                 inputs=[account_date],
@@ -97,7 +123,7 @@ def render() -> None:
                 adjust_reason = gr.Textbox(label="调减原因", placeholder="例如：降低单票风险")
                 adjust_button = gr.Button("调减订单")
             plan_action_status = gr.Markdown()
-            adjust_button.click(
+            adjust_evt = adjust_button.click(
                 adjust_order_action,
                 inputs=[adjust_order_id, adjust_quantity, adjust_reason],
                 outputs=[plan_action_status],
@@ -108,8 +134,8 @@ def render() -> None:
                 cancel_button = gr.Button("⛔ 取消计划", variant="stop")
                 export_button = gr.Button("⬇️ 导出人工下单 CSV")
             export_file = gr.File(label="计划 CSV", interactive=False)
-            approve_button.click(approve_plan_action, inputs=[plan_selector], outputs=[plan_action_status])
-            cancel_button.click(
+            approve_evt = approve_button.click(approve_plan_action, inputs=[plan_selector], outputs=[plan_action_status])
+            cancel_evt = cancel_button.click(
                 cancel_plan_action,
                 inputs=[plan_selector, cancel_reason],
                 outputs=[plan_action_status],
@@ -139,7 +165,14 @@ def render() -> None:
                     estimate_fees = gr.Checkbox(label="费用全空时按配置估算", value=True)
             fill_button = gr.Button("记录成交", variant="primary")
             fill_status = gr.Markdown()
-            fill_button.click(
+            with gr.Row():
+                fills_file = gr.File(label="批量成交 CSV", type="filepath")
+                import_estimate = gr.Checkbox(label="缺失费用时自动估算", value=True)
+                import_button = gr.Button("导入成交 CSV")
+                fills_refresh = gr.Button("🔄 刷新成交")
+            import_status = gr.Markdown()
+            fills_table = gr.Dataframe(value=fills_view(), interactive=False, max_height=360)
+            fill_evt = fill_button.click(
                 record_fill_action,
                 inputs=[
                     fill_date,
@@ -158,21 +191,22 @@ def render() -> None:
                     estimate_fees,
                 ],
                 outputs=[fill_status],
+            ).then(
+                _refresh_account_bundle,
+                inputs=[account_date],
+                outputs=[account_summary, positions_table, fills_table],
             )
 
-            with gr.Row():
-                fills_file = gr.File(label="批量成交 CSV", type="filepath")
-                import_estimate = gr.Checkbox(label="缺失费用时自动估算", value=True)
-                import_button = gr.Button("导入成交 CSV")
-                fills_refresh = gr.Button("🔄 刷新成交")
-            import_status = gr.Markdown()
-            fills_table = gr.Dataframe(value=fills_view(), interactive=False, max_height=360)
-            import_button.click(
+            import_evt = import_button.click(
                 import_fills_action,
                 inputs=[fills_file, import_estimate],
                 outputs=[import_status],
+            ).then(
+                _refresh_account_bundle,
+                inputs=[account_date],
+                outputs=[account_summary, positions_table, fills_table],
             )
-            fills_refresh.click(fills_view, outputs=[fills_table])
+            fills_refresh.click(_refresh_account_bundle, inputs=[account_date], outputs=[account_summary, positions_table, fills_table])
 
         with gr.Accordion("4️⃣ 收盘账户对账", open=True):
             gr.Markdown(
@@ -190,10 +224,14 @@ def render() -> None:
                 reconcile_button = gr.Button("执行对账", variant="primary")
             reconcile_status = gr.Markdown()
             reconcile_diff = gr.Dataframe(interactive=False)
-            reconcile_button.click(
+            reconcile_evt = reconcile_button.click(
                 reconcile_action,
                 inputs=[reconcile_payload, reconcile_confirm, reconcile_resolution],
                 outputs=[reconcile_status, reconcile_diff],
+            ).then(
+                _refresh_account_bundle,
+                inputs=[account_date],
+                outputs=[account_summary, positions_table, fills_table],
             )
 
         with gr.Accordion("5️⃣ 计划与成交偏差复盘", open=True):
@@ -205,4 +243,26 @@ def render() -> None:
                 inputs=[plan_selector],
                 outputs=[execution_summary, execution_table],
             )
+
+        # ===== 计划面板级联刷新：所有组件创建后统一追加 =====
+        # 背景（2026-08-31 体验审查）：审批/取消/调减/成交/对账改变计划与账本状态后，
+        # 列表、详情、复盘、账户面板需要同步刷新，否则用户以为操作未生效。
+        # 注意：execution_summary/execution_table 在第 5 区创建，
+        # 因此计划面板的 .then 必须在此处（组件就绪后）追加，而非注册动作时。
+        plan_bundle_outputs = [
+            plans_table, plan_selector, plan_summary, orders_table,
+            execution_summary, execution_table,
+        ]
+        for evt in (adjust_evt, approve_evt, cancel_evt, fill_evt, import_evt, reconcile_evt):
+            evt.then(
+                _refresh_plan_bundle,
+                inputs=[plan_selector, account_date],
+                outputs=plan_bundle_outputs,
+            )
+
+        plan_selector.change(
+            lambda choice: (*plan_view(choice), *execution_view(choice)),
+            inputs=[plan_selector],
+            outputs=[plan_summary, orders_table, execution_summary, execution_table],
+        )
 

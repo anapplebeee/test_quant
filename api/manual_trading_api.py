@@ -429,7 +429,8 @@ def _date_text(value: str) -> str:
     return date.fromisoformat(str(value).strip()[:10]).isoformat()
 
 
-def _latest_prices(symbols: list[str]) -> dict[str, float]:
+def latest_prices(symbols: list[str]) -> dict[str, float]:
+    """统一价格入口：走 BarStore 分区查询，兼容新旧布局。"""
     if not symbols:
         return {}
     try:
@@ -440,6 +441,10 @@ def _latest_prices(symbols: list[str]) -> dict[str, float]:
         return dict(zip(latest["symbol"].astype(str), latest["close"].astype(float), strict=False))
     except Exception:
         return {}
+
+
+def _latest_prices(symbols: list[str]) -> dict[str, float]:
+    return latest_prices(symbols)
 
 
 def _empty_positions() -> pd.DataFrame:
@@ -460,6 +465,7 @@ __all__ = [
     "fills_view",
     "import_fills_action",
     "initialize_account_action",
+    "latest_prices",
     "manual_settings",
     "plan_id_from_choice",
     "plan_view",

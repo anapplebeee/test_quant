@@ -32,16 +32,36 @@
           + test_trading_calendar.py 扩充(4) + test_frontend_data.py 扩充(1)
 ```
 
-## 三、GLM 策略优化实验（第二轮，进行中）
+## 三、GLM 策略优化实验（第二轮）
 
 - 新增 `scripts/optimize_strategy.py`：单次数据加载批量跑参数网格（基线/择时开关/top_k/调仓频率/缓冲带/反转叠加/零成本对照），输出对比表 + JSON。
-- 关键发现：本地 BarStore 仅 **229 只**标的（README 全市场口径 3215 只），低波行业内 z 在小池上分组样本不足，是当前回测收益解释的重要背景。
-- 报告：`reports/strategy_optimization_2026-08-31.md`（实验完成后输出）。
+- 关键发现：本地 BarStore 仅 **195 只**标的（README 全市场口径 3215 只），低波行业内 z 在小池上分组样本不足，是当前回测收益解释的重要背景。
+- 实验结论（详见 `reports/strategy_optimization_2026-08-31.md`）：
+  - top50 +1.9pp、60d +2.0pp、rev_weight0.3 +0.6pp、择时 +1.35pp；B2 组合全样本 CAGR +11.2% / Sharpe 0.74（基线 +5.4% / 0.42）；
+  - WFA 样本外 -0.1% 约打平、衰减比 0.62 → 参数提升须打折预期；
+  - 决策：**不改默认参数**，P0 行动项 = 补全市场数据后复验（衰减比 ≥0.8 且参数一致率 ≥0.75 再切换）。
 
-## 四、改动清单（GLM 本轮）
+## 四、GLM 前端体验修复（第二轮）
+
+| 问题 | 级别 | 修复 |
+|---|---|---|
+| 风险管理页/策略监控页直读旧 `data/daily/{sym}.parquet`，分区迁移后价格全部"数据缺失"，VaR/流动性/市值全部失效 | P0 | 统一改走 `BarStore`（`api.manual_trading_api.latest_prices` + `_load_bars_frame`） |
+| 手动交易页审批/取消/调减/成交录入/对账后，计划列表、详情、复盘、账户面板全部停留旧状态 | P0 | 事件依赖 `.then()` 级联刷新（组件创建后统一追加，避免 UnboundLocalError） |
+| 计划切换不联动"执行复盘"面板 | P1 | `plan_selector.change` 合并 plan_view + execution_view |
+
+## 五、改动清单（GLM 本轮）
 
 - 新增：`quart/manual_trading/broker_profiles.py`、`scripts/optimize_strategy.py`、
   `tests/test_broker_profiles.py`、`tests/test_daily_pipeline_e2e.py`
 - 修改：`quart/manual_trading/io.py`（broker CSV 导入）、`quart/data/store.py`（空 glob 修复）、
-  `api/strategy_api.py`（live_allowlist/准入标记）、`frontend/pages/strategy_monitor.py`（准入状态表）、
+  `api/strategy_api.py`（live_allowlist/准入标记）、`frontend/pages/strategy_monitor.py`（准入状态表 + BarStore 价格）、
+  `frontend/pages/manual_trading.py`（级联刷新）、`frontend/pages/risk_management.py`（BarStore 价格/VaR/流动性）、
+  `api/manual_trading_api.py`（latest_prices 公共化）、
   `tests/test_trading_calendar.py`、`tests/test_frontend_data.py`、README、两份规划文档、本文件
+
+## 六、最终验证（GLM）
+
+```text
+.venv/Scripts/python.exe -m pytest tests/ -q
+=> 274 passed, 2 warnings in 77.15s（全绿，含本轮全部新增/修复）
+```

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import gradio as gr
 import pandas as pd
 
-from api.manual_trading_api import manual_settings, repository
+from api.manual_trading_api import latest_prices, manual_settings, repository
 from api.strategy_api import (
     STRATEGY_META,
     strategy_catalog,
@@ -115,19 +115,14 @@ def _get_holdings_data():
     positions = state.total_positions
 
     stock_names = load_stock_names()
+    # 统一走 BarStore 分区查询（2026-08-31 修复：旧 per-symbol parquet 路径已迁移，直读会全部"数据缺失"）
+    prices = latest_prices(list(positions))
     pos_data = []
     total_value = cash
     missing = []
 
     for sym, shares in positions.items():
-        price = None
-        daily_path = f"data/daily/{sym}.parquet"
-        if os.path.exists(daily_path):
-            try:
-                df = pd.read_parquet(daily_path)
-                price = df["close"].iloc[-1]
-            except Exception:
-                pass
+        price = float(prices.get(sym, 0.0)) or None
         if not price or price <= 0:
             # 缺数据持仓按 price=0 计入会拉低其余持仓权重，单列提示不计入权重分母
             missing.append({"代码": sym, "名称": stock_names.get(sym, "-"),

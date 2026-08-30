@@ -4,7 +4,6 @@
 """
 from __future__ import annotations
 
-import os
 
 import gradio as gr
 import numpy as np
@@ -98,20 +97,30 @@ def _get_holdings():
 
 
 def _load_prices(positions: dict) -> pd.DataFrame:
-    """加载持仓最新价格"""
+    """加载持仓最新价格。
+
+    2026-08-31 修复：存储已迁移为 year=YYYY 分区布局，旧 per-symbol
+    parquet 路径不存在导致本页全部显示"数据缺失"；统一改走 BarStore。
+    """
+    from api.manual_trading_api import latest_prices
+
+    prices = latest_prices(list(positions))
     rows = []
     for sym, shares in positions.items():
-        price = 0.0
-        daily_path = f"data/daily/{sym}.parquet"
-        if os.path.exists(daily_path):
-            try:
-                df = pd.read_parquet(daily_path)
-                price = float(df["close"].iloc[-1])
-            except Exception:
-                pass
+        price = float(prices.get(sym, 0.0))
         rows.append({"code": sym, "shares": shares, "price": price,
                      "value": shares * price})
     return pd.DataFrame(rows)
+
+
+def _load_bars_frame(symbols: list) -> pd.DataFrame:
+    """统一 BarStore 分区查询（兼容新旧布局），返回长表 date/symbol/close/amount。"""
+    from quart.data.store import BarStore
+
+    try:
+        return BarStore().load(symbols=[str(s) for s in symbols])
+    except Exception:
+        return pd.DataFrame()
 
 
 def _build_var_chart(returns: pd.Series) -> go.Figure:
@@ -210,17 +219,14 @@ def render():
             """)
 
             returns_data = []
-            for sym in positions:
-                daily_path = f"data/daily/{sym}.parquet"
-                if os.path.exists(daily_path):
-                    try:
-                        df = pd.read_parquet(daily_path)
-                        if len(df) > 60:
-                            # 必须以股票代码命名 Series，否则 concat 后列名全是 "close"，
-                            # 无法按持仓代码对齐（修复前有持仓时此处必然崩溃）
-                            returns_data.append(df["close"].pct_change().dropna().tail(60).rename(sym))
-                    except Exception:
-                        pass
+            bars_frame = _load_bars_frame(list(positions))
+            if not bars_frame.empty:
+                for sym, group in bars_frame.groupby("symbol"):
+                    close = pd.Series(group["close"].astype(float).values)
+                    if len(close) > 60:
+                        returns_data.append(
+                            close.pct_change().dropna().tail(60).rename(str(sym))
+                        )
 
             if returns_data:
                 ret_df = pd.concat(returns_data, axis=1).fillna(0)
@@ -260,19 +266,20 @@ def render():
 
             names = load_stock_names()
             liq_rows = []
-            for sym, shares in positions.items():
-                daily_path = f"data/daily/{sym}.parquet"
-                if os.path.exists(daily_path):
-                    try:
-                        df = pd.read_parquet(daily_path)
-                        if len(df) > 20:
-                            price = float(df["close"].iloc[-1])
+            if not bars_frame.empty:
+                for sym, shares in positions.items():
+                    group = bars_frame[bars_frame["symbol"].astype(str) == str(sym)]
+                    if len(group) > 20:
+                        try:
+                            close = pd.Series(group["close"].astype(float).values)
+                            amount = pd.Series(group["amount"].astype(float).values)
+                            price = float(close.iloc[-1])
                             value = shares * price
-                            avg_amt = float(df["amount"].tail(20).mean())
+                            avg_amt = float(amount.tail(20).mean())
                             days = value / avg_amt if avg_amt > 0 else float("inf")
                             # Amihud
-                            ret = df["close"].pct_change().abs()
-                            amihud = (ret / df["amount"]).tail(60).mean() * 1e9
+                            ret = close.pct_change().abs()
+                            amihud = (ret / amount).tail(60).mean() * 1e9
                             liq_rows.append({
                                 "代码": sym, "名称": names.get(sym, "-"),
                                 "持仓市值": f"{value:,.0f}",
@@ -280,8 +287,8 @@ def render():
                                 "变现天数": f"{days:.1f}",
                                 "Amihud ⓘ": f"{amihud:.2f}",
                             })
-                    except Exception:
-                        pass
+                        except Exception:
+                            pass
 
             if liq_rows:
                 liq_df = pd.DataFrame(liq_rows).sort_values("变现天数", ascending=False)
