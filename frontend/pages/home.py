@@ -7,7 +7,7 @@ import pandas as pd
 from api.backtest_api import get_backtest_list, get_backtest_summary, get_window_stats
 from api.research_api import latest_sweep_headlines
 from api.strategy_api import strategy_catalog
-from frontend.theme import metric_card, page_header
+from frontend.theme import metric_card, page_header, info_card
 
 
 def _fmt_pct(v, digits: int = 1) -> str:
@@ -33,7 +33,7 @@ def _color_by_sign(v) -> str:
 def _summary_html(name: str | None) -> str:
     """所选回测结果的完整摘要 HTML（统一卡片口径，供下拉切换刷新）。"""
     if not name:
-        return "*暂无回测结果，请先在回测中心运行回测。*"
+        return info_card("*暂无回测结果，请先在回测中心运行回测。*")
     s = get_backtest_summary(name) or {}
     ws = get_window_stats(name) or {}
     strategy = name.rsplit("_", 1)[0] if "_" in name else name
@@ -46,6 +46,30 @@ def _summary_html(name: str | None) -> str:
     excess = s.get("bench_excess_cagr")
     w1y = ws.get("last_1y") or {}
     w6m = ws.get("last_6m") or {}
+
+    # 基本信息卡片
+    info_html = f"""
+    <div class="info-card" style="margin-bottom: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+            <div>
+                <div style="font-size: 0.85rem; color: #666; margin-bottom: 0.25rem;">所选结果</div>
+                <div style="font-size: 1.1rem; font-weight: 600; color: #333;">`{name}`</div>
+            </div>
+            <div>
+                <div style="font-size: 0.85rem; color: #666; margin-bottom: 0.25rem;">策略</div>
+                <div style="font-size: 1.1rem; font-weight: 600; color: #1565C0;">{desc}</div>
+            </div>
+            <div>
+                <div style="font-size: 0.85rem; color: #666; margin-bottom: 0.25rem;">回测区间</div>
+                <div style="font-size: 1rem; color: #333;">{s.get('start', '-')} ~ {s.get('end', '-')}</div>
+            </div>
+            <div>
+                <div style="font-size: 0.85rem; color: #666; margin-bottom: 0.25rem;">基准</div>
+                <div style="font-size: 1rem; color: #333;">沪深300</div>
+            </div>
+        </div>
+    </div>
+    """
 
     rows = [
         (
@@ -87,16 +111,10 @@ def _summary_html(name: str | None) -> str:
         ),
     ]
 
-    parts = [
-        f"**所选结果**: `{name}`",
-        f"**策略**: {desc}",
-        f"**回测区间**: {s.get('start', '-')} ~ {s.get('end', '-')}　**基准**: 沪深300",
-        "",
-    ]
+    parts = [info_html]
     for title, cards in rows:
-        parts.append(f"**{title}**")
-        parts.append("<div style='display:flex; gap:8px; flex-wrap:wrap'>" + "".join(cards) + "</div>")
-        parts.append("")
+        parts.append(f'<div style="margin: 1rem 0 0.5rem 0; font-weight: 600; color: #333;">{title}</div>')
+        parts.append("<div style='display:flex; gap:12px; flex-wrap:wrap'>" + "".join(cards) + "</div>")
     return "\n".join(parts)
 
 
@@ -107,53 +125,94 @@ def render():
 
         names = get_backtest_list()
         default = names[-1] if names else None
-        gr.Markdown("### 📌 回测结果查看（可选择任意一次回测，默认最新）")
-        result_dd = gr.Dropdown(
-            label="选择要查看的回测结果",
-            choices=names,
-            value=default,
-            filterable=True,
-        )
-        summary_html = gr.HTML(value=_summary_html(default))
-        result_dd.change(_summary_html, inputs=[result_dd], outputs=[summary_html])
+        
+        with gr.Accordion("📌 回测结果查看（可选择任意一次回测，默认最新）", open=True):
+            result_dd = gr.Dropdown(
+                label="选择要查看的回测结果",
+                choices=names,
+                value=default,
+                filterable=True,
+            )
+            summary_html = gr.HTML(value=_summary_html(default))
+            result_dd.change(_summary_html, inputs=[result_dd], outputs=[summary_html])
 
         gr.Markdown("---")
 
         # 最新验证结果：每个策略最新一次参数扫描的最优行（数据关联 reports/sweep_*.csv）
         heads = latest_sweep_headlines()
         if heads is not None and not heads.empty:
-            gr.Markdown("### 🔬 最新验证结果（来自各策略最新参数扫描，按 CAGR 排序）")
-            show = heads.copy()
-            for c, fmt in (("CAGR", _fmt_pct), ("最大回撤", _fmt_pct)):
-                if c in show.columns:
-                    show[c] = show[c].map(_fmt_pct)
-            if "夏普" in show.columns:
-                show["夏普"] = show["夏普"].map(lambda v: _fmt_num(v))
-            if "换手x" in show.columns:
-                show["换手x"] = show["换手x"].map(lambda v: "-" if pd.isna(v) else f"{v:.1f}x")
-            gr.Dataframe(value=show, interactive=False)
+            with gr.Accordion("🔬 最新验证结果（来自各策略最新参数扫描，按 CAGR 排序）", open=False):
+                show = heads.copy()
+                for c, fmt in (("CAGR", _fmt_pct), ("最大回撤", _fmt_pct)):
+                    if c in show.columns:
+                        show[c] = show[c].map(_fmt_pct)
+                if "夏普" in show.columns:
+                    show["夏普"] = show["夏普"].map(lambda v: _fmt_num(v))
+                if "换手x" in show.columns:
+                    show["换手x"] = show["换手x"].map(lambda v: "-" if pd.isna(v) else f"{v:.1f}x")
+                gr.Dataframe(value=show, interactive=False)
 
-        gr.Markdown("### 📚 策略库（由后端 REGISTRY 驱动，与回测中心/策略监控同源）")
-        md_rows = ["| 策略 | 名称 | 状态 | 默认换手/持仓 | 说明 |", "|------|------|------|------|------|"]
-        for r in strategy_catalog():
-            md_rows.append(
-                f"| `{r['name']}` | {r['label']} | {r['status']} | "
-                f"{r['default_rebalance']}日 / Top{r['default_top_k']} | {r['desc']} |"
-            )
-        gr.Markdown("\n".join(md_rows))
+        with gr.Accordion("📚 策略库（由后端 REGISTRY 驱动，与回测中心/策略监控同源）", open=False):
+            md_rows = ["| 策略 | 名称 | 状态 | 默认换手/持仓 | 说明 |", "|------|------|------|------|------|"]
+            for r in strategy_catalog():
+                md_rows.append(
+                    f"| `{r['name']}` | {r['label']} | {r['status']} | "
+                    f"{r['default_rebalance']}日 / Top{r['default_top_k']} | {r['desc']} |"
+                )
+            gr.Markdown("\n".join(md_rows))
 
-        gr.Markdown("### 功能模块")
-        gr.Markdown("""
-        | 模块 | 说明 |
-        |------|------|
-        | 🗃️ 数据总览 | 股票池 / 数据覆盖 / 市场概览 |
-        | 🔬 因子研究 | IC/ICIR / 因子表现 / 选股能力 |
-        | 📈 回测中心 | 净值曲线 / 完整交易记录 / 成本分解 / 参数扫描 / 研究报告 |
-        | 📋 每日信号 | 持仓建议 / 调仓信号 / ML预测 |
-        | 📡 策略监控 | 任务执行 / 运行状态 / 持仓分析 |
-        | 🧩 归因分析 | Brinson归因 / 行业分布 / 收益分解 |
-        | 🛡️ 风险管理 | VaR/CVaR / 集中度 / 流动性 |
-        | 🌿 因子生态 | IC衰减 / IC时序 / 拥挤度 / 预警 |
-        | 🔍 回测诊断 | Walk-Forward / 过拟合检验 |
-        | 📖 参数词典 | 量化参数含义 / 计算方法 |
-        """)
+        with gr.Accordion("🧩 功能模块", open=True):
+            gr.Markdown("""
+            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem;">
+                <div class="info-card">
+                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🗃️</div>
+                    <div style="font-weight: 600; margin-bottom: 0.25rem;">数据总览</div>
+                    <div style="font-size: 0.9rem; color: #666;">股票池 / 数据覆盖 / 市场概览</div>
+                </div>
+                <div class="info-card">
+                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🔬</div>
+                    <div style="font-weight: 600; margin-bottom: 0.25rem;">因子研究</div>
+                    <div style="font-size: 0.9rem; color: #666;">IC/ICIR / 因子表现 / 选股能力</div>
+                </div>
+                <div class="info-card">
+                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📈</div>
+                    <div style="font-weight: 600; margin-bottom: 0.25rem;">回测中心</div>
+                    <div style="font-size: 0.9rem; color: #666;">净值曲线 / 完整交易记录 / 成本分解 / 参数扫描</div>
+                </div>
+                <div class="info-card">
+                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📋</div>
+                    <div style="font-weight: 600; margin-bottom: 0.25rem;">每日信号</div>
+                    <div style="font-size: 0.9rem; color: #666;">持仓建议 / 调仓信号 / ML预测</div>
+                </div>
+                <div class="info-card">
+                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📡</div>
+                    <div style="font-weight: 600; margin-bottom: 0.25rem;">策略监控</div>
+                    <div style="font-size: 0.9rem; color: #666;">任务执行 / 运行状态 / 持仓分析</div>
+                </div>
+                <div class="info-card">
+                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🧩</div>
+                    <div style="font-weight: 600; margin-bottom: 0.25rem;">归因分析</div>
+                    <div style="font-size: 0.9rem; color: #666;">Brinson归因 / 行业分布 / 收益分解</div>
+                </div>
+                <div class="info-card">
+                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🛡️</div>
+                    <div style="font-weight: 600; margin-bottom: 0.25rem;">风险管理</div>
+                    <div style="font-size: 0.9rem; color: #666;">VaR/CVaR / 集中度 / 流动性</div>
+                </div>
+                <div class="info-card">
+                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🌿</div>
+                    <div style="font-weight: 600; margin-bottom: 0.25rem;">因子生态</div>
+                    <div style="font-size: 0.9rem; color: #666;">IC衰减 / IC时序 / 拥挤度 / 预警</div>
+                </div>
+                <div class="info-card">
+                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🔍</div>
+                    <div style="font-weight: 600; margin-bottom: 0.25rem;">回测诊断</div>
+                    <div style="font-size: 0.9rem; color: #666;">Walk-Forward / 过拟合检验</div>
+                </div>
+                <div class="info-card">
+                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📖</div>
+                    <div style="font-weight: 600; margin-bottom: 0.25rem;">参数词典</div>
+                    <div style="font-size: 0.9rem; color: #666;">量化参数含义 / 计算方法</div>
+                </div>
+            </div>
+            """)

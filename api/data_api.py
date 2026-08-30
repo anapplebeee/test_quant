@@ -76,13 +76,19 @@ def get_index_coverage() -> pd.DataFrame:
 
 
 def get_stock_stats() -> dict:
-    """获取股票统计数据（BarStore 双布局兼容）"""
+    """获取股票统计数据（BarStore 双布局兼容）。
+
+    口径说明（2026-08-31 修复）：`index_count` 是**已覆盖指数个数**（唯一代码数，
+    与 stock_count 的"唯一代码数"口径一致），不再是按年分区的指数文件数——
+    后者会随时间/指数历史跨度膨胀（上证指数 1990 年起 37 个年份文件），易被误读。
+    """
     scores_path = _scores_path()
 
     stats = {
         "stock_count": 0,
         "universe_count": 0,
         "index_count": 0,
+        "index_file_count": 0,
         "index_boards": {},
         "last_score_date": "N/A",
     }
@@ -98,20 +104,21 @@ def get_stock_stats() -> dict:
         degraded("universe_count", e)
 
     try:
-        stats["index_count"] = _count_partitioned(index_dir())
+        stats["index_file_count"] = _count_partitioned(index_dir())
     except Exception as e:
-        degraded("index_count", e)
+        degraded("index_file_count", e)
 
     try:
         coverage = get_index_coverage()
         if not coverage.empty:
             covered = coverage[coverage["状态"].str.startswith("✅")]
+            stats["index_count"] = int(len(covered))
             stats["index_boards"] = {
                 board: int((covered["板块"] == board).sum())
                 for board in BOARDS
             }
     except Exception as e:
-        degraded("index_boards", e)
+        degraded("index_count", e)
 
     try:
         if scores_path.exists():

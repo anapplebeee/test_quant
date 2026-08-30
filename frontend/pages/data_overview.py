@@ -47,8 +47,9 @@ def render():
         gr.Markdown("---")
         gr.Markdown("### 📊 指数覆盖（按板块分类）")
         gr.Markdown(
-            "*上证/深证/创业板/中证/科创等常用指数。⬜ 未拉取时可在 🧰 操作中心运行"
-            "「更新交易日历」同级的 `scripts/update_indices.py` 批量补齐。*"
+            "*口径说明：**指数数量 = 已覆盖指数个数**（与股票数量的「唯一代码数」口径一致）；"
+            f"实际指数日线文件 {stats.get('index_file_count', '-')} 个（按年分区，上证指数历史可回溯至 1990 年）。"
+            "⬜ 未拉取时可在 🧰 操作中心运行「更新常用指数」批量补齐。*"
         )
         coverage = get_index_coverage()
         gr.Dataframe(value=coverage, interactive=False, max_height=320)
