@@ -59,10 +59,10 @@ def test_catalog_marks_admitted_strategies():
 
 
 def test_defaults_lowvol_indz_uses_override():
-    # settings.yaml: 正式候选采用 45 日 / Top30
+    # settings.yaml: 2026-08-31 起正式候选采用 60 日 / Top50 / rev0.3
     d = get_strategy_defaults("lowvol_indz")
-    assert d["rebalance_days"] == 45
-    assert d["top_k"] == 30
+    assert d["rebalance_days"] == 60
+    assert d["top_k"] == 50
     # 无 override 的策略回退全局默认
     d2 = get_strategy_defaults("ml_rank")
     assert d2["rebalance_days"] >= 1

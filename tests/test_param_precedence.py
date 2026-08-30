@@ -14,12 +14,13 @@ def test_explicit_params_beat_overrides():
 
 
 def test_override_applies_when_not_explicit():
-    # settings.yaml: 低频防御候选采用 45 日调仓
+    # settings.yaml: 2026-08-31 起低频防御候选采用 60 日调仓 / Top50 / 反转叠加 0.3
     s = build_strategy("lowvol_indz")
-    assert s.params.get("rebalance_days") == 45
-    assert s.params.get("top_k") == 30
+    assert s.params.get("rebalance_days") == 60
+    assert s.params.get("top_k") == 50
     assert s.params.get("rank_buffer") == 0.5
     assert s.params.get("industry_z") is True
+    assert s.params.get("rev_weight") == 0.3
 
 
 def test_strategy_override_beats_global_defaults():

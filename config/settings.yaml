@@ -41,16 +41,21 @@ strategy:
   # 换手频率扫描（累计/最大回撤/笔数）：5日 -31.7%/-42.2%/1779 → 20日 +2.1%/-18.5%/721
   #   → 30日 +31.2%/-19.5%/509 → 40日 +40.4%/-16.7%/379 → 60日 +38.2%/-23.7%/234。
   # 40 日为最优（收益最高、回撤最小）；60 日起信号衰减、回撤放大。
+  # 2026-08-31 更新（GLM，本地 195 只池实验 + 市场环境）：
+  #   lowvol_indz → top50/60d/rev0.3（B2 组合，全样本 CAGR +11.2% vs 基线 +5.4%，
+  #   Sharpe 0.74 vs 0.42）。市场 PE 分位 87-97%（高估）+ 高低切换，防御分散适配。
+  #   注意：小池口径 + WFA 衰减比 0.62，预期收益打折；全市场数据补齐后复验。
   overrides:
     lowvol_composite:
       rebalance_days: 40
       top_k: 20
       rank_buffer: 0.5
     lowvol_indz:
-      rebalance_days: 45
-      top_k: 30
+      rebalance_days: 60
+      top_k: 50
       rank_buffer: 0.5
       industry_z: true
+      rev_weight: 0.3
     # 双均线策略每日换仓为成本杀手，默认降频到 5 日
     dual_ma:
       rebalance_days: 5

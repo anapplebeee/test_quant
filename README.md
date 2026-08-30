@@ -202,7 +202,7 @@ uv run python scripts/manual_trade.py reconcile state/broker_snapshot.json `
 |---|---|
 | `data` | 前复权采集 · 板块/ST/次新股(上市<120天)过滤 · hfq_pins 防复权再污染 · **退市股回填(195只, baostock, 幸存者偏差实测 -2.0~-2.6pp/yr)** |
 | `backtest` | 初始资金、佣金万2.5最低5元、印花税万5(卖出)、过户费、滑点千1(双边不利方向) |
-| `strategy` | 默认 `lowvol_indz` · 正式信号白名单 · Top30 · 45日调仓 · `rank_buffer=0.5` · 行业内 z-score；其他策略使用独立 overrides |
+| `strategy` | 默认 `lowvol_indz` · 正式信号白名单 · **Top50 · 60日调仓** · `rank_buffer=0.5` · `rev_weight=0.3` · 行业内 z-score；其他策略使用独立 overrides（2026-08-31 更新，见下） |
 | `risk` | 单票仓位上限25%、单日亏损阈值 |
 | `manual_trading` | 手动交易账本开关、账户名、SQLite 路径、旧持仓自动迁移 |
 | `notify` | 钉钉 webhook + 加签 secret（可用环境变量 QUART_DINGTALK_WEBHOOK/SECRET 覆盖） |
@@ -376,6 +376,8 @@ uv run python scripts/walk_forward.py --strategy ml_rank
 完整 18 组合参数扫描见 `reports/param_sweep_repaired_engine_2026-08-28.md`；缓冲带/退市股隔离/旧值结案见 `reports/turnover_buffer_2026-08-28.md`；周期曲线/换手地板/随机定标见 `reports/rebalance_period_2026-08-28.md`；近1年/近半年窗口见 `reports/recent_windows_2026-08-28.csv`。
 
 注（08-28 晚口径修正）：`_group_z` 改样本口径（ddof=1，与全市场 z 一致）后重测，top30@45d 全周期 CAGR +7.4%→+7.8%、近1年 +18.7%→+20.4%；top20@45d +7.1%→+6.5%。量级在参数敏感度内，结论不变。
+
+**注（08-31 参数落地，GLM）**：本地池（195 只）实验后，`lowvol_indz` 默认参数更新为 **Top50 / 60日 / rev_weight=0.3**（B2 组合）：全样本 CAGR +5.4%→**+11.2%**、Sharpe 0.42→**0.74**、MDD -27.1%→-28.0%。依据与风险见 `reports/strategy_optimization_2026-08-31.md`：小池口径 + WFA 衰减比 0.62，预期收益应打折（个位数年化）；全市场数据补齐后必须复验，衰减比 ≥0.8 且参数一致率 ≥0.75 方可长期保留。
 
 注：上表前四行跑在早期朴素 MA 择时口径（无迟滞带）；lowvol_indz 旧值 -4.9% 已由 `scripts/diag_regime_band.py` 结案——差异 100% 来自择时迟滞带（+4.1pp/yr），旧 sweep 作废，以缓冲带行为准。
 
