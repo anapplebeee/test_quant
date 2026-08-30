@@ -8,6 +8,7 @@ from quart.strategy import REGISTRY
 from api.strategy_api import (
     STRATEGY_META,
     get_strategy_defaults,
+    live_signal_choices,
     strategy_catalog,
     strategy_choices,
 )
@@ -29,6 +30,10 @@ def test_strategy_choices_covers_registry():
     assert "dual_ma" in choices
 
 
+def test_live_signal_choices_excludes_research_strategies():
+    assert live_signal_choices() == ["lowvol_indz"]
+
+
 def test_meta_covers_registry():
     assert set(STRATEGY_META.keys()) == set(REGISTRY.keys())
 
@@ -41,9 +46,10 @@ def test_catalog_defaults_consistent():
 
 
 def test_defaults_lowvol_indz_uses_override():
-    # settings.yaml: strategy.overrides.lowvol_indz.rebalance_days=40（并行会话 2026-08-28 设）
+    # settings.yaml: 正式候选采用 45 日 / Top30
     d = get_strategy_defaults("lowvol_indz")
-    assert d["rebalance_days"] == 40
+    assert d["rebalance_days"] == 45
+    assert d["top_k"] == 30
     # 无 override 的策略回退全局默认
     d2 = get_strategy_defaults("ml_rank")
     assert d2["rebalance_days"] >= 1

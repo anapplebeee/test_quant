@@ -21,6 +21,8 @@ from frontend.pages import (
     factor_research,
     glossary,
     home,
+    manual_trading,
+    operations,
     risk_management,
     strategy_monitor,
 )
@@ -32,9 +34,11 @@ def create_app() -> gr.Blocks:
     page_modules = [
         home,
         data_overview,
+        operations,
         factor_research,
         backtest,
         daily_signal,
+        manual_trading,
         strategy_monitor,
         attribution,
         risk_management,

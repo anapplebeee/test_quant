@@ -133,10 +133,11 @@ def render():
             gr.Dataframe(value=show, interactive=False)
 
         gr.Markdown("### 📚 策略库（由后端 REGISTRY 驱动，与回测中心/策略监控同源）")
-        md_rows = ["| 策略 | 名称 | 默认换手/持仓 | 说明 |", "|------|------|------|------|"]
+        md_rows = ["| 策略 | 名称 | 状态 | 默认换手/持仓 | 说明 |", "|------|------|------|------|------|"]
         for r in strategy_catalog():
             md_rows.append(
-                f"| `{r['name']}` | {r['label']} | {r['default_rebalance']}日 / Top{r['default_top_k']} | {r['desc']} |"
+                f"| `{r['name']}` | {r['label']} | {r['status']} | "
+                f"{r['default_rebalance']}日 / Top{r['default_top_k']} | {r['desc']} |"
             )
         gr.Markdown("\n".join(md_rows))
 

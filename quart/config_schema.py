@@ -33,6 +33,7 @@ SPEC: dict[str, tuple[type | tuple[type, ...], bool, str]] = {
     "backtest.impact_coef": ((int, float), False, "冲击成本系数（按 ADV 参与率）"),
     "backtest.min_order_value": ((int, float), False, "最小委托名义额"),
     "strategy.name": ((str,), True, "默认策略名"),
+    "strategy.live_allowlist": ((list,), False, "允许生成正式交易计划的策略白名单"),
     "strategy.top_k": ((int,), False, "持仓数量"),
     "strategy.rebalance_days": ((int,), False, "调仓周期"),
     "strategy.max_weight_pct": ((int, float), False, "单票权重上限"),

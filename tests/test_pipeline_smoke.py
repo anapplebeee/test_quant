@@ -56,6 +56,24 @@ def test_generate_orders_force_flat_sells_everything():
     assert all(o.side == "SELL" for o in orders)
 
 
+def test_generate_orders_caps_sell_by_t1_sellable_quantity():
+    prices = pd.Series({"A": 10.0})
+    warnings: list[str] = []
+    orders, _ = generate_orders(
+        {FLAT: 1.0},
+        prices,
+        cash=0.0,
+        positions={"A": 1_000},
+        sellable_positions={"A": 400},
+        force_flat=True,
+        warnings=warnings,
+    )
+    assert len(orders) == 1
+    assert orders[0].shares == 400
+    assert orders[0].deferred_shares == 600
+    assert any("T+1" in warning and "600" in warning for warning in warnings)
+
+
 def test_generate_orders_is_affordable_after_fees():
     """委托计划必须买得起——含费用在内不能超出可用资金。"""
     prices = pd.Series({"A": 10.0})

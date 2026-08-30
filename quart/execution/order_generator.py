@@ -79,6 +79,11 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
     # 按代码排序保证同分结果确定（回测可复现）。
     for sym in sorted(positions.keys()):
         shares = positions[sym]
+        sellable = (
+            shares
+            if ctx.sellable_positions is None
+            else max(0, min(shares, int(ctx.sellable_positions.get(sym, 0))))
+        )
         base_price = _price(ctx, ctx.exec_prices, sym)
         prev_close = _price(ctx, ctx.prev_closes, sym)
         ref_price = prev_close if math.isfinite(prev_close) else base_price
@@ -99,23 +104,41 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
         weight = 0.0
 
         if is_flat:
-            sell_shares = shares
+            requested_sell_shares = shares
         else:
             weight = float(targets.get(sym, 0.0))
             desired_value = weight * equity_mark
             delta = desired_value - position_notional
             if weight <= 0:
-                sell_shares = shares
+                requested_sell_shares = shares
             elif delta < -ctx.min_order_value:
                 px0 = model.exec_price(sym, SELL, base_price, abs(delta), position_notional, _adv(ctx, sym))
                 if not math.isfinite(px0) or px0 <= 0:
                     continue
                 lots = math.floor(abs(delta) / (px0 * lot))
-                sell_shares = int(min(shares, lots * lot))
+                requested_sell_shares = int(min(shares, lots * lot))
             else:
                 continue
 
+        sell_shares = min(requested_sell_shares, sellable)
+        deferred_shares = requested_sell_shares - sell_shares
+        if deferred_shares > 0:
+            notes.append(
+                f"{sym}: 计划卖出 {requested_sell_shares} 股，其中 {deferred_shares} 股受 T+1/冻结约束延期"
+            )
         if sell_shares <= 0:
+            if deferred_shares > 0:
+                skipped.append(
+                    OrderPlan(
+                        sym,
+                        SELL,
+                        0,
+                        ref_price,
+                        base_price,
+                        blocked_reason="T+1/冻结导致当日无可卖数量",
+                        deferred_shares=deferred_shares,
+                    )
+                )
             continue
         # 清仓分支不检查 position_notional：一字板/停牌股也应尽力挂单卖出
         if not is_flat and not math.isfinite(position_notional):
@@ -149,6 +172,7 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
                 weight=weight,
                 fee=fee,
                 amount=amount,
+                deferred_shares=deferred_shares,
             )
         )
 

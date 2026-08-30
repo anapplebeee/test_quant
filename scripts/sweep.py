@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import json
 from pathlib import Path
 
 import pandas as pd
@@ -17,7 +16,7 @@ from quart.data.market import MarketData
 from quart.data.store import BarStore
 from quart.data.universe import filter_for_simulation
 from quart.risk.rules import make_weight_validator
-from quart.strategy import REGISTRY, build_strategy
+from quart.strategy import build_strategy
 
 console = Console()
 
@@ -122,7 +121,7 @@ def main() -> None:
                       f"kept {filtered['symbol'].nunique()}")
         md = MarketData.from_bars(filtered, benchmark=bench)
     bench_close = bench.set_index("date")["close"].reindex(md.dates).ffill()
-    base_params = {k: v for k, v in cfg["strategy"].items() if k != "name"}
+    base_params = dict(build_strategy(args.strategy).params)
     combos = [parse_combo(c) for c in args.combo] or [{}]
 
     risk_pipeline = None

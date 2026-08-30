@@ -48,6 +48,7 @@ def generate_orders(
     warnings: list[str] | None = None,
     fees: Fees | None = None,
     prev_close: pd.Series | None = None,
+    sellable_positions: dict[str, int] | None = None,
 ) -> tuple[list[OrderPlan], float]:
     """生成次日委托计划。
 
@@ -80,6 +81,7 @@ def generate_orders(
         equity=equity,
         cash=cash,
         positions=positions,
+        sellable_positions=sellable_positions,
         mark_prices=latest_close,
         exec_prices=latest_close,
         prev_closes=prev_close,
@@ -173,6 +175,12 @@ def run_daily(
 ) -> str:
     cfg = load_config()
     strategy_name = strategy_name or cfg["strategy"]["name"]
+    live_allowlist = set(cfg.get("strategy", {}).get("live_allowlist") or [])
+    if live_allowlist and strategy_name not in live_allowlist:
+        raise ValueError(
+            f"策略 {strategy_name!r} 未进入实盘信号白名单；"
+            f"允许策略: {sorted(live_allowlist)}。请先完成样本外与模拟盘验收。"
+        )
     store = BarStore()
     stale = store.freshness_days()
     if stale is None:
@@ -199,8 +207,7 @@ def run_daily(
     )
 
     md = MarketData.from_bars(bars, benchmark=bench)
-    strategy_params = {k: v for k, v in cfg["strategy"].items() if k != "name"}
-    strategy = build_strategy(strategy_name, **strategy_params)
+    strategy = build_strategy(strategy_name)
     strategy.prepare(md)
     i = len(md.dates) - 1
     raw_weights = strategy.target_weights(i)
@@ -233,8 +240,10 @@ def run_daily(
     if account_state is not None:
         cash = account_state.cash_available_to_trade
         positions = account_state.total_positions
+        sellable_positions = account_state.sellable_positions
     else:
         cash, positions = load_holdings()
+        sellable_positions = positions
     last_close = md.closes.iloc[i]
     equity = cash + sum(
         sh * last_close[sym]
@@ -253,7 +262,10 @@ def run_daily(
     prev_close = md.closes.iloc[i - 1] if i > 0 else last_close
     orders, equity = generate_orders(
         weights, last_close, cash, positions,
-        force_flat=force_flat, warnings=warnings, prev_close=prev_close,
+        force_flat=force_flat,
+        warnings=warnings,
+        prev_close=prev_close,
+        sellable_positions=sellable_positions,
     )
     if force_flat:
         warnings.append("策略发出择时清仓(FLAT)信号：建议全部卖出")
@@ -282,6 +294,7 @@ def run_daily(
                     reference_price=order.ref_price,
                     target_weight=order.weight,
                     estimated_fee=order.fee,
+                    deferred_quantity=order.deferred_shares,
                 )
                 for order in orders
             ],

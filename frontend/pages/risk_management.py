@@ -4,14 +4,14 @@
 """
 from __future__ import annotations
 
-import json
 import os
 
+import gradio as gr
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import gradio as gr
 
+from api.manual_trading_api import manual_settings, repository
 from common import load_stock_names
 from frontend.theme import page_header
 
@@ -86,13 +86,15 @@ def _metric_row_html(items: list[tuple[str, str, str, str]]) -> str:
 
 
 def _get_holdings():
-    """读取持仓数据，返回 (positions_dict, cash) 或 (None, None)"""
-    path = "state/holdings.json"
-    if not os.path.exists(path):
+    """从统一 SQLite 账本读取持仓与现金。"""
+    try:
+        _, account_name = manual_settings()
+        state = repository().account_state(account_name)
+    except Exception:
+        state = None
+    if state is None:
         return None, None
-    with open(path, encoding="utf-8") as f:
-        h = json.load(f)
-    return h.get("positions", {}), h.get("cash", 0)
+    return state.total_positions, state.cash_total
 
 
 def _load_prices(positions: dict) -> pd.DataFrame:
@@ -208,7 +210,7 @@ def render():
             """)
 
             returns_data = []
-            for sym in positions.keys():
+            for sym in positions:
                 daily_path = f"data/daily/{sym}.parquet"
                 if os.path.exists(daily_path):
                     try:
@@ -271,7 +273,6 @@ def render():
                             # Amihud
                             ret = df["close"].pct_change().abs()
                             amihud = (ret / df["amount"]).tail(60).mean() * 1e9
-                            days_color = "#C62828" if days > 5 else ("#E65100" if days > 3 else "#2E7D32")
                             liq_rows.append({
                                 "代码": sym, "名称": names.get(sym, "-"),
                                 "持仓市值": f"{value:,.0f}",

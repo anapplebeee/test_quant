@@ -45,6 +45,13 @@ def next_trade_date(value: str | date | datetime, trading_dates: Sequence[str] |
     `settle_date`, 或在后续规则引擎接入权威交易日历。
     """
     current = date.fromisoformat(_iso_date(value))
+    if trading_dates is None:
+        try:
+            from quart.data.calendar import cached_trading_dates
+
+            trading_dates = cached_trading_dates()
+        except Exception:
+            trading_dates = None
     if trading_dates:
         candidates = sorted(date.fromisoformat(_iso_date(item)) for item in trading_dates)
         future = next((item for item in candidates if item > current), None)
@@ -249,6 +256,19 @@ class TradingRepository:
             raise ValueError("手动交易计划必须在信号日之后执行 (T+1 或更晚)")
         plan_id = f"plan_{signal.replace('-', '')}_{uuid.uuid4().hex[:8]}"
         with self._connect() as connection:
+            effective_snapshot_id = account_snapshot_id
+            if effective_snapshot_id is None:
+                snapshot = connection.execute(
+                    """
+                    SELECT snapshot_id
+                    FROM account_snapshots
+                    WHERE account_id = ? AND as_of <= ? AND reconciliation_status = 'RECONCILED'
+                    ORDER BY as_of DESC, snapshot_id DESC
+                    LIMIT 1
+                    """,
+                    (account_id, signal),
+                ).fetchone()
+                effective_snapshot_id = int(snapshot["snapshot_id"]) if snapshot is not None else None
             approved = connection.execute(
                 """
                 SELECT plan_id FROM trade_plans
@@ -279,7 +299,7 @@ class TradingRepository:
                 (
                     plan_id,
                     account_id,
-                    account_snapshot_id,
+                    effective_snapshot_id,
                     strategy_name,
                     signal,
                     intended,
@@ -326,12 +346,26 @@ class TradingRepository:
     def approve_plan(self, plan_id: str) -> None:
         with self._connect() as connection:
             plan = connection.execute(
-                "SELECT status FROM trade_plans WHERE plan_id = ?", (plan_id,)
+                """
+                SELECT p.status, p.signal_date, p.account_snapshot_id,
+                       s.as_of AS snapshot_as_of,
+                       s.reconciliation_status
+                FROM trade_plans p
+                LEFT JOIN account_snapshots s ON s.snapshot_id = p.account_snapshot_id
+                WHERE p.plan_id = ?
+                """,
+                (plan_id,),
             ).fetchone()
             if plan is None:
                 raise KeyError(f"交易计划不存在: {plan_id}")
             if plan["status"] != "DRAFT":
                 raise ValueError(f"只有 DRAFT 计划可以审批, 当前状态: {plan['status']}")
+            if (
+                plan["account_snapshot_id"] is None
+                or plan["reconciliation_status"] != "RECONCILED"
+                or str(plan["snapshot_as_of"] or "") < str(plan["signal_date"])
+            ):
+                raise ValueError("信号日收盘账户尚未对账，禁止审批正式交易计划")
             connection.execute(
                 """
                 UPDATE planned_orders
@@ -344,6 +378,44 @@ class TradingRepository:
                 "UPDATE trade_plans SET status = 'APPROVED', approved_at = ? WHERE plan_id = ?",
                 (_now(), plan_id),
             )
+
+    def expire_plans(
+        self,
+        as_of: str | date | datetime | None = None,
+        account_name: str | None = None,
+    ) -> int:
+        """将交易日已过且尚未成交的计划标记为 EXPIRED。"""
+        effective_date = _iso_date(as_of or date.today())
+        with self._connect() as connection:
+            params: list[object] = [effective_date]
+            account_filter = ""
+            if account_name:
+                account_filter = " AND account_id = (SELECT account_id FROM accounts WHERE account_name = ?)"
+                params.append(account_name)
+            rows = connection.execute(
+                f"""
+                SELECT plan_id FROM trade_plans
+                WHERE intended_trade_date < ? AND status IN ('DRAFT', 'APPROVED')
+                {account_filter}
+                """,
+                params,
+            ).fetchall()
+            plan_ids = [str(row["plan_id"]) for row in rows]
+            if not plan_ids:
+                return 0
+            placeholders = ",".join("?" for _ in plan_ids)
+            connection.execute(
+                f"UPDATE trade_plans SET status = 'EXPIRED', completed_at = ? WHERE plan_id IN ({placeholders})",
+                [_now(), *plan_ids],
+            )
+            connection.execute(
+                f"""
+                UPDATE planned_orders SET status = 'EXPIRED'
+                WHERE plan_id IN ({placeholders}) AND status IN ('DRAFT', 'APPROVED')
+                """,
+                plan_ids,
+            )
+            return len(plan_ids)
 
     def adjust_planned_order(self, planned_order_id: int, approved_quantity: int, reason: str) -> None:
         if approved_quantity < 0:
@@ -433,6 +505,96 @@ class TradingRepository:
                 (plan_id,),
             ).fetchall()
             return {"plan": dict(plan), "orders": [dict(row) for row in orders]}
+
+    def match_planned_order(
+        self,
+        account_id: int,
+        symbol: str,
+        side: str,
+        trade_date: str | date | datetime,
+        quantity: int,
+    ) -> int | None:
+        """按账户、交易日、代码和方向匹配唯一未完成计划订单。"""
+        effective_date = _iso_date(trade_date)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT o.planned_order_id,
+                       COALESCE(o.approved_quantity, 0) - COALESCE(SUM(f.quantity), 0) AS remaining
+                FROM planned_orders o
+                JOIN trade_plans p ON p.plan_id = o.plan_id
+                LEFT JOIN manual_fills f ON f.planned_order_id = o.planned_order_id
+                WHERE p.account_id = ? AND p.intended_trade_date = ?
+                  AND p.status IN ('APPROVED', 'PARTIAL')
+                  AND o.symbol = ? AND o.side = ?
+                GROUP BY o.planned_order_id
+                HAVING remaining >= ?
+                ORDER BY o.planned_order_id
+                """,
+                (account_id, effective_date, symbol, side.upper(), int(quantity)),
+            ).fetchall()
+            return int(rows[0]["planned_order_id"]) if len(rows) == 1 else None
+
+    def list_fills(self, account_name: str = DEFAULT_ACCOUNT_NAME, limit: int = 100) -> list[dict]:
+        if not self.path.exists():
+            return []
+        self.initialize_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT f.*
+                FROM manual_fills f
+                JOIN accounts a ON a.account_id = f.account_id
+                WHERE a.account_name = ?
+                ORDER BY f.trade_date DESC, COALESCE(f.trade_time, '') DESC, f.fill_id DESC
+                LIMIT ?
+                """,
+                (account_name, int(limit)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def execution_summary(self, plan_id: str) -> list[dict]:
+        """返回计划数量、真实成交均价、费用和方向调整后的滑点。"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT o.planned_order_id, o.symbol, o.side, o.strategy_quantity,
+                       COALESCE(o.approved_quantity, o.strategy_quantity) AS approved_quantity,
+                       o.reference_price, o.estimated_fee, o.deferred_quantity,
+                       COALESCE(SUM(f.quantity), 0) AS filled_quantity,
+                       COALESCE(SUM(f.amount), 0) AS filled_amount,
+                       COALESCE(SUM(f.commission + f.stamp_tax + f.transfer_fee + f.other_fee), 0) AS actual_fee
+                FROM planned_orders o
+                LEFT JOIN manual_fills f ON f.planned_order_id = o.planned_order_id
+                WHERE o.plan_id = ?
+                GROUP BY o.planned_order_id
+                ORDER BY CASE o.side WHEN 'SELL' THEN 0 ELSE 1 END, o.symbol
+                """,
+                (plan_id,),
+            ).fetchall()
+        output: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            filled_quantity = int(item["filled_quantity"] or 0)
+            approved_quantity = int(item["approved_quantity"] or 0)
+            reference_price = float(item["reference_price"] or 0.0)
+            average_price = (
+                float(item["filled_amount"]) / filled_quantity if filled_quantity > 0 else 0.0
+            )
+            if average_price > 0 and reference_price > 0:
+                direction = 1.0 if item["side"] == BUY else -1.0
+                slippage_bps = direction * (average_price / reference_price - 1.0) * 10_000
+            else:
+                slippage_bps = 0.0
+            item.update(
+                average_fill_price=average_price,
+                remaining_quantity=max(0, approved_quantity - filled_quantity),
+                completion_pct=(filled_quantity / approved_quantity if approved_quantity > 0 else 1.0),
+                slippage_bps=slippage_bps,
+                fee_difference=float(item["actual_fee"] or 0.0) - float(item["estimated_fee"] or 0.0),
+            )
+            output.append(item)
+        return output
 
     def record_fill(self, account_id: int, fill: FillInput) -> int:
         side = fill.side.upper()

@@ -7,13 +7,17 @@ from __future__ import annotations
 
 import pytest
 
-from api.task_api import ALLOWED_ARGS, validate_extra_args
+from api.task_api import ALLOWED_ARGS, TASKS, validate_extra_args
 
 
 @pytest.mark.parametrize("task_id", ["backtest", "sweep", "signal", "refresh", "ml_train"])
 def test_every_task_has_an_arg_policy(task_id):
     """新增任务时必须显式声明参数白名单，缺省即拒绝（fail-closed）。"""
     assert task_id in ALLOWED_ARGS
+
+
+def test_every_registered_task_is_fail_closed():
+    assert set(TASKS) <= set(ALLOWED_ARGS)
 
 
 def test_accepts_whitelisted_args():
@@ -28,6 +32,19 @@ def test_accepts_top_k_and_rebalance():
 
 def test_accepts_boolean_flags():
     ok, err = validate_extra_args("backtest", ["--no-regime"])
+    assert ok, err
+
+
+def test_accepts_frontend_signal_and_refresh_parameters():
+    ok, err = validate_extra_args(
+        "signal",
+        ["--strategy", "lowvol_indz", "--trade-date", "2026-09-01", "--no-push"],
+    )
+    assert ok, err
+    ok, err = validate_extra_args(
+        "refresh",
+        ["--universe", "index", "--index", "000300", "--start", "20190101"],
+    )
     assert ok, err
 
 

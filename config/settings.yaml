@@ -24,7 +24,10 @@ backtest:
   min_order_value: 1000.0
 
 strategy:
-  name: momentum_rotation
+  # 默认信号只使用经过成本检验的低频防御候选；不代表收益保证。
+  name: lowvol_indz
+  live_allowlist:
+    - lowvol_indz
   top_k: 10
   lookback_days: 60
   rebalance_days: 5
@@ -41,8 +44,12 @@ strategy:
   overrides:
     lowvol_composite:
       rebalance_days: 40
+      top_k: 20
+      rank_buffer: 0.5
     lowvol_indz:
-      rebalance_days: 40
+      rebalance_days: 45
+      top_k: 30
+      rank_buffer: 0.5
       industry_z: true
     # 双均线策略每日换仓为成本杀手，默认降频到 5 日
     dual_ma:

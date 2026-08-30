@@ -1,18 +1,21 @@
 """策略监控页面 - 任务队列/运行状态/持仓分析"""
 from __future__ import annotations
 
-import json
 import os
 import queue
-import threading
-import time
 from datetime import datetime, timedelta
 
-import pandas as pd
 import gradio as gr
+import pandas as pd
 
-from api.strategy_api import STRATEGY_META, strategy_choices as _strategy_choices
-from api.task_api import TASKS, task_queue, get_task_artifacts
+from api.manual_trading_api import manual_settings, repository
+from api.strategy_api import (
+    STRATEGY_META,
+)
+from api.strategy_api import (
+    strategy_choices as _strategy_choices,
+)
+from api.task_api import TASKS, get_task_artifacts, task_queue
 from common import load_stock_names
 from frontend.theme import metric_card, page_header
 
@@ -51,7 +54,7 @@ def on_run_task(task_id: str, strategy: str = ""):
 
     while True:
         try:
-            kind, tid, payload = q.get(timeout=0.5)
+            kind, tid, _payload = q.get(timeout=0.5)
             # 匹配本次提交的实例 ID（第二次提交同名任务是 'xxx#2'，不能用族 ID 全等匹配）
             if tid == instance_id and kind == "done":
                 my_done = True
@@ -99,17 +102,16 @@ def on_refresh_status():
 # ---------- 持仓数据 ----------
 
 def _get_holdings_data():
-    holdings_path = "state/holdings.json"
-    if not os.path.exists(holdings_path):
+    try:
+        _, account_name = manual_settings()
+        state = repository().account_state(account_name)
+    except Exception:
+        state = None
+    if state is None or not state.positions:
         return None, None
 
-    with open(holdings_path, encoding="utf-8") as f:
-        holdings = json.load(f)
-
-    cash = holdings.get("cash", 0)
-    positions = holdings.get("positions", {})
-    if not positions:
-        return None, None
+    cash = state.cash_total
+    positions = state.total_positions
 
     stock_names = load_stock_names()
     pos_data = []
@@ -139,8 +141,11 @@ def _get_holdings_data():
             "持股数": shares,
             "最新价": round(price, 2),
             "市值": round(value, 2),
-            "权重%": round(value / total_value * 100, 1) if total_value > 0 else 0,
+            "权重%": 0.0,
         })
+
+    for row in pos_data:
+        row["权重%"] = round(float(row["市值"]) / total_value * 100, 1) if total_value > 0 else 0
 
     pos_df = pd.DataFrame(pos_data + missing).sort_values(
         "市值", ascending=False, key=lambda s: pd.to_numeric(s, errors="coerce").fillna(-1)

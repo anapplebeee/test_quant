@@ -17,7 +17,7 @@ REGISTRY: dict[str, type[BaseStrategy]] = {
 }
 
 #: 非策略参数的配置键，传入策略前必须剥离
-_NON_PARAM_KEYS = {"name", "overrides"}
+_NON_PARAM_KEYS = {"name", "overrides", "live_allowlist"}
 
 
 def resolve_params(name: str, params: dict) -> dict:
@@ -32,8 +32,15 @@ def resolve_params(name: str, params: dict) -> dict:
     2026-08-28 实测发生过：overrides 把 sweep 的 rebalance_days 强制改写。）
     """
     cfg = load_config()
-    overrides = ((cfg.get("strategy") or {}).get("overrides") or {}).get(name) or {}
-    merged = dict(overrides)
+    strategy_cfg = cfg.get("strategy") or {}
+    global_params = {
+        key: value
+        for key, value in strategy_cfg.items()
+        if key not in _NON_PARAM_KEYS
+    }
+    overrides = (strategy_cfg.get("overrides") or {}).get(name) or {}
+    merged = dict(global_params)
+    merged.update(overrides)
     merged.update(params)
     return merged
 
@@ -60,4 +67,4 @@ def build_strategy(name: str, **params) -> BaseStrategy:
     return cls(**params)
 
 
-__all__ = ["BaseStrategy", "REGISTRY", "build_strategy", "resolve_params"]
+__all__ = ["REGISTRY", "BaseStrategy", "build_strategy", "resolve_params"]

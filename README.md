@@ -1,6 +1,8 @@
-# Quart — A股中低频量化研究 & 选股信号平台
+# Quart — A 股研究、信号与手动 T+1 交易平台
 
-基于成熟开源组件构建的 A 股日线级量化工具链：**AKShare 数据 → 本地 Parquet/DuckDB 仓库 → A股规则回测引擎 → 动量/双均线策略 → 每日自动选股信号推送（钉钉）→ 人工下单执行**。
+Quart 是面向单机研究和人工交易确认的 A 股中低频平台：**数据治理 → 策略研究 → 成本后回测/WFA → T 日收盘信号 → T+1 计划审批 → 券商端手工下单 → 成交回填 → 收盘对账**。
+
+当前不会自动连接券商或自动报单。默认正式信号仅允许 `lowvol_indz` 低频防御候选；动量、双均线和 ML 仍属于研究策略。任何历史结果均不代表未来收益，也无法保证“高额稳定收益”。
 
 ## 架构
 
@@ -12,9 +14,12 @@ quart/
 ├── strategy/    统一 Strategy 接口: momentum_rotation / dual_ma / ml_rank / lowvol_composite / lowvol_indz (可注册扩展)
 ├── risk/        单票权重上限校验、持仓集中度告警
 ├── manual_trading/ SQLite 账户账本 / T+1 持仓批次 / 计划审批 / 成交回填 / 对账
+├── broker/      BrokerAdapter 契约 / PaperBroker 模拟订单状态机
 ├── notify/      钉钉机器人推送(支持加签)
 ├── pipeline.py  每日流水线: 数据更新→选股→风控→交易计划→报告/推送
-scripts/         update_data.py · run_backtest.py · daily_signal.py
+api/             前端应用服务 / 输入校验 / 任务参数白名单
+frontend/        Gradio 操作中心 / 手动交易 / 回测研究 / 风险与监控页面
+scripts/         自动化与应急 CLI；日常操作优先使用前端
 run_scheduler.py APScheduler 每交易日 17:30 自动执行
 tests/           pytest: 撮合精度/T+1/无未来函数/指标数学 验证
 ```
@@ -22,22 +27,46 @@ tests/           pytest: 撮合精度/T+1/无未来函数/指标数学 验证
 ## 快速开始
 
 ```powershell
-# 1. 环境 (Python 3.12, uv 管理)
+# 1. 安装环境（Python 3.12，uv 管理）
 uv sync
 
-# 2. 下载沪深300成分股日线 (首次约10分钟, 之后增量秒级)
-uv run python scripts/update_data.py --index 000300 --start 20240101
-
-# 3. 回测
-uv run python scripts/run_backtest.py --strategy momentum_rotation --start 2024-01-01
-uv run python scripts/run_backtest.py --strategy dual_ma --no-regime
-
-# 4. 生成当日选股信号 (控制台 + reports/signal_YYYYMMDD.md)
-uv run python scripts/daily_signal.py
-
-# 5. 常驻定时任务 (可选)
-uv run python run_scheduler.py
+# 2. 启动前端（默认仅监听本机）
+uv run python run_gradio.py
 ```
+
+浏览器打开 `http://127.0.0.1:7860`。首次启动后按下面顺序操作：
+
+1. **🧰 操作中心 → 更新交易日历**；
+2. **🧰 操作中心 → 数据刷新**，股票池选 `index`、指数填 `000300`；
+3. **💼 手动交易 → 账户状态与初始化**，录入券商收盘现金和持仓；
+4. **📈 回测中心**，运行默认 `lowvol_indz` 回测和 Walk-Forward；
+5. **🧰 操作中心 → 生成每日 T+1 信号**；
+6. **💼 手动交易**，完成计划审批、成交回填、收盘对账和执行复盘。
+
+### 局域网访问
+
+默认仅本机访问。如需局域网访问，必须同时设置监听地址和认证：
+
+```powershell
+$env:QUART_SERVER_NAME = "0.0.0.0"
+$env:QUART_AUTH = "user:请替换为强密码"
+uv run python app.py
+```
+
+不要把未启用认证的页面暴露到公网；前端可以触发数据下载、训练、回测和写盘迁移。
+
+## 前端日常使用
+
+| 页面 | 主要用途 | 日常操作 |
+|---|---|---|
+| `🧰 操作中心` | 替代常用脚本命令 | 数据刷新、交易日历、PIT 股票池、质量扫描、参数扫描、信号生成、存储迁移 |
+| `💼 手动交易` | 人工 T+1 闭环 | 账户初始化、计划调减/审批/取消、CSV 导出、成交录入/导入、对账、偏差复盘 |
+| `📈 回测中心` | 策略验证 | 参数回测、成本分解、完整成交、WFA、制品追溯 |
+| `📡 策略监控` | 长任务与账户监控 | 队列、日志、取消任务、SQLite 账户持仓 |
+| `🛡️ 风险管理` | 组合风险 | 集中度、VaR/CVaR、流动性；与手动交易页使用同一 SQLite 账户 |
+| `📋 每日信号` | 查看历史报告 | 查看 `reports/signal_YYYYMMDD.md`；生成操作在操作中心 |
+
+所有长任务都进入后端任务队列。前端只能传递白名单参数，不能执行任意 shell；写盘迁移默认仅预演并要求二次确认。
 
 ## 手动交易 T+1 同步
 
@@ -53,6 +82,8 @@ T 日收盘生成信号
 → 使用已对账状态生成下一交易日计划
 ```
 
+以下操作均已在 `💼 手动交易` 页面提供。命令行保留给自动化、故障排查和前端不可用时的应急操作，不再是日常使用的前置条件。
+
 账户状态保存在 `state/trading.db`。`state/holdings.json` 仅作为首次迁移兼容格式：
 
 ```json
@@ -63,6 +94,10 @@ T 日收盘生成信号
 ```
 
 ### 1. 初始化账户
+
+前端：`💼 手动交易 → 账户状态与初始化 → 首次初始化 / 以券商快照覆盖`。
+
+CLI 备用方式：
 
 已有 `state/holdings.json`：
 
@@ -80,6 +115,8 @@ uv run python scripts/manual_trade.py init --as-of 2026-08-28 --cash 1000000
 
 ### 2. 生成并审批 T+1 计划
 
+前端：`🧰 操作中心 → 生成每日 T+1 信号`，随后进入 `💼 手动交易 → T+1 交易计划审批`。审批前可以调减数量，不允许增加策略计划外风险；信号日收盘账户未对账时审批会被阻断。
+
 ```powershell
 # 普通工作日自动取下一工作日；节假日前建议显式传计划交易日
 uv run python scripts/daily_signal.py --trade-date 2026-08-31
@@ -89,9 +126,11 @@ uv run python scripts/manual_trade.py plan plan_20260828_xxxxxxxx
 uv run python scripts/manual_trade.py approve plan_20260828_xxxxxxxx
 ```
 
-每日信号报告会显示 `plan_id`、计划交易日和 `DRAFT` 状态。重复运行只会替换未审批草稿；已审批或执行中的同日计划不会被覆盖。
+每日信号报告会显示 `plan_id`、计划交易日和 `DRAFT` 状态。重复运行只会替换未审批草稿；已审批或执行中的同日计划不会被覆盖。过期且未成交的 DRAFT/APPROVED 计划会自动标记为 `EXPIRED`，前端可导出人工下单 CSV。
 
 ### 3. 回填真实成交
+
+前端：`💼 手动交易 → 真实成交回填`。计划订单 ID 可留空，系统会按交易日、代码、方向和剩余数量自动匹配唯一订单。
 
 单笔录入：
 
@@ -113,14 +152,18 @@ uv run python scripts/manual_trade.py fills-import state/fills_template.csv
 
 ### 4. 查看 T+1 账户状态
 
+前端：`💼 手动交易 → 账户状态与初始化`。策略监控和风险管理页读取同一 SQLite 账本，不再读取旧 `holdings.json`。
+
 ```powershell
 uv run python scripts/manual_trade.py show --as-of 2026-08-31
 uv run python scripts/manual_trade.py show --as-of 2026-09-01
 ```
 
-当日买入计入总持仓，但在同一交易日的可卖数量为 0；下一交易日转为可卖。当前无权威交易日历时只自动跳过周末，节假日成交请在成交 CSV 或命令中显式提供 `settle_date`。
+当日买入计入总持仓，但同一交易日可卖数量为 0；下一交易日转为可卖。先在 `🧰 操作中心` 更新本地交易日历缓存；如果缓存尚未覆盖未来日期，系统退化为工作日规则，节假日前必须显式填写计划交易日或 `settle_date`。
 
 ### 5. 收盘对账
+
+前端：`💼 手动交易 → 收盘账户对账`，先预览差异，再勾选确认覆盖。
 
 账户快照 JSON 示例：
 
@@ -149,7 +192,7 @@ uv run python scripts/manual_trade.py reconcile state/broker_snapshot.json `
   --confirm --resolution "以券商收盘快照为准"
 ```
 
-详细设计和后续前端、券商 API 计划见 `MANUAL_TRADING_T1_SYNC_PLAN.md`。信号仅供参考，不构成投资建议；回测表现 ≠ 实盘表现。
+完成对账后可在 `计划与成交偏差复盘` 查看完成率、方向调整后的不利滑点、费用偏差和延期数量。详细设计见 `MANUAL_TRADING_T1_SYNC_PLAN.md`；前后端与策略升级计划见 `FRONTEND_STRATEGY_DEVELOPMENT_PLAN.md`。
 
 ## 配置 (config/settings.yaml)
 
@@ -157,7 +200,7 @@ uv run python scripts/manual_trade.py reconcile state/broker_snapshot.json `
 |---|---|
 | `data` | 前复权采集 · 板块/ST/次新股(上市<120天)过滤 · hfq_pins 防复权再污染 · **退市股回填(195只, baostock, 幸存者偏差实测 -2.0~-2.6pp/yr)** |
 | `backtest` | 初始资金、佣金万2.5最低5元、印花税万5(卖出)、过户费、滑点千1(双边不利方向) |
-| `strategy` | top_k=10 · lookback=60日动量 · 每5日调仓 · MA20择时(指数跌破空仓) · 单票上限15% |
+| `strategy` | 默认 `lowvol_indz` · 正式信号白名单 · Top30 · 45日调仓 · `rank_buffer=0.5` · 行业内 z-score；其他策略使用独立 overrides |
 | `risk` | 单票仓位上限25%、单日亏损阈值 |
 | `manual_trading` | 手动交易账本开关、账户名、SQLite 路径、旧持仓自动迁移 |
 | `notify` | 钉钉 webhook + 加签 secret（可用环境变量 QUART_DINGTALK_WEBHOOK/SECRET 覆盖） |
@@ -169,66 +212,27 @@ uv run python scripts/manual_trade.py reconcile state/broker_snapshot.json `
 - **多源容灾**：东方财富接口失败自动切换腾讯源，全局 socket 超时防挂死
 - **同一套代码**：研究回测与每日实盘信号共用 Strategy 实现，杜绝两套逻辑漂移
 
-## 前端界面 (Streamlit)
+## 前端架构
 
-平台提供基于 Streamlit 的 Web 界面，包含以下模块：
+当前唯一维护的 Web 前端是 Gradio，入口为 `app.py`。页面不直接执行 SQL 或拼接 shell 命令：
 
-### 界面架构
-
-```
-streamlit_app.py          主入口 - 策略概览 + 导航
-pages/
-├── 1_data_overview.py    数据总览 - 股票池/数据状态
-├── 2_factor_research.py  因子研究 - IC/ICIR分析
-├── 3_backtest.py         回测中心 - 净值/交易/参数扫描
-├── 4_daily_signal.py     每日信号 - 持仓建议/ML分数
-├── 5_strategy_monitor.py 策略监控 - 任务执行/持仓分析
-├── 6_attribution.py      归因分析 - Brinson/因子暴露
-├── 7_risk_management.py  风险管理 - VaR/流动性/集中度
-├── 8_factor_ecology.py   因子生态 - IC衰减/拥挤度
-├── 9_backtest_diagnostics.py 回测诊断 - WFA/Monte Carlo
-└── 10_parameter_glossary.py  参数词典 - 量化参数说明
-ui_components.py          UI组件库 - 统一样式/可复用组件
-.streamlit/config.toml    Streamlit主题配置
+```text
+frontend/pages/*
+  → api/*（校验、展示模型、任务编排）
+    → quart/*（策略、风险、执行、账本领域逻辑）
+      → data/、state/trading.db、artifacts/
 ```
 
-### 前端优化特性
+主要安全与一致性约束：
 
-1. **统一样式系统**
-   - 渐变色指标卡片（蓝/绿/橙/红/紫/青）
-   - 响应式导航卡片
-   - 状态徽章和信息盒子
+- 任务参数由 `api/task_api.py` 白名单校验，未注册参数默认拒绝；
+- 同一资源任务串行、计算任务限并发，并支持日志、取消和超时；
+- 手动交易页、策略监控和风险管理统一读取 `state/trading.db`；
+- 计划不改变账户，只有真实成交和确认后的券商快照可以改变账户；
+- 正式信号只允许 `strategy.live_allowlist` 中的策略；
+- 回测、WFA 和信号产物写入 ArtifactStore，保留参数、数据版本和代码指纹。
 
-2. **交互增强**
-   - 数据导出按钮（CSV）
-   - 图表悬停交互
-   - 可折叠区域
-
-3. **数据可视化**
-   - Plotly图表统一配置
-   - 表格条件格式化
-   - 热力图/柱状图/折线图
-
-### 启动界面
-
-```powershell
-# 方式1: 启动 Gradio 界面 (推荐，交互性更强)
-uv run python run_gradio.py
-
-# 方式2: 直接启动 Gradio
-uv run python app.py
-
-# 方式3: 启动 Streamlit 界面 (旧版)
-uv run streamlit run streamlit_app.py
-```
-
-### Gradio 新增功能
-
-- ✅ 实时任务监控（后台执行+实时输出）
-- ✅ 参数滑块即时回测
-- ✅ 交互式图表（缩放/悬停/导出）
-- ✅ 响应式布局（移动端适配）
-- ✅ 更好的状态管理
+CLI 仍保留并与前端共用同一领域代码，适用于调度器、CI、批处理和前端故障时的应急操作。
 
 ## Roadmap
 
@@ -237,8 +241,11 @@ uv run streamlit run streamlit_app.py
 - [x] **walk-forward 滚动参数验证**（`scripts/walk_forward.py`，含过拟合诊断）
 - [x] **制品仓库 ArtifactStore**（run_id + 参数/数据/代码版本指纹，结果可复现可追溯）
 - [x] **存储按年分区**（增量只重写当年分区，查询按年份裁剪）
+- [x] **前端操作中心**（数据、日历、质量、股票池、扫描、信号和迁移）
+- [x] **手动 T+1 前端闭环**（账户、审批、成交、对账、执行偏差）
+- [x] **BrokerAdapter + PaperBroker 状态机**（真实券商接入前联调契约）
 - [ ] WFA 结论回填：把 README 的历史数字全部重跑为样本外口径
-- [ ] 前端按 run_id 展示制品（当前仍读 `reports/`，双写过渡中）
+- [x] 前端按 run_id 展示制品（回测中心 Artifact 面板；`reports/` 仍双写兼容）
 - [ ] MiniQMT(xtquant) 自动执行通道（需券商权限）
 - [ ] ClickHouse 云端化迁移
 
@@ -333,8 +340,9 @@ uv run python scripts/train_ml.py --start 20190101
 # 用模型分数回测
 uv run python scripts/sweep.py --strategy ml_rank --start 2024-01-01
 
-# 每日信号切换为 ML 选股
-uv run python scripts/daily_signal.py --strategy ml_rank
+# ML 仅作为研究策略回测；通过 WFA、漂移和模拟盘验收后，
+# 再人工加入 config/settings.yaml 的 strategy.live_allowlist
+uv run python scripts/walk_forward.py --strategy ml_rank
 ```
 
 ## 因子研究管线

@@ -5,7 +5,6 @@ import datetime as dt
 import json
 from pathlib import Path
 
-import pandas as pd
 from rich.console import Console
 from rich.panel import Panel
 
@@ -57,22 +56,15 @@ def main() -> None:
     if bars.empty:
         raise SystemExit("过滤板块/ST 后无可用标的，请检查 data 配置或本地数据")
 
-    params = dict(cfg["strategy"])
-    params.pop("name", None)
-    # overrides 由 build_strategy 内部按策略名读取，不作为策略参数传入
-    params.pop("overrides", None)
+    explicit_params = {}
     if args.no_regime:
-        params["use_regime_filter"] = False
-    strategy = build_strategy(args.strategy, **params)
-    # CLI 显式参数优先级最高：在策略实例上直接写回（覆盖 config overrides），
-    # prepare() 从 self.params 读取，engine.run() 前生效。
-    cli_overrides = {}
+        explicit_params["use_regime_filter"] = False
     if args.rebalance_days is not None:
-        cli_overrides["rebalance_days"] = args.rebalance_days
+        explicit_params["rebalance_days"] = args.rebalance_days
     if args.top_k is not None:
-        cli_overrides["top_k"] = args.top_k
-    for k, v in cli_overrides.items():
-        strategy.params[k] = v
+        explicit_params["top_k"] = args.top_k
+    strategy = build_strategy(args.strategy, **explicit_params)
+    effective_params = dict(strategy.params)
 
     md = MarketData.from_bars(bars, benchmark=bench)
     # 风控进回测：默认与实盘同一约束，否则回测组合可以违反单票上限而实盘被截断
@@ -89,8 +81,7 @@ def main() -> None:
         f"backtest_{args.strategy}",
         params={
             "strategy": args.strategy,
-            **params,
-            **cli_overrides,
+            **effective_params,
             "start": args.start, "end": args.end,
             "no_regime": args.no_regime, "risk_enabled": not args.no_risk,
         },
@@ -134,7 +125,7 @@ def main() -> None:
     run.add_metrics(
         **{k: summary.get(k) for k in
            ("cagr", "sharpe", "max_drawdown", "total_return", "calmar", "bench_excess_cagr")},
-        n_trades=int(len(trades_df)),
+        n_trades=len(trades_df),
         n_risk_violations=len(violations),
     )
     manifest = run.finish()

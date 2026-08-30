@@ -8,7 +8,7 @@ import pytest
 
 from quart.execution.models import BUY, SELL
 from quart.manual_trading import FillInput, PlannedOrderInput, TradingRepository
-from quart.manual_trading.io import import_fills_csv
+from quart.manual_trading.io import export_plan_csv, import_fills_csv
 
 
 def _repository(tmp_path) -> TradingRepository:
@@ -252,3 +252,67 @@ def test_adjustment_survives_plan_approval(tmp_path):
     order = repository.plan_detail(plan_id)["orders"][0]
     assert order["approved_quantity"] == 500
     assert order["adjustment_reason"] == "人工降低风险"
+
+
+def test_expire_old_unfilled_plans(tmp_path):
+    repository = _repository(tmp_path)
+    repository.initialize_account(cash=100_000, positions={}, as_of="2026-08-28")
+    state = repository.account_state(as_of="2026-08-28")
+    assert state is not None
+    plan_id = repository.create_trade_plan(
+        account_id=state.account_id,
+        strategy_name="lowvol_indz",
+        signal_date="2026-08-28",
+        intended_trade_date="2026-08-31",
+        orders=[PlannedOrderInput("600000", BUY, 100, 10.0)],
+    )
+    assert repository.expire_plans("2026-09-01") == 1
+    assert repository.plan_detail(plan_id)["plan"]["status"] == "EXPIRED"
+
+
+def test_approval_requires_signal_day_reconciliation(tmp_path):
+    repository = _repository(tmp_path)
+    repository.initialize_account(cash=100_000, positions={}, as_of="2026-08-27")
+    state = repository.account_state(as_of="2026-08-28")
+    assert state is not None
+    plan_id = repository.create_trade_plan(
+        account_id=state.account_id,
+        strategy_name="lowvol_indz",
+        signal_date="2026-08-28",
+        intended_trade_date="2026-08-31",
+        orders=[PlannedOrderInput("600000", BUY, 100, 10.0)],
+    )
+    with pytest.raises(ValueError, match="尚未对账"):
+        repository.approve_plan(plan_id)
+
+
+def test_csv_auto_matches_plan_and_exports_order_file(tmp_path):
+    repository = _repository(tmp_path)
+    repository.initialize_account(cash=100_000, positions={}, as_of="2026-08-28")
+    state = repository.account_state(as_of="2026-08-31")
+    assert state is not None
+    plan_id = repository.create_trade_plan(
+        account_id=state.account_id,
+        strategy_name="lowvol_indz",
+        signal_date="2026-08-28",
+        intended_trade_date="2026-08-31",
+        orders=[PlannedOrderInput("600000", BUY, 100, 10.0)],
+    )
+    repository.approve_plan(plan_id)
+    export_path = export_plan_csv(repository, plan_id, tmp_path / "plan.csv")
+    assert export_path.exists()
+    assert "planned_order_id" in export_path.read_text(encoding="utf-8-sig")
+
+    fills_path = tmp_path / "fills-auto.csv"
+    fills_path.write_text(
+        "trade_date,symbol,side,quantity,price,broker_fill_id\n"
+        "2026-08-31,600000,BUY,100,10.1,auto-1\n",
+        encoding="utf-8",
+    )
+    import_fills_csv(repository, state.account_id, fills_path)
+    detail = repository.plan_detail(plan_id)
+    assert detail["plan"]["status"] == "COMPLETED"
+    summary = repository.execution_summary(plan_id)[0]
+    assert summary["filled_quantity"] == 100
+    assert summary["average_fill_price"] == pytest.approx(10.1)
+    assert summary["slippage_bps"] == pytest.approx(100.0)

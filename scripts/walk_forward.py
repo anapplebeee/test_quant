@@ -34,7 +34,6 @@ import argparse
 import datetime as dt
 from pathlib import Path
 
-import pandas as pd
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -47,6 +46,7 @@ from quart.data.market import MarketData
 from quart.data.store import BarStore
 from quart.data.universe import filter_for_simulation
 from quart.risk.rules import make_weight_validator
+from quart.strategy import build_strategy
 
 console = Console()
 
@@ -119,7 +119,7 @@ def main() -> None:
     bench_close = bench.set_index("date")["close"].reindex(md.dates).ffill()
 
     grid = parse_grid(args.grid)
-    base_params = {k: v for k, v in cfg["strategy"].items() if k != "name"}
+    base_params = dict(build_strategy(args.strategy).params)
     risk_pipeline = None if args.no_risk else make_weight_validator(
         float(cfg["risk"]["max_position_pct"])
     )

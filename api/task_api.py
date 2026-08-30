@@ -13,13 +13,14 @@ import shutil
 import subprocess
 import threading
 from collections import deque
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import Enum
-from typing import Callable, Optional
+from enum import StrEnum
 
 
-class TaskStatus(str, Enum):
+class TaskStatus(StrEnum):
     PENDING = "pending"       # 排队中
     RUNNING = "running"       # 运行中
     COMPLETED = "completed"   # 成功
@@ -132,6 +133,56 @@ TASKS = {
         "outputs": {},
         "result_tab": "🗃️ 数据总览",
     },
+    "data_quality": {
+        "name": "数据质量扫描",
+        "script": "scripts/data_quality_scan.py",
+        "args": [],
+        "icon": "🧪",
+        "resource": "data",
+        "timeout": 1800,
+        "outputs": {},
+        "result_tab": "🗃️ 数据总览",
+    },
+    "universe_history": {
+        "name": "构建 PIT 股票池历史",
+        "script": "scripts/build_universe_history.py",
+        "args": [],
+        "icon": "🧭",
+        "resource": "data",
+        "timeout": 3600,
+        "outputs": {"股票池历史": "data/universe_history/*.parquet"},
+        "result_tab": "🗃️ 数据总览",
+    },
+    "industries": {
+        "name": "更新行业映射",
+        "script": "scripts/fetch_industries.py",
+        "args": [],
+        "icon": "🏭",
+        "resource": "data",
+        "timeout": 1800,
+        "outputs": {"行业映射": "data/meta/industries*.csv"},
+        "result_tab": "🌿 因子生态",
+    },
+    "financial_factors": {
+        "name": "更新财务因子",
+        "script": "scripts/fetch_financial_factors.py",
+        "args": [],
+        "icon": "💹",
+        "resource": "data",
+        "timeout": 7200,
+        "outputs": {"财务因子": "data/factors/*.parquet"},
+        "result_tab": "🔬 因子研究",
+    },
+    "trading_calendar": {
+        "name": "更新交易日历",
+        "script": "scripts/update_trading_calendar.py",
+        "args": [],
+        "icon": "📅",
+        "resource": "data",
+        "timeout": 1800,
+        "outputs": {"交易日历": "data/meta/trading_calendar.csv"},
+        "result_tab": "🧰 操作中心",
+    },
 }
 
 # 资源冲突矩阵：同一资源同一时间只能有 1 个任务
@@ -175,20 +226,44 @@ ALLOWED_ARGS: dict[str, dict[str, str]] = {
         "--no-risk": None,
     },
     "migrate_store": {"--root": r"^[A-Za-z0-9_.:/\\\-]+$", "--dry-run": None},
-    "signal": {"--strategy": r"^[A-Za-z0-9_]+$"},
-    "refresh": {},
+    "signal": {
+        "--strategy": r"^[A-Za-z0-9_]+$",
+        "--trade-date": r"^\d{4}-\d{2}-\d{2}$",
+        "--no-push": None,
+    },
+    "refresh": {
+        "--universe": r"^(index|all)$",
+        "--index": r"^\d{6}$",
+        "--start": r"^\d{8}$",
+        "--max": r"^\d{1,5}$",
+        "--keep-st": None,
+    },
     "ml_train": {"--start": r"^\d{8}$"},
     "factor_research": {
         "--sample": r"^(daily|weekly|monthly)$",
         "--start": r"^\d{4}-\d{2}-\d{2}$",
     },
+    "data_quality": {"--jumps": r"^(0(\.\d+)?|1(\.0+)?)$"},
+    "universe_history": {"--index": r"^\d{6}$", "--describe-only": None},
+    "industries": {"--refresh": None},
+    "financial_factors": {},
+    "trading_calendar": {},
 }
 
 # 开关型参数（不带值）
-_FLAG_ONLY = {"--no-regime", "--no-risk", "--anchored", "--dry-run"}
+_FLAG_ONLY = {
+    "--no-regime",
+    "--no-risk",
+    "--anchored",
+    "--dry-run",
+    "--no-push",
+    "--keep-st",
+    "--describe-only",
+    "--refresh",
+}
 
 
-def validate_extra_args(task_id: str, extra_args: Optional[list]) -> tuple[bool, str]:
+def validate_extra_args(task_id: str, extra_args: list | None) -> tuple[bool, str]:
     """校验 UI 传入的命令行参数。
 
     Returns
@@ -233,13 +308,13 @@ class Task:
     family: str = ""                 # 任务类型（如 'backtest'），实例 id 可能是 'backtest#2'
     status: TaskStatus = TaskStatus.PENDING
     output_lines: list = field(default_factory=list)
-    returncode: Optional[int] = None
+    returncode: int | None = None
     created_at: datetime = field(default_factory=datetime.now)
-    started_at: Optional[datetime] = None
-    ended_at: Optional[datetime] = None
-    process: Optional[subprocess.Popen] = None
-    on_output: Optional[Callable] = None    # 回调随任务实例注册，不再依赖首次 submit（修复排队任务收不到事件）
-    on_complete: Optional[Callable] = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    process: subprocess.Popen | None = None
+    on_output: Callable | None = None    # 回调随任务实例注册，不再依赖首次 submit（修复排队任务收不到事件）
+    on_complete: Callable | None = None
     cancel_requested: bool = False
 
     @property
@@ -282,14 +357,14 @@ class TaskQueue:
         self.tasks: dict[str, Task] = {}       # 全部任务记录
         self.queue_order: deque[str] = deque()  # FIFO 顺序
         self._lock = threading.Lock()
-        self._dispatch_thread: Optional[threading.Thread] = None
+        self._dispatch_thread: threading.Thread | None = None
         self._shutdown = False
 
     # ---------- 公共接口 ----------
 
-    def submit(self, task_id: str, on_output: Optional[Callable] = None,
-               on_complete: Optional[Callable] = None,
-               extra_args: Optional[list] = None) -> tuple[bool, str, str]:
+    def submit(self, task_id: str, on_output: Callable | None = None,
+               on_complete: Callable | None = None,
+               extra_args: list | None = None) -> tuple[bool, str, str]:
         """提交任务到队列
 
         Args:
@@ -351,10 +426,8 @@ class TaskQueue:
         finished.sort(key=lambda t: t.created_at)
         for t in finished[: len(self.tasks) - self.max_history]:
             self.tasks.pop(t.task_id, None)
-            try:
+            with suppress(ValueError):
                 self.queue_order.remove(t.task_id)
-            except ValueError:
-                pass
 
     def get_status_summary(self) -> str:
         """获取所有任务状态摘要"""
@@ -417,12 +490,12 @@ class TaskQueue:
     def _build_command(self, task: Task) -> list[str]:
         """构建安全命令"""
         if shutil.which("uv"):
-            return ["uv", "run", "python", "-u", task.script] + task.args
+            return ["uv", "run", "python", "-u", task.script, *task.args]
         venv_python = os.path.join(".venv", "Scripts", "python.exe")
         if os.path.exists(venv_python):
-            return [venv_python, "-u", task.script] + task.args
+            return [venv_python, "-u", task.script, *task.args]
         import sys
-        return [sys.executable, "-u", task.script] + task.args
+        return [sys.executable, "-u", task.script, *task.args]
 
     def _ensure_dispatcher(self):
         """确保调度线程运行（带锁单例，回调从任务实例读取）"""
@@ -512,10 +585,8 @@ class TaskQueue:
                         if len(task.output_lines) > 2000:  # 防单任务输出无界增长
                             del task.output_lines[:1000]
                         if task.on_output:
-                            try:
+                            with suppress(Exception):
                                 task.on_output(task.task_id, line.rstrip())
-                            except Exception:
-                                pass
 
                     returncode = process.wait()
                 finally:
@@ -532,10 +603,8 @@ class TaskQueue:
                 task.process = None
 
                 if task.on_complete:
-                    try:
+                    with suppress(Exception):
                         task.on_complete(task.task_id, returncode)
-                    except Exception:
-                        pass
 
             except Exception as e:
                 task.output_lines.append(f"错误: {e}")
@@ -544,10 +613,8 @@ class TaskQueue:
                 if task.status != TaskStatus.CANCELLED:
                     task.status = TaskStatus.FAILED
                 if task.on_complete:
-                    try:
+                    with suppress(Exception):
                         task.on_complete(task.task_id, -1)
-                    except Exception:
-                        pass
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
@@ -575,13 +642,11 @@ def _kill_process_tree(process: subprocess.Popen) -> None:
             except subprocess.TimeoutExpired:
                 process.kill()
     except Exception:
-        try:
+        with suppress(Exception):
             process.kill()
-        except Exception:
-            pass
 
 
-def get_task_artifacts(task_id: str, since: Optional[datetime] = None) -> str:
+def get_task_artifacts(task_id: str, since: datetime | None = None) -> str:
     """获取任务产出文件清单
 
     Args:
@@ -603,10 +668,7 @@ def get_task_artifacts(task_id: str, since: Optional[datetime] = None) -> str:
     if since is None:
         candidates = [t for t in task_queue.tasks.values() if t.task_id.startswith(task_id)]
         started = [t.started_at for t in candidates if t.started_at]
-        if not started:
-            since = datetime.now() - timedelta(hours=1)
-        else:
-            since = max(started)
+        since = datetime.now() - timedelta(hours=1) if not started else max(started)
 
     lines = [f"**📦 任务产出**（结果请查看 **{result_tab}** 页签）\n"]
     found_any = False

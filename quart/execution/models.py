@@ -37,6 +37,10 @@ class ExecutionContext:
         调仓前可用资金。
     positions:
         调仓前持仓 {symbol: shares}。
+    sellable_positions:
+        当日可卖持仓 {symbol: shares}。None 表示全部持仓均可卖（回测默认）；
+        手动 A 股账户必须传入券商/账本可卖数量，防止 T 日买入仓位被列入
+        T 日卖出计划。
     mark_prices:
         估值价（回测=前收盘，实盘=最新收盘）。
     exec_prices:
@@ -71,6 +75,7 @@ class ExecutionContext:
     mark_prices: pd.Series
     exec_prices: pd.Series
     prev_closes: pd.Series
+    sellable_positions: dict[str, int] | None = None
     fees: Fees = field(default_factory=Fees)
     adv: pd.Series | None = None
     tradable: pd.Series | None = None
@@ -98,6 +103,7 @@ class OrderPlan:
     fee: float = 0.0
     amount: float = 0.0
     blocked_reason: str | None = None
+    deferred_shares: int = 0
 
     @property
     def action(self) -> str:

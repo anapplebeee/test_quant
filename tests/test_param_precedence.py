@@ -14,10 +14,18 @@ def test_explicit_params_beat_overrides():
 
 
 def test_override_applies_when_not_explicit():
-    # settings.yaml: strategy.overrides.lowvol_indz.rebalance_days=40（2026-08-28 扫描最优）
+    # settings.yaml: 低频防御候选采用 45 日调仓
     s = build_strategy("lowvol_indz")
-    assert s.params.get("rebalance_days") == 40
+    assert s.params.get("rebalance_days") == 45
+    assert s.params.get("top_k") == 30
+    assert s.params.get("rank_buffer") == 0.5
     assert s.params.get("industry_z") is True
+
+
+def test_strategy_override_beats_global_defaults():
+    s = build_strategy("lowvol_indz")
+    assert s.params["rebalance_days"] != 5
+    assert s.params["top_k"] != 10
 
 
 def test_resolve_params_merges_without_dropping_explicit():

@@ -48,6 +48,7 @@ def import_fills_csv(
         for line_number, row in enumerate(reader, start=2):
             try:
                 side = str(row["side"]).strip().upper()
+                symbol = _normalize_symbol(row["symbol"])
                 quantity = int(row["quantity"])
                 price = float(row["price"])
                 commission = _float(row.get("commission"))
@@ -60,12 +61,21 @@ def import_fills_csv(
                     other_fee = fees.buy_cost(amount) if side == BUY else fees.sell_cost(amount)
                     source = "CSV_ESTIMATED_FEES"
                 planned_order_id = _int_or_none(row.get("planned_order_id"))
+                trade_date = str(row["trade_date"]).strip()
+                if planned_order_id is None:
+                    planned_order_id = repository.match_planned_order(
+                        account_id,
+                        symbol,
+                        side,
+                        trade_date,
+                        quantity,
+                    )
                 fill = FillInput(
-                    symbol=_normalize_symbol(row["symbol"]),
+                    symbol=symbol,
                     side=side,
                     quantity=quantity,
                     price=price,
-                    trade_date=str(row["trade_date"]).strip(),
+                    trade_date=trade_date,
                     trade_time=_text_or_none(row.get("trade_time")),
                     planned_order_id=planned_order_id,
                     broker_fill_id=_text_or_none(row.get("broker_fill_id")),
@@ -82,6 +92,49 @@ def import_fills_csv(
             except Exception as exc:
                 raise ValueError(f"成交 CSV 第 {line_number} 行导入失败: {exc}") from exc
     return fill_ids
+
+
+def export_plan_csv(repository: TradingRepository, plan_id: str, path: Path | str) -> Path:
+    """导出券商客户端可人工参考的委托 CSV，不包含自动报单指令。"""
+    detail = repository.plan_detail(plan_id)
+    if detail is None:
+        raise KeyError(f"交易计划不存在: {plan_id}")
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fields = [
+        "plan_id",
+        "planned_order_id",
+        "trade_date",
+        "symbol",
+        "side",
+        "quantity",
+        "reference_price",
+        "target_weight",
+        "estimated_fee",
+        "deferred_quantity",
+        "status",
+    ]
+    plan = detail["plan"]
+    with output.open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        for order in detail["orders"]:
+            writer.writerow(
+                {
+                    "plan_id": plan_id,
+                    "planned_order_id": order["planned_order_id"],
+                    "trade_date": plan["intended_trade_date"],
+                    "symbol": order["symbol"],
+                    "side": order["side"],
+                    "quantity": order["approved_quantity"] or order["strategy_quantity"],
+                    "reference_price": order["reference_price"],
+                    "target_weight": order["target_weight"],
+                    "estimated_fee": order["estimated_fee"],
+                    "deferred_quantity": order["deferred_quantity"],
+                    "status": order["status"],
+                }
+            )
+    return output
 
 
 def write_fill_template(path: Path | str) -> Path:
@@ -141,4 +194,4 @@ def _normalize_symbol(value: str) -> str:
     return text.zfill(6) if text.isdigit() else text
 
 
-__all__ = ["import_fills_csv", "load_snapshot_json", "write_fill_template"]
+__all__ = ["export_plan_csv", "import_fills_csv", "load_snapshot_json", "write_fill_template"]
