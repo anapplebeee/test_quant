@@ -1,25 +1,24 @@
-"""数据 API - 数据总览相关"""
+"""数据 API - 数据总览相关。
+
+路径全部走 `common.data_dir()`（源自 settings.yaml 的 data.root），
+不再硬编码 "data"——此前改配置会导致核心库照新路径写、API 层读空且静默返回空。
+"""
 from __future__ import annotations
 
-import os
-import sys
-
 import pandas as pd
-from loguru import logger
+
+from common import daily_dir, data_dir, degraded, index_dir, safe_path, universe_dir, valid_symbol
 
 
-def _warn(where: str, exc: Exception) -> None:
-    """吞异常处必须留痕：降级返回空数据可以，静默丢弃不行"""
-    logger.warning("data_api[{}] degraded: {}", where, exc)
+def _count_parquet(directory) -> int:
+    if not directory.exists():
+        return 0
+    return sum(1 for f in directory.glob("*.parquet"))
 
 
 def get_stock_stats() -> dict:
     """获取股票统计数据"""
-    data_root = "data"
-    daily_dir = os.path.join(data_root, "daily")
-    universe_dir = os.path.join(data_root, "universe")
-    index_dir = os.path.join(data_root, "index")
-    scores_path = os.path.join(data_root, "scores", "preds.csv")
+    scores_path = data_dir() / "scores" / "preds.csv"
 
     stats = {
         "stock_count": 0,
@@ -28,114 +27,86 @@ def get_stock_stats() -> dict:
         "last_score_date": "N/A",
     }
 
-    # 股票数量
     try:
-        if os.path.exists(daily_dir):
-            stats["stock_count"] = len([f for f in os.listdir(daily_dir) if f.endswith(".parquet")])
+        stats["stock_count"] = _count_parquet(daily_dir())
     except Exception as e:
-        _warn("stock_count", e)
+        degraded("stock_count", e)
 
-    # 股票池快照
     try:
-        if os.path.exists(universe_dir):
-            stats["universe_count"] = len([f for f in os.listdir(universe_dir) if f.endswith(".parquet")])
+        stats["universe_count"] = _count_parquet(universe_dir())
     except Exception as e:
-        _warn("universe_count", e)
+        degraded("universe_count", e)
 
-    # 指数数量
     try:
-        if os.path.exists(index_dir):
-            stats["index_count"] = len([f for f in os.listdir(index_dir) if f.endswith(".parquet")])
+        stats["index_count"] = _count_parquet(index_dir())
     except Exception as e:
-        _warn("index_count", e)
+        degraded("index_count", e)
 
-    # 最新分数日期
     try:
-        if os.path.exists(scores_path):
+        if scores_path.exists():
             scores_df = pd.read_csv(scores_path, usecols=["datetime"])
             stats["last_score_date"] = str(scores_df["datetime"].max())[:10]
     except Exception as e:
-        _warn("last_score_date", e)
+        degraded("last_score_date", e)
 
     return stats
 
 
-def get_universe() -> pd.DataFrame:
+def get_universe(limit: int = 50) -> pd.DataFrame:
     """获取最新股票池"""
-    universe_dir = os.path.join("data", "universe")
-
     try:
-        if os.path.exists(universe_dir):
-            files = [f for f in os.listdir(universe_dir) if f.endswith(".parquet")]
-            if files:
-                latest = sorted(files)[-1]
-                df = pd.read_parquet(os.path.join(universe_dir, latest))
+        files = sorted(universe_dir().glob("*.parquet"))
+        if not files:
+            return pd.DataFrame(columns=["symbol", "名称"])
+        df = pd.read_parquet(files[-1])
 
-                # 尝试获取股票名称
-                try:
-                    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                    from common import load_stock_names
-                    stock_names = load_stock_names()
-                    df["名称"] = df["symbol"].map(stock_names).fillna("-")
-                except Exception as e:
-                    _warn("universe_names", e)
+        try:
+            from common import load_stock_names
 
-                return df[["symbol", "名称"]].head(50) if "名称" in df.columns else df.head(50)
+            stock_names = load_stock_names()
+            df["名称"] = df["symbol"].map(stock_names).fillna("-")
+        except Exception as e:
+            degraded("universe_names", e)
+
+        return df[["symbol", "名称"]].head(limit) if "名称" in df.columns else df.head(limit)
     except Exception as e:
-        _warn("get_universe", e)
+        degraded("get_universe", e)
 
     return pd.DataFrame(columns=["symbol", "名称"])
 
 
+def _read_daily(symbol: str) -> pd.DataFrame | None:
+    if not valid_symbol(symbol):
+        return None
+    path = safe_path(daily_dir(), f"{symbol}.parquet")
+    if path is None or not path.exists():
+        return None
+    df = pd.read_parquet(path)
+    return df if "date" in df.columns else None
+
+
 def get_sample_data() -> pd.DataFrame | None:
     """获取样本数据（平安银行）"""
-    sample_file = "data/daily/000001.parquet"
-
     try:
-        if os.path.exists(sample_file):
-            df = pd.read_parquet(sample_file)
-            if "date" in df.columns:
-                return df
+        return _read_daily("000001")
     except Exception as e:
-        _warn("get_sample_data", e)
-
-    return None
+        degraded("get_sample_data", e)
+        return None
 
 
 def get_stock_list() -> list[str]:
     """获取所有股票代码列表"""
-    daily_dir = os.path.join("data", "daily")
-
     try:
-        if os.path.exists(daily_dir):
-            stocks = [f.replace(".parquet", "") for f in os.listdir(daily_dir)
-                     if f.endswith(".parquet")]
-            return sorted(stocks)
+        return sorted(f.stem for f in daily_dir().glob("*.parquet"))
     except Exception as e:
-        _warn("get_stock_list", e)
-
-    return []
+        degraded("get_stock_list", e)
+        return []
 
 
 def get_stock_data(symbol: str) -> pd.DataFrame | None:
     """获取指定股票的日线数据"""
-    import sys as _sys
-    from pathlib import Path as _Path
-    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
-    from common import safe_path, valid_symbol
-
-    if not valid_symbol(symbol):
-        return None
-    daily_file = safe_path("data", "daily", f"{symbol}.parquet")
-    if daily_file is None:
-        return None
-
     try:
-        if daily_file.exists():
-            df = pd.read_parquet(daily_file)
-            if "date" in df.columns:
-                return df
+        return _read_daily(symbol)
     except Exception as e:
-        _warn("get_stock_data", e)
-
-    return None
+        degraded("get_stock_data", e)
+        return None

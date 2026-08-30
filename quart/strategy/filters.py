@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quart.backtest.engine import MarketData
+from quart.data.market import MarketData
 
 
 def regime_flat_series(

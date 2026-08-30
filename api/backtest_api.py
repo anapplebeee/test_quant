@@ -1,115 +1,107 @@
-"""回测 API - 回测相关"""
+"""回测 API - 回测产物读取。
+
+路径一律走 `common.reports_dir()` / `common.daily_dir()`，不再硬编码
+"reports" / "data"——此前改 settings.yaml 的 data.root 会让核心库照新路径写、
+API 层读空并静默返回空。
+"""
 from __future__ import annotations
 
-import glob
 import json
-import os
-import sys
 
 import pandas as pd
-from loguru import logger
+
+from common import daily_dir, degraded, reports_dir, safe_path, valid_name
 
 
-def _warn(where: str, exc: Exception) -> None:
-    logger.warning("backtest_api[{}] degraded: {}", where, exc)
+def _warn(where: str, exc: BaseException) -> None:
+    degraded(f"backtest_api[{where}]", exc)
+
+
+def _latest(pattern: str):
+    """按文件名升序取最新一个（文件名含时间戳，升序=时间升序）。"""
+    files = sorted(reports_dir().glob(pattern))
+    return files[-1] if files else None
 
 
 def get_backtest_list() -> list[str]:
     """获取回测列表"""
-    reports_dir = "reports"
-    summary_files = sorted(glob.glob(os.path.join(reports_dir, "summary_*.json")))
-    
-    result = []
-    for f in summary_files:
-        name = os.path.basename(f).replace("summary_", "").replace(".json", "")
-        result.append(name)
-    
-    return result
+    return sorted(
+        p.name[len("summary_"):-len(".json")]
+        for p in reports_dir().glob("summary_*.json")
+    )
 
 
 def get_backtest_summary(name: str) -> dict | None:
     """获取回测摘要"""
-    import sys as _sys
-    from pathlib import Path as _Path
-    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
-    from common import safe_path, valid_name
-
     if not valid_name(name):
         return None
-    path = safe_path("reports", f"summary_{name}.json")
-    if path is None:
+    path = safe_path(reports_dir(), f"summary_{name}.json")
+    if path is None or not path.exists():
         return None
-
     try:
-        if path.exists():
-            with open(path) as f:
-                return json.load(f)
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
     except Exception as e:
         _warn("get_backtest_summary", e)
-
     return None
 
 
 def get_equity_curve(name: str) -> pd.DataFrame | None:
     """获取净值曲线"""
-    reports_dir = "reports"
+    if not valid_name(name):
+        return None
     # 优先查找 sweep_equity 文件，其次查找 equity 文件
-    equity_files = sorted(glob.glob(os.path.join(reports_dir, f"sweep_equity_{name}*.csv")))
-    if not equity_files:
-        equity_files = sorted(glob.glob(os.path.join(reports_dir, f"equity_{name}*.csv")))
-    
+    path = _latest(f"sweep_equity_{name}*.csv") or _latest(f"equity_{name}*.csv")
+    if path is None:
+        return None
     try:
-        if equity_files:
-            return pd.read_csv(equity_files[-1], parse_dates=["date"])
+        return pd.read_csv(path, parse_dates=["date"])
     except Exception as e:
         _warn("get_equity_curve", e)
-    
     return None
 
 
 def get_trades(name: str) -> pd.DataFrame | None:
     """获取交易记录"""
-    reports_dir = "reports"
-    trade_files = sorted(glob.glob(os.path.join(reports_dir, f"trades_{name}*.csv")))
-    
+    if not valid_name(name):
+        return None
+    path = _latest(f"trades_{name}*.csv")
+    if path is None:
+        return None
     try:
-        if trade_files:
-            df = pd.read_csv(trade_files[-1], parse_dates=["date"])
-            df = df.sort_values("date", ascending=False)
-            
-            # 添加股票名称
-            try:
-                sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                from common import load_stock_names
-                stock_names = load_stock_names()
-                df["名称"] = df["symbol"].apply(lambda x: f"{int(x):06d}").map(stock_names).fillna("-")
-            except Exception as e:
-                _warn("trades_names", e)
-                df["名称"] = "-"
-            
-            # 重命名列
-            df = df.rename(columns={"date": "交易日期", "symbol": "代码", "side": "方向",
-                                   "shares": "数量", "price": "价格", "amount": "金额", "fee": "手续费"})
-            
-            return df[["交易日期", "代码", "名称", "方向", "数量", "价格", "金额", "手续费"]]
+        df = pd.read_csv(path, parse_dates=["date"])
+        df = df.sort_values("date", ascending=False)
+
+        try:
+            from common import load_stock_names
+
+            stock_names = load_stock_names()
+            df["名称"] = df["symbol"].apply(lambda x: f"{int(x):06d}").map(stock_names).fillna("-")
+        except Exception as e:
+            _warn("trades_names", e)
+            df["名称"] = "-"
+
+        df = df.rename(columns={"date": "交易日期", "symbol": "代码", "side": "方向",
+                                "shares": "数量", "price": "价格", "amount": "金额", "fee": "手续费"})
+        return df[["交易日期", "代码", "名称", "方向", "数量", "价格", "金额", "手续费"]]
     except Exception as e:
         _warn("get_trades", e)
-    
     return None
 
 
 def get_cost_breakdown(name: str) -> dict | None:
     """交易成本分解：手续费 / 滑点成本 / 双边换手 / 成本占初始资金比。
 
-    引擎（quart/backtest/engine.py Fees）已含佣金、印花税、过户费、滑点与冲击成本，
+    引擎（quart/execution/fees.py Fees）已含佣金、印花税、过户费、滑点与冲击成本，
     但结果页此前不可见——本函数从 trades 反算各项成本，供回测中心展示。
     """
-    reports_dir = "reports"
-    trade_files = sorted(glob.glob(os.path.join(reports_dir, f"trades_{name}*.csv")))
-    if not trade_files:
+    if not valid_name(name):
+        return None
+    path = _latest(f"trades_{name}*.csv")
+    if path is None:
         return None
     try:
-        df = pd.read_csv(trade_files[-1], parse_dates=["date"], dtype={"symbol": str})
+        df = pd.read_csv(path, parse_dates=["date"], dtype={"symbol": str})
     except Exception as e:
         _warn("get_cost_breakdown", e)
         return None
@@ -118,19 +110,16 @@ def get_cost_breakdown(name: str) -> dict | None:
 
     total_fee = float(df["fee"].sum())
     turnover_2way = float(df["amount"].sum())
-    n_trades = int(len(df))
-    n_buy = int((df["side"] == "BUY").sum())
-    n_sell = int((df["side"] == "SELL").sum())
 
     # 滑点成本：成交价 vs 当日开盘价的偏离（买入为正偏离、卖出为负偏离）
-    opens_cache: dict[str, pd.DataFrame] = {}
+    opens_cache: dict[str, pd.Series | None] = {}
     slip_cost = 0.0
     matched = 0
     for sym, grp in df.groupby("symbol"):
         code = str(sym).zfill(6)
         if code not in opens_cache:
             try:
-                bar = pd.read_parquet(os.path.join("data", "daily", f"{code}.parquet"))
+                bar = pd.read_parquet(safe_path(daily_dir(), f"{code}.parquet"))
                 bar["date"] = pd.to_datetime(bar["date"])
                 opens_cache[code] = bar.set_index("date")["open"]
             except Exception:
@@ -162,24 +151,24 @@ def get_cost_breakdown(name: str) -> dict | None:
         "cost_pct_init": float(total_cost / init_cash) if init_cash else 0.0,
         "turnover_2way": turnover_2way,
         "turnover_x": float(turnover_2way / init_cash) if init_cash else 0.0,
-        "n_trades": n_trades,
-        "n_buy": n_buy,
-        "n_sell": n_sell,
+        "n_trades": int(len(df)),
+        "n_buy": int((df["side"] == "BUY").sum()),
+        "n_sell": int((df["side"] == "SELL").sum()),
         "slip_matched": matched,
     }
 
 
 def get_sweep_results(name: str) -> pd.DataFrame | None:
     """获取参数扫描结果"""
-    reports_dir = "reports"
-    sweep_files = sorted(glob.glob(os.path.join(reports_dir, f"sweep_{name}*.csv")))
-
+    if not valid_name(name):
+        return None
+    path = _latest(f"sweep_{name}*.csv")
+    if path is None:
+        return None
     try:
-        if sweep_files:
-            return pd.read_csv(sweep_files[-1])
+        return pd.read_csv(path)
     except Exception as e:
         _warn("get_sweep_results", e)
-
     return None
 
 
@@ -197,8 +186,7 @@ def _benchmark_series() -> pd.Series:
             from quart.data.store import BarStore
 
             cfg = load_config()
-            b = BarStore().load_benchmark(cfg["benchmark"])
-            b = b.copy()
+            b = BarStore().load_benchmark(cfg["benchmark"]).copy()
             b["date"] = pd.to_datetime(b["date"])
             _BENCH_CACHE = b.set_index("date")["close"].astype(float).sort_index()
         except Exception as e:
@@ -240,14 +228,16 @@ def get_window_stats(name: str) -> dict | None:
             "ann_vol": ws["ann_vol"],
             "sharpe": ws["sharpe"],
         }
-        # 基准取与策略窗口相同的日历区间，保证同期可比
+        # 基准取与策略窗口相同的日历区间，保证同期可比。
+        # 用 max(0, ...) 而非负索引：数据量少于窗口时 eq.index[-(days+1)]
+        # 会 IndexError（window_stats 内部用 iloc 切片会自动 clamp 到 0，
+        # 两者行为必须一致，否则短回测一打开网页就崩）。
         if not bench.empty and ws["return"] is not None and ws["days"] > 0:
-            start = eq.index[-(days + 1)]
+            start = eq.index[max(0, len(eq) - (days + 1))]
             end = eq.index[-1]
             bwin = bench[(bench.index >= start) & (bench.index <= end)].dropna()
             if len(bwin) >= 2:
                 entry["bench_return"] = float(bwin.iloc[-1] / bwin.iloc[0] - 1.0)
-                bmdd, _ = max_drawdown(bwin)
-                entry["bench_mdd"] = bmdd
+                entry["bench_mdd"] = max_drawdown(bwin)[0]
         out[label] = entry
     return out

@@ -18,6 +18,7 @@ from api.backtest_api import (
 from api.research_api import list_research_reports, list_sweeps, load_research_report, load_sweep, sweep_headline
 from api.strategy_api import get_strategy_defaults, strategy_choices
 from api.task_api import TASKS, task_queue
+from frontend.components.artifacts_panel import render_artifacts_panel, render_wfa_panel
 from frontend.theme import metric_card, page_header
 
 # 策略清单单一数据源：REGISTRY 驱动（与首页/策略监控同源）
@@ -121,12 +122,62 @@ def _load_backtest(name: str):
     return md, fig_eq, fig_dd, trades_df
 
 
-def _run_backtest(strategy: str, rebalance_days: float, top_k: float, start: str):
-    """提交回测任务并流式回显日志（换手频率/持仓数等参数由前端传入，覆盖 config）。"""
-    if "backtest" not in TASKS:
-        yield "❌ 未找到回测任务定义"
+def _stream_task(task_id: str, extra: list[str], header: str, wait_seconds: int = 600):
+    """提交任务并流式回显日志（回测 / walk-forward 共用）。
+
+    超时后不撤销任务——它仍在后台跑，提示用户去策略监控看。
+    """
+    if task_id not in TASKS:
+        yield f"❌ 未找到任务定义: {task_id}"
         return
 
+    q: queue.Queue = queue.Queue()
+
+    def _on_output(tid: str, line: str):
+        q.put(("out", tid, line))
+
+    def _on_complete(tid: str, code: int):
+        q.put(("done", tid, code))
+
+    ok, msg, instance_id = task_queue.submit(
+        task_id, on_output=_on_output, on_complete=_on_complete, extra_args=extra
+    )
+    if not ok:
+        yield f"⚠️ {msg}"
+        return
+
+    lines = [header, ""]
+    yield "\n".join(lines)
+
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        try:
+            kind, tid, payload = q.get(timeout=2)
+        except Exception:
+            yield "\n".join(lines[-60:])
+            continue
+        if tid != instance_id:
+            continue
+        if kind == "out":
+            lines.append(str(payload).rstrip())
+        elif kind == "done":
+            lines.append("")
+            lines.append(
+                f"{'✅ 完成' if payload == 0 else f'❌ 失败 (code={payload})'}"
+                f" — 点击上方「🔄 刷新」查看结果"
+            )
+            yield "\n".join(lines[-60:])
+            return
+        yield "\n".join(lines[-60:])
+
+    yield (
+        "\n".join(lines[-60:])
+        + f"\n\n⏱️ 已等待 {wait_seconds // 60} 分钟，任务仍在后台运行，请到「📡 策略监控」查看"
+    )
+
+
+def _run_backtest(strategy: str, rebalance_days: float, top_k: float, start: str):
+    """提交回测任务（换手频率/持仓数等参数由前端传入，覆盖 config）。"""
     try:
         rb = int(rebalance_days) if rebalance_days else None
         tk = int(top_k) if top_k else None
@@ -141,49 +192,47 @@ def _run_backtest(strategy: str, rebalance_days: float, top_k: float, start: str
     if tk:
         extra += ["--top-k", str(tk)]
 
-    q: queue.Queue = queue.Queue()
-
-    def _on_output(tid: str, line: str):
-        q.put(("out", tid, line))
-
-    def _on_complete(tid: str, code: int):
-        q.put(("done", tid, code))
-
-    ok, msg, instance_id = task_queue.submit(
-        "backtest", on_output=_on_output, on_complete=_on_complete, extra_args=extra
+    header = (
+        f"🚀 已提交回测：**{strategy}** | 换手 {rb or '默认'} 日 | "
+        f"持仓 {tk or '默认'} | 起始 {start or '2020-01-01'}"
     )
-    if not ok:
-        yield f"⚠️ {msg}"
+    yield from _stream_task("backtest", extra, header)
+
+
+def _run_wfa(strategy: str, train: float, test: float, embargo: float,
+             metric: str, grid: str, anchored: bool):
+    """提交 Walk-Forward 验证任务。"""
+    try:
+        tr = int(train) if train else None
+        te = int(test) if test else None
+        em = int(embargo) if embargo else 0
+    except Exception:
+        yield "❌ 训练/测试/隔离天数必须为整数"
         return
 
-    lines = [
-        f"🚀 已提交回测：**{strategy}** | 换手 {rb or '默认'} 日 | "
-        f"持仓 {tk or '默认'} | 起始 {start or '2020-01-01'}",
-        "",
-    ]
-    yield "\n".join(lines)
+    extra = ["--strategy", strategy]
+    if tr:
+        extra += ["--train", str(tr)]
+    if te:
+        extra += ["--test", str(te)]
+    extra += ["--embargo", str(em)]
+    if metric:
+        extra += ["--metric", metric]
+    if anchored:
+        extra += ["--anchored"]
+    # --grid 可重复传入多次；前端用分号分隔多组
+    for g in (grid or "").split(";"):
+        g = g.strip()
+        if g:
+            extra += ["--grid", g]
 
-    deadline = time.time() + 600
-    while time.time() < deadline:
-        try:
-            kind, tid, payload = q.get(timeout=2)
-        except Exception:
-            yield "\n".join(lines[-60:])
-            continue
-        if tid != instance_id:
-            continue
-        if kind == "out":
-            lines.append(str(payload).rstrip())
-        elif kind == "done":
-            lines.append("")
-            lines.append(
-                f"{'✅ 完成' if payload == 0 else f'❌ 失败 (code={payload})'} — 点击上方「🔄 刷新回测列表」查看结果"
-            )
-            yield "\n".join(lines[-60:])
-            return
-        yield "\n".join(lines[-60:])
-
-    yield "\n".join(lines[-60:]) + "\n\n⏱️ 已等待 10 分钟，任务仍在后台运行，请到「📡 策略监控」查看"
+    header = (
+        f"🔁 已提交 Walk-Forward：**{strategy}** | train {tr or '默认'} / "
+        f"test {te or '默认'} / embargo {em} 日 | 指标 {metric or '默认'}"
+        + (" | 锚定窗口" if anchored else "")
+    )
+    # WFA 要跑 N 折 × 网格组合，比单次回测慢得多，超时后转后台
+    yield from _stream_task("walk_forward", extra, header, wait_seconds=900)
 
 
 def render():
@@ -220,6 +269,46 @@ def render():
                 inputs=[strategy_in, rebal_in, topk_in, start_in],
                 outputs=[run_out],
             )
+
+        # ---- 运行 Walk-Forward（样本外验证）----
+        with gr.Accordion("🔁 运行 Walk-Forward 验证（样本外 / 过拟合诊断）", open=False):
+            gr.Markdown(
+                "*每折只在 train 段选参数，再在紧接的 test 段验证；"
+                "最后把 test 段拼接成完整的样本外曲线。*"
+            )
+            with gr.Row():
+                wfa_strategy = gr.Dropdown(
+                    label="策略", choices=STRATEGY_CHOICES, value=STRATEGY_CHOICES[0],
+                )
+                wfa_train = gr.Number(label="训练窗口（交易日）", value=504, precision=0)
+                wfa_test = gr.Number(label="测试窗口（交易日）", value=126, precision=0)
+                wfa_embargo = gr.Number(label="隔离天数（防泄漏）", value=5, precision=0)
+            with gr.Row():
+                wfa_metric = gr.Dropdown(
+                    label="参数选择指标",
+                    choices=["sharpe", "cagr", "calmar", "total_return", "bench_excess_cagr"],
+                    value="sharpe",
+                )
+                wfa_grid = gr.Textbox(
+                    label="参数网格（多组用 ; 分隔）",
+                    placeholder="top_k=10,20,30; rebalance_days=20,45",
+                    info="留空 = 固定参数前推，只检验稳健性",
+                )
+                wfa_anchored = gr.Checkbox(label="锚定窗口（train 逐折变长）", value=False)
+            wfa_run_btn = gr.Button("🔁 运行 Walk-Forward", variant="primary")
+            wfa_run_out = gr.Markdown()
+            wfa_run_btn.click(
+                _run_wfa,
+                inputs=[wfa_strategy, wfa_train, wfa_test, wfa_embargo,
+                        wfa_metric, wfa_grid, wfa_anchored],
+                outputs=[wfa_run_out],
+            )
+
+        # ---- Walk-Forward 过拟合诊断 + 制品追溯 ----
+        # 放在回测列表之前：这两个面板不依赖 reports/，即使从未跑过回测也能用，
+        # 且提前 return 会跳过它们。
+        render_wfa_panel()
+        render_artifacts_panel()
 
         backtest_names = get_backtest_list()
         if not backtest_names:

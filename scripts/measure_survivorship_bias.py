@@ -24,7 +24,7 @@ from quart.config import load_config
 from quart.data.store import BarStore
 from quart.data.universe import filter_for_simulation
 
-from diag_random_decomp import RandomTopKStrategy, k_day_rebal, yearly
+from quart.research.baseline import RandomTopKStrategy, k_day_rebal
 
 console = Console()
 

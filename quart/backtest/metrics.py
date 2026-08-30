@@ -84,11 +84,17 @@ def window_stats(equity: pd.Series, days: int) -> dict:
         if len(rets) > 1 and rets.std() > 0
         else None
     )
+    # 基期为 0 会产生 inf/nan。返回 None 而不是 inf——UI 会把 inf 显示成
+    # "+inf%"，比显示"-"更糟（看起来像一个巨大的正收益）。
+    base = float(w.iloc[0])
+    ret = float(w.iloc[-1] / base - 1.0) if base > 0 else None
+    if ret is not None and not np.isfinite(ret):
+        ret = None
     return {
-        "return": float(w.iloc[-1] / w.iloc[0] - 1.0),
-        "mdd": mdd,
-        "ann_vol": vol,
-        "sharpe": sharpe,
+        "return": ret,
+        "mdd": mdd if mdd is None or np.isfinite(mdd) else None,
+        "ann_vol": vol if vol is None or np.isfinite(vol) else None,
+        "sharpe": sharpe if sharpe is None or np.isfinite(sharpe) else None,
         "days": len(w) - 1,
     }
 

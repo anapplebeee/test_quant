@@ -1,9 +1,14 @@
-"""共享工具函数"""
+"""共享工具函数：输入白名单、路径解析、统一降级告警。
+
+这里只放**跨层共用**的工具。业务规则请放回 quart/ 各自的子包，
+避免这里退化成杂物抽屉。
+"""
 from __future__ import annotations
 
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -40,17 +45,72 @@ def safe_path(base: str | os.PathLike, *parts: str) -> Path | None:
     return target
 
 
+# ---- 统一路径解析（唯一来源，杜绝各处硬编码 "data" / "reports"） ----
+
+
+def data_dir() -> Path:
+    """数据仓库根目录。改 settings.yaml 的 data.root 后，全项目一致生效。"""
+    from quart.config import data_root
+
+    return data_root()
+
+
+def reports_dir() -> Path:
+    from quart.config import PROJECT_ROOT
+
+    return PROJECT_ROOT / "reports"
+
+
+def daily_dir() -> Path:
+    return data_dir() / "daily"
+
+
+def universe_dir() -> Path:
+    return data_dir() / "universe"
+
+
+def index_dir() -> Path:
+    return data_dir() / "index"
+
+
+# ---- 统一降级告警 ----
+
+
+def degraded(where: str, exc: BaseException, logger: Any = None) -> None:
+    """降级返回空数据可以，静默丢弃不行。
+
+    api 层全部异常都必须经过这里留痕，否则前端"未找到数据"到底是真没有
+    还是读取失败，永远查不出来。
+    """
+    msg = f"[{where}] degraded: {exc}"
+    if logger is not None:
+        logger.warning(msg)
+        return
+    try:
+        from loguru import logger as _logger
+
+        _logger.warning(msg)
+    except ImportError:
+        print(f"WARNING {msg}")
+
+
 def load_stock_names() -> dict[str, str]:
     """获取股票代码-名称映射，优先读缓存"""
-    cache_path = os.path.join("data", "stock_names.parquet")
-    if os.path.exists(cache_path):
-        df = pd.read_parquet(cache_path)
-        return dict(zip(df["code"], df["name"]))
+    cache_path = daily_dir().parent / "stock_names.parquet"
+    if cache_path.exists():
+        try:
+            df = pd.read_parquet(cache_path)
+            return dict(zip(df["code"], df["name"]))
+        except Exception:
+            pass
     # 缓存不存在则用 akshare 拉取
     try:
         import akshare as ak
+
         df = ak.stock_info_a_code_name()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_parquet(cache_path, index=False)
         return dict(zip(df["code"], df["name"]))
-    except Exception:
+    except Exception as exc:
+        degraded("load_stock_names", exc)
         return {}

@@ -9,11 +9,14 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
-from quart.backtest.engine import BacktestEngine, MarketData
+from quart.backtest.engine import BacktestEngine
 from quart.backtest.metrics import max_drawdown, summarize
 from quart.config import load_config
+from quart.data.artifacts import ArtifactStore
+from quart.data.market import MarketData
 from quart.data.store import BarStore
 from quart.data.universe import filter_for_simulation
+from quart.risk.rules import make_weight_validator
 from quart.strategy import REGISTRY, build_strategy
 
 console = Console()
@@ -55,18 +58,28 @@ def yearly_stats(equity: pd.Series) -> dict[str, float]:
     return out
 
 
-def run_one(md: MarketData, bench_close: pd.Series, strategy_name: str, base_params: dict, combo: dict, initial_cash: float):
+def run_one(
+    md: MarketData,
+    bench_close: pd.Series,
+    strategy_name: str,
+    base_params: dict,
+    combo: dict,
+    initial_cash: float,
+    risk_pipeline=None,
+):
     params = {**base_params, **combo}
     label_parts = [f"{k}={v}" for k, v in sorted(combo.items())] or ["default"]
     strategy = build_strategy(strategy_name, **params)
-    engine = BacktestEngine(md, strategy, initial_cash=initial_cash)
-    equity = engine.run()
+    result = BacktestEngine(md, strategy, initial_cash=initial_cash,
+                            risk_pipeline=risk_pipeline).run_result()
+    equity = result.equity
+    trades = result.trades.to_dict("records") if not result.trades.empty else []
     summary = summarize(equity, benchmark=bench_close)
     summary["label"] = " ".join(label_parts)
-    summary["n_trades"] = len(engine.trades)
+    summary["n_trades"] = len(trades)
     years = len(equity) / 252.0
-    if years > 0 and engine.trades:
-        one_side = sum(t.amount for t in engine.trades)
+    if years > 0 and trades:
+        one_side = sum(t["amount"] for t in trades)
         summary["turnover"] = one_side / 2.0 / float(equity.mean()) / years
     else:
         summary["turnover"] = 0.0
@@ -81,6 +94,8 @@ def main() -> None:
     parser.add_argument("--end", default=None)
     parser.add_argument("--combo", action="append", default=[], help="e.g. --combo \"use_regime_filter=true,regime_filter_days=60\"")
     parser.add_argument("--save-dir", default="reports")
+    parser.add_argument("--no-risk", action="store_true",
+                        help="关闭回测内风控（默认启用，与实盘同一约束）")
     args = parser.parse_args()
 
     cfg = load_config()
@@ -110,10 +125,17 @@ def main() -> None:
     base_params = {k: v for k, v in cfg["strategy"].items() if k != "name"}
     combos = [parse_combo(c) for c in args.combo] or [{}]
 
+    risk_pipeline = None
+    if not args.no_risk:
+        risk_pipeline = make_weight_validator(float(cfg["risk"]["max_position_pct"]))
+
     results = []
     curves = {}
     for combo in combos:
-        equity, summary = run_one(md, bench_close, args.strategy, base_params, combo, float(cfg["backtest"]["initial_cash"]))
+        equity, summary = run_one(
+            md, bench_close, args.strategy, base_params, combo,
+            float(cfg["backtest"]["initial_cash"]), risk_pipeline=risk_pipeline,
+        )
         results.append(summary)
         curves[summary["label"]] = equity
         console.print(f"  done: {summary['label']}  cagr={summary['cagr']:.1%} sharpe={summary['sharpe']:.2f} mdd={summary['max_drawdown']:.1%}")
@@ -165,6 +187,29 @@ def main() -> None:
     flat.to_csv(out_dir / f"sweep_{args.strategy}_{stamp}.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame(curves).to_csv(out_dir / f"sweep_equity_{args.strategy}_{stamp}.csv")
     console.print(f"[green]saved: sweep_{args.strategy}_{stamp}.csv[/green]")
+
+    # 制品：记录本次扫描的完整参数组合，避免"这张表是哪个网格跑出来的"失考
+    run = ArtifactStore().create_run(
+        f"sweep_{args.strategy}",
+        params={
+            "strategy": args.strategy, "combos": combos,
+            "base_params": base_params, "start": args.start, "end": args.end,
+            "risk_enabled": not args.no_risk,
+        },
+    )
+    run.put_table("results", flat)
+    run.put_table("equity_curves", pd.DataFrame(curves))
+    best = flat.sort_values("cagr", ascending=False).iloc[0] if not flat.empty else None
+    if best is not None:
+        run.add_metrics(
+            best_label=str(best.get("label")),
+            best_cagr=float(best.get("cagr", 0)),
+            best_sharpe=float(best.get("sharpe", 0)),
+            best_mdd=float(best.get("max_drawdown", 0)),
+            n_combos=len(results),
+        )
+    manifest = run.finish()
+    console.print(f"[green]制品目录: artifacts/{manifest.run_id}/[/green]")
 
 
 if __name__ == "__main__":

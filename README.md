@@ -11,6 +11,7 @@ quart/
 ├── backtest/    T+1 · 100股整手 · 佣金/印花税/过户费/滑点 撮合引擎 + 绩效指标
 ├── strategy/    统一 Strategy 接口: momentum_rotation / dual_ma / ml_rank / lowvol_composite / lowvol_indz (可注册扩展)
 ├── risk/        单票权重上限校验、持仓集中度告警
+├── manual_trading/ SQLite 账户账本 / T+1 持仓批次 / 计划审批 / 成交回填 / 对账
 ├── notify/      钉钉机器人推送(支持加签)
 ├── pipeline.py  每日流水线: 数据更新→选股→风控→交易计划→报告/推送
 scripts/         update_data.py · run_backtest.py · daily_signal.py
@@ -38,9 +39,21 @@ uv run python scripts/daily_signal.py
 uv run python run_scheduler.py
 ```
 
-## 手动交易模式
+## 手动交易 T+1 同步
 
-策略输出目标权重 → 与 `state/holdings.json` 当前持仓做差 → 生成次日开盘委托计划：
+当前阶段仍由用户在券商客户端手动下单。平台负责：
+
+```text
+T 日收盘生成信号
+→ 创建 T+1 DRAFT 交易计划
+→ 用户审批并在券商端手动下单
+→ 人工录入或 CSV 导入真实成交
+→ 更新现金、费用、持仓批次和 T+1 可卖数量
+→ 收盘后与券商账户快照对账
+→ 使用已对账状态生成下一交易日计划
+```
+
+账户状态保存在 `state/trading.db`。`state/holdings.json` 仅作为首次迁移兼容格式：
 
 ```json
 {
@@ -49,7 +62,94 @@ uv run python run_scheduler.py
 }
 ```
 
-每次成交后请人工更新该文件。信号仅供参考，不构成投资建议；回测表现 ≠ 实盘表现。
+### 1. 初始化账户
+
+已有 `state/holdings.json`：
+
+```powershell
+uv run python scripts/manual_trade.py init --as-of 2026-08-28
+```
+
+空账户：
+
+```powershell
+uv run python scripts/manual_trade.py init --as-of 2026-08-28 --cash 1000000
+```
+
+初始化后不再直接编辑 `holdings.json`。
+
+### 2. 生成并审批 T+1 计划
+
+```powershell
+# 普通工作日自动取下一工作日；节假日前建议显式传计划交易日
+uv run python scripts/daily_signal.py --trade-date 2026-08-31
+
+uv run python scripts/manual_trade.py plans
+uv run python scripts/manual_trade.py plan plan_20260828_xxxxxxxx
+uv run python scripts/manual_trade.py approve plan_20260828_xxxxxxxx
+```
+
+每日信号报告会显示 `plan_id`、计划交易日和 `DRAFT` 状态。重复运行只会替换未审批草稿；已审批或执行中的同日计划不会被覆盖。
+
+### 3. 回填真实成交
+
+单笔录入：
+
+```powershell
+uv run python scripts/manual_trade.py fill `
+  --trade-date 2026-08-31 --trade-time 09:35:00 `
+  --symbol 600519 --side BUY --quantity 100 --price 1500 `
+  --planned-order-id 1 --broker-fill-id broker-001
+```
+
+未提供费用时会按配置估算，收盘对账时以券商快照为准。也可生成并导入通用 CSV：
+
+```powershell
+uv run python scripts/manual_trade.py fills-template
+uv run python scripts/manual_trade.py fills-import state/fills_template.csv
+```
+
+真实成交是账户变化的依据；未成交计划不会自动改变持仓。支持部分成交、计划外交易和重复成交编号拦截。
+
+### 4. 查看 T+1 账户状态
+
+```powershell
+uv run python scripts/manual_trade.py show --as-of 2026-08-31
+uv run python scripts/manual_trade.py show --as-of 2026-09-01
+```
+
+当日买入计入总持仓，但在同一交易日的可卖数量为 0；下一交易日转为可卖。当前无权威交易日历时只自动跳过周末，节假日成交请在成交 CSV 或命令中显式提供 `settle_date`。
+
+### 5. 收盘对账
+
+账户快照 JSON 示例：
+
+```json
+{
+  "as_of": "2026-08-31",
+  "cash_total": 50000,
+  "cash_available_to_trade": 50000,
+  "cash_withdrawable": 30000,
+  "cash_frozen": 0,
+  "positions": {
+    "600519": {
+      "total_quantity": 200,
+      "sellable_quantity": 100,
+      "cost_price": 1488.5
+    }
+  }
+}
+```
+
+先预览差异，再明确确认：
+
+```powershell
+uv run python scripts/manual_trade.py reconcile state/broker_snapshot.json
+uv run python scripts/manual_trade.py reconcile state/broker_snapshot.json `
+  --confirm --resolution "以券商收盘快照为准"
+```
+
+详细设计和后续前端、券商 API 计划见 `MANUAL_TRADING_T1_SYNC_PLAN.md`。信号仅供参考，不构成投资建议；回测表现 ≠ 实盘表现。
 
 ## 配置 (config/settings.yaml)
 
@@ -59,6 +159,7 @@ uv run python run_scheduler.py
 | `backtest` | 初始资金、佣金万2.5最低5元、印花税万5(卖出)、过户费、滑点千1(双边不利方向) |
 | `strategy` | top_k=10 · lookback=60日动量 · 每5日调仓 · MA20择时(指数跌破空仓) · 单票上限15% |
 | `risk` | 单票仓位上限25%、单日亏损阈值 |
+| `manual_trading` | 手动交易账本开关、账户名、SQLite 路径、旧持仓自动迁移 |
 | `notify` | 钉钉 webhook + 加签 secret（可用环境变量 QUART_DINGTALK_WEBHOOK/SECRET 覆盖） |
 
 ## 设计要点
@@ -133,9 +234,87 @@ uv run streamlit run streamlit_app.py
 
 - [x] Qlib 集成：Alpha158 因子 + LightGBM 滚动训练（见下）
 - [x] 前端界面优化：统一样式/组件库/响应式布局
-- [ ] walk-forward 滚动参数验证、子区间稳定性评估
+- [x] **walk-forward 滚动参数验证**（`scripts/walk_forward.py`，含过拟合诊断）
+- [x] **制品仓库 ArtifactStore**（run_id + 参数/数据/代码版本指纹，结果可复现可追溯）
+- [x] **存储按年分区**（增量只重写当年分区，查询按年份裁剪）
+- [ ] WFA 结论回填：把 README 的历史数字全部重跑为样本外口径
+- [ ] 前端按 run_id 展示制品（当前仍读 `reports/`，双写过渡中）
 - [ ] MiniQMT(xtquant) 自动执行通道（需券商权限）
 - [ ] ClickHouse 云端化迁移
+
+## Walk-Forward 样本外验证
+
+此前所有结论都是**全样本同期优化**：用 2020-2026 选参数，再用同一段报收益。
+WFA 把时间切成若干折，每折只在 train 段选参数，再在紧接的 test 段记录样本外净值，
+最后把 test 段按复利链接成一条完整的 OOS 曲线。
+
+```powershell
+# 固定参数的样本外滚动（检验稳健性，不调参）
+uv run python scripts/walk_forward.py --strategy lowvol_indz
+
+# 每折在 train 段搜参数，再在 test 段验证
+uv run python scripts/walk_forward.py --strategy lowvol_indz `
+    --grid top_k=10,20,30 --grid rebalance_days=20,45
+
+# 锚定窗口 + 更长隔离带
+uv run python scripts/walk_forward.py --strategy lowvol_indz `
+    --anchored --embargo 10 --train 756 --test 126
+```
+
+输出含过拟合诊断：
+
+| 指标 | 含义 | 判读 |
+|---|---|---|
+| `衰减比 OOS/IS` | 样本外指标 / 样本内指标 | ≥0.8 稳健；0.4~0.8 存在过拟合；<0.4 基本在挑噪声 |
+| `参数一致率` | 各折选中同一参数的比例 | 1.0 = 每折选中同一组，真稳健 |
+| `n_folds_with_trades` | 样本外有成交的折数 | 为 0 说明窗口太短/过滤太严，此时衰减比无意义 |
+
+**防泄漏机制**：每个 fold 用 `MarketData.slice_by_pos()` 重切子面板，策略 `prepare()`
+会在子面板上重算滚动窗口，因此 train 段不可能用到 test 段数据；train 与 test 之间
+默认留 5 日 embargo，避免日频因子的持仓跨越边界。
+
+## 制品仓库 (ArtifactStore)
+
+scripts → api → frontend 此前靠 `glob + mtime` 猜产出，无法回答"这个数字是哪次运行产生的"。
+现在每次运行都落一个显式契约：
+
+```
+artifacts/backtest_lowvol_indz_20260830_205701_189008_0db476/
+├── manifest.json      run_id / 参数 / 数据版本 / 代码版本 / 指纹 / 指标 / 产出清单
+├── equity.parquet
+├── trades.parquet
+└── summary.json
+```
+
+`fingerprint = hash(参数 + 数据版本 + 代码版本)`：**同指纹 = 同输入**，
+数据或配置一变，指纹就变，旧结论自动失效，不必靠人工记忆哪轮作废。
+
+```python
+from api import artifacts_api
+artifacts_api.latest_run("backtest_lowvol_indz")   # 参数 + 指标 + 产出清单
+artifacts_api.latest_wfa()                          # 过拟合诊断
+artifacts_api.failed_runs()                         # 失败的运行（此前只在日志里）
+```
+
+过渡期 `reports/` 与 `artifacts/` **双写**，前端逐步迁移到按 run_id 查询。
+`artifacts/` 已加入 .gitignore（与 reports/ 同为生成产物）。
+
+## 存储分区
+
+`data/daily/{symbol}.parquet` → `data/daily/year=YYYY/{symbol}.parquet`。
+
+| | 旧布局 | 分区布局 |
+|---|---|---|
+| 增量写入 | 重写该股**全史** | 只重写当年分区 |
+| 全市场扫描 | 5000+ 路径拼进 SQL | 按年份 glob，DuckDB `hive_partitioning` 裁剪 |
+| 读取兼容 | — | 新旧布局自动识别，可共存 |
+
+```powershell
+uv run python scripts/migrate_partition_store.py --dry-run   # 预演
+uv run python scripts/migrate_partition_store.py              # 执行（幂等，旧文件迁完删除）
+```
+
+实测：61 只标的迁移后，回测结果与迁移前**逐位一致**（289 笔 / CAGR 6.08% / Sharpe 0.80 / MDD -3.41%）。
 
 ## ML 研究层 (Qlib + LightGBM)
 

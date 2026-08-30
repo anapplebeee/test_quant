@@ -1,33 +1,31 @@
 from __future__ import annotations
 
-import datetime as dt
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
-from quart.backtest.engine import FLAT, MarketData
 from quart.config import PROJECT_ROOT, load_config
-from quart.data.store import BarStore
-from quart.data.store import drop_incomplete_today
+from quart.data.market import MarketData
+from quart.data.store import BarStore, drop_incomplete_today
 from quart.data.universe import filter_for_simulation
+from quart.execution import (
+    FLAT,
+    ExecutionContext,
+    Fees,
+    LiveExecutionModel,
+    OrderPlan,
+)
+from quart.execution import generate_orders as build_rebalance_plan
+from quart.execution.constraints import A_SHARE_LOT
+from quart.manual_trading import PlannedOrderInput, TradingRepository, next_trade_date
 from quart.notify.dingtalk import send_markdown
 from quart.risk.rules import check_holdings_risk, validate_weights
 from quart.strategy import build_strategy
 
 console = Console()
-
-
-@dataclass
-class OrderPlan:
-    symbol: str
-    action: str
-    shares: int
-    ref_price: float
-    weight: float = field(default=0.0)
 
 
 def load_holdings(path: Path | None = None) -> tuple[float, dict[str, int]]:
@@ -48,78 +46,94 @@ def generate_orders(
     positions: dict[str, int],
     force_flat: bool = False,
     warnings: list[str] | None = None,
+    fees: Fees | None = None,
+    prev_close: pd.Series | None = None,
 ) -> tuple[list[OrderPlan], float]:
+    """生成次日委托计划。
+
+    与回测共用 `quart.execution.generate_orders`——撮合/整手/资金约束只有
+    一份实现。差异仅来自 `LiveExecutionModel`：
+      * 参考价用最新收盘（回测用次日开盘）
+      * 不做滑点预测（回测中滑点是假设，实盘中它是成交结果）
+      * 涨跌停只提示不拒单（次日可能开板）
+
+    Parameters
+    ----------
+    prev_close:
+        **前一交易日**收盘价，用于涨跌停判断与持仓成本估值。
+        必须传：若误传当日收盘，涨跌停检测永远不触发
+        （今收 == 今收，不可能触及昨收算出的涨跌停价）。
+    """
+    fees = fees or Fees.from_config()
+    targets = {FLAT: 1.0} if force_flat else weights
+    prev_close = latest_close if prev_close is None else prev_close
     equity = cash + sum(
         sh * latest_close[sym]
         for sym, sh in positions.items()
         if sym in latest_close.index and not pd.isna(latest_close[sym])
     )
-    orders: list[OrderPlan] = []
-    if force_flat:
-        for sym, held in sorted(positions.items()):
-            if held <= 0:
-                continue
-            price = latest_close.get(sym)
-            if pd.isna(price):
-                continue
-            orders.append(OrderPlan(sym, "SELL", held, round(float(price), 2), 0.0))
-        return orders, equity
 
-    # 先卖后买：卖出回款计入可用资金（否则可能给出资金买不起的组合）
-    sell_proceeds = 0.0
-    for sym, held in sorted(positions.items()):
-        price = latest_close.get(sym)
-        if pd.isna(price):
-            continue
-        w = weights.get(sym, 0.0)
-        sell = 0
-        if w <= 0:
-            sell = held
-        else:
-            delta = w * equity - held * price
-            if delta < 0:
-                lots = int(abs(delta) // (price * 100))
-                sell = min(held, lots * 100)
-        if sell > 0:
-            orders.append(OrderPlan(sym, "SELL", sell, round(float(price), 2), w))
-            sell_proceeds += sell * price
+    model = LiveExecutionModel(fees)
+    ctx = ExecutionContext(
+        date=pd.Timestamp.today().normalize(),
+        targets=targets,
+        equity=equity,
+        cash=cash,
+        positions=positions,
+        mark_prices=latest_close,
+        exec_prices=latest_close,
+        prev_closes=prev_close,
+        fees=fees,
+        lot_size=A_SHARE_LOT,
+        # 实盘不留现金垫：委托计划要如实反映目标仓位，由人判断是否留余地
+        cash_buffer=1.0,
+    )
+    plan = build_rebalance_plan(ctx, model)
 
-    budget = max(cash + sell_proceeds, 0.0)
-    buys: list[OrderPlan] = []
-    for sym, w in sorted(weights.items(), key=lambda kv: -kv[1]):
-        if w <= 0:
-            continue
-        price = latest_close.get(sym)
-        if pd.isna(price):
-            continue
-        delta = w * equity - positions.get(sym, 0) * price
-        if delta <= 0:
-            continue
-        if budget <= 0:
-            if warnings is not None:
-                warnings.append(f"{sym}: 可用资金不足，买入计划被裁剪")
-            continue
-        affordable = min(delta, budget)
-        lots = int(affordable // (price * 100))
-        if lots >= 1:
-            buys.append(OrderPlan(sym, "BUY", lots * 100, round(float(price), 2), w))
-            budget -= lots * 100 * price
-        else:
-            if warnings is not None:
-                warnings.append(f"{sym}: 可用资金不足一手，买入计划被裁剪")
-    orders.extend(buys)
-    return orders, equity
+    if warnings is not None:
+        warnings.extend(plan.notes)
+        warnings.extend(model.warnings)
+        warnings.extend(_unfilled_warnings(targets, plan))
+    return plan.orders, equity
 
 
-def render_report(date: pd.Timestamp, strategy_name: str, orders: list[OrderPlan], equity: float, warnings: list[str]) -> str:
+def _unfilled_warnings(targets: dict[str, float], plan) -> list[str]:
+    """目标里有、但计划里没有的标的必须显式说明，不能静默丢弃。
+
+    资金不足、停牌、涨跌停都会导致"想要但没买到"。若不加提示，
+    使用者看到的是一份干干净净的委托单，无从得知策略实际想买什么。
+    """
+    filled = {o.symbol for o in plan.orders}
+    out = []
+    for sym in sorted(targets):
+        if sym in filled:
+            continue
+        reason = next((s.blocked_reason for s in plan.skipped if s.symbol == sym), None)
+        out.append(f"{sym}: 目标未成交 ({reason or '资金不足或整手约束'})")
+    return out
+
+
+def render_report(
+    date: pd.Timestamp,
+    strategy_name: str,
+    orders: list[OrderPlan],
+    equity: float,
+    warnings: list[str],
+    plan_id: str | None = None,
+    intended_trade_date: str | None = None,
+) -> str:
     lines = [
         f"# Quart 每日信号 {date.date()}",
         "",
         f"- 策略: **{strategy_name}**",
         f"- 账户估值: **{equity:,.0f} CNY**",
         "- 执行方式: 次日开盘价附近委托，请人工确认后下单",
-        "",
     ]
+    if plan_id:
+        lines.append(f"- 交易计划: **{plan_id}** (状态 DRAFT)")
+    if intended_trade_date:
+        lines.append(f"- 计划交易日: **{intended_trade_date}**")
+    lines.append("")
     if warnings:
         lines.append("## 风控提示\n")
         lines += [f"- ⚠️ {w}" for w in warnings]
@@ -137,7 +151,11 @@ def render_report(date: pd.Timestamp, strategy_name: str, orders: list[OrderPlan
             table.add_row(color, o.symbol, f"{o.shares}", f"{o.ref_price:.2f}", f"{o.weight:.1%}")
             console_table_rows.append(f"| {o.action} | {o.symbol} | {o.shares} | {o.ref_price:.2f} | {o.weight:.1%} |")
         console.print(table)
-        md_lines = ["| 方向 | 代码 | 股数 | 参考价 | 目标权重 |", "|---|---|---|---|---|"] + console_table_rows
+        md_lines = [
+            "| 方向 | 代码 | 股数 | 参考价 | 目标权重 |",
+            "|---|---|---|---|---|",
+            *console_table_rows,
+        ]
         lines.append("## 交易计划\n")
         lines += md_lines
     else:
@@ -147,7 +165,12 @@ def render_report(date: pd.Timestamp, strategy_name: str, orders: list[OrderPlan
     return "\n".join(lines)
 
 
-def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: Path | None = None) -> str:
+def run_daily(
+    strategy_name: str | None = None,
+    push: bool = True,
+    report_dir: Path | None = None,
+    intended_trade_date: str | None = None,
+) -> str:
     cfg = load_config()
     strategy_name = strategy_name or cfg["strategy"]["name"]
     store = BarStore()
@@ -185,7 +208,33 @@ def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: P
     raw_weights = {} if force_flat else dict(raw_weights)
 
     risk_cfg = cfg["risk"]
-    cash, positions = load_holdings()
+    manual_cfg = cfg.get("manual_trading", {})
+    manual_enabled = bool(manual_cfg.get("enabled", True))
+    account_name = str(manual_cfg.get("account_name", "manual"))
+    db_path = Path(manual_cfg.get("database", PROJECT_ROOT / "state" / "trading.db"))
+    if not db_path.is_absolute():
+        db_path = PROJECT_ROOT / db_path
+    repository = TradingRepository(db_path) if manual_enabled else None
+    account_state = None
+    if repository is not None:
+        repository.initialize_schema()
+        legacy_path = PROJECT_ROOT / "state" / "holdings.json"
+        if (
+            bool(manual_cfg.get("auto_migrate_holdings", True))
+            and legacy_path.exists()
+            and not repository.has_snapshot(account_name)
+        ):
+            repository.initialize_from_holdings_json(
+                legacy_path,
+                as_of=str(md.dates[-1].date()),
+                account_name=account_name,
+            )
+        account_state = repository.account_state(account_name, str(md.dates[-1].date()))
+    if account_state is not None:
+        cash = account_state.cash_available_to_trade
+        positions = account_state.total_positions
+    else:
+        cash, positions = load_holdings()
     last_close = md.closes.iloc[i]
     equity = cash + sum(
         sh * last_close[sym]
@@ -199,7 +248,13 @@ def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: P
         max_position_pct=float(risk_cfg["max_position_pct"]),
     )
     warnings = list(violations)
-    orders, equity = generate_orders(weights, last_close, cash, positions, force_flat=force_flat, warnings=warnings)
+    # 前一交易日收盘：涨跌停判断必须基于它，不能用当日收盘
+    # （今收 vs 今收算出的涨跌停价永远不触发）
+    prev_close = md.closes.iloc[i - 1] if i > 0 else last_close
+    orders, equity = generate_orders(
+        weights, last_close, cash, positions,
+        force_flat=force_flat, warnings=warnings, prev_close=prev_close,
+    )
     if force_flat:
         warnings.append("策略发出择时清仓(FLAT)信号：建议全部卖出")
     warnings += check_holdings_risk(
@@ -207,7 +262,40 @@ def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: P
     )
 
     date = md.dates[i]
-    report = render_report(date, strategy_name, orders, equity, warnings)
+    trade_date = intended_trade_date or next_trade_date(str(date.date()))
+    plan_id = None
+    if repository is not None:
+        account_id = account_state.account_id if account_state is not None else repository.get_or_create_account(account_name)
+        if account_state is None:
+            warnings.append("手动交易账户尚未完成初始化/对账; 计划基于兼容持仓生成")
+        plan_id = repository.create_trade_plan(
+            account_id=account_id,
+            account_snapshot_id=account_state.snapshot_id if account_state is not None else None,
+            strategy_name=strategy_name,
+            signal_date=str(date.date()),
+            intended_trade_date=trade_date,
+            orders=[
+                PlannedOrderInput(
+                    symbol=order.symbol,
+                    side=order.side,
+                    strategy_quantity=order.shares,
+                    reference_price=order.ref_price,
+                    target_weight=order.weight,
+                    estimated_fee=order.fee,
+                )
+                for order in orders
+            ],
+            notes="平台生成, 等待用户在券商端手动确认和执行",
+        )
+    report = render_report(
+        date,
+        strategy_name,
+        orders,
+        equity,
+        warnings,
+        plan_id=plan_id,
+        intended_trade_date=trade_date,
+    )
 
     out_dir = report_dir or (PROJECT_ROOT / "reports")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -215,6 +303,41 @@ def run_daily(strategy_name: str | None = None, push: bool = True, report_dir: P
     with open(out_file, "w", encoding="utf-8") as f:
         f.write(report)
     console.print(f"[green]报告已保存: {out_file}[/green]")
+
+    # 制品：信号是唯一会真正产生人工下单动作的产出，
+    # 必须能回答"这份委托是基于哪天的行情、哪套参数生成的"
+    try:
+        from quart.data.artifacts import ArtifactStore
+
+        run = ArtifactStore().create_run(
+            f"signal_{strategy_name}",
+            params={
+                "strategy": strategy_name,
+                "signal_date": str(date.date()),
+                "data_stale_days": stale,
+                "n_orders": len(orders),
+                "warnings": list(warnings),
+                "plan_id": plan_id,
+                "intended_trade_date": trade_date,
+            },
+        )
+        run.put_text("report", report)
+        run.put_table("orders", pd.DataFrame([{
+            "symbol": o.symbol, "side": o.side, "shares": o.shares,
+            "ref_price": o.ref_price, "weight": o.weight,
+        } for o in orders]))
+        run.put_table("weights", pd.DataFrame(
+            [{"symbol": s, "weight": w} for s, w in sorted(weights.items())]
+        ))
+        run.add_metrics(equity=float(equity), n_warnings=len(warnings))
+        manifest = run.finish()
+        if plan_id and repository is not None:
+            repository.attach_source_run(plan_id, manifest.run_id)
+        console.print(f"[green]制品目录: artifacts/{manifest.run_id}/[/green]")
+    except Exception as exc:
+        # 制品写失败不应阻断信号推送——推送是主路径
+        console.print(f"[yellow]制品写入失败（不影响信号）: {exc}[/yellow]")
+
     if push:
         send_markdown(f"Quart 每日信号 {date.date()}", report)
     return report

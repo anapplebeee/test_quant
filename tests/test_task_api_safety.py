@@ -1,0 +1,99 @@
+"""任务 API 参数注入防护测试。
+
+task_api 用 `subprocess` 把 UI 参数拼进命令行。未经校验的输入等于
+让前端页面可以指定任意命令行参数（例如 `--save-dir` 指向任意路径）。
+"""
+from __future__ import annotations
+
+import pytest
+
+from api.task_api import ALLOWED_ARGS, validate_extra_args
+
+
+@pytest.mark.parametrize("task_id", ["backtest", "sweep", "signal", "refresh", "ml_train"])
+def test_every_task_has_an_arg_policy(task_id):
+    """新增任务时必须显式声明参数白名单，缺省即拒绝（fail-closed）。"""
+    assert task_id in ALLOWED_ARGS
+
+
+def test_accepts_whitelisted_args():
+    ok, err = validate_extra_args("backtest", ["--strategy", "lowvol_indz"])
+    assert ok, err
+
+
+def test_accepts_top_k_and_rebalance():
+    ok, err = validate_extra_args("backtest", ["--top-k", "20", "--rebalance-days", "45"])
+    assert ok, err
+
+
+def test_accepts_boolean_flags():
+    ok, err = validate_extra_args("backtest", ["--no-regime"])
+    assert ok, err
+
+
+def test_rejects_unknown_flag():
+    """注入未声明的参数必须被拒。"""
+    ok, _ = validate_extra_args("backtest", ["--save-dir", "/tmp/evil"])
+    assert not ok
+
+
+def test_rejects_path_traversal_in_value():
+    ok, _ = validate_extra_args("backtest", ["--strategy", "../../etc/passwd"])
+    assert not ok
+
+
+def test_rejects_shell_metacharacters():
+    ok, _ = validate_extra_args("backtest", ["--strategy", "x; rm -rf /"])
+    assert not ok
+    ok, _ = validate_extra_args("backtest", ["--strategy", "a && calc"])
+    assert not ok
+
+
+def test_rejects_non_numeric_where_number_expected():
+    ok, _ = validate_extra_args("backtest", ["--top-k", "abc"])
+    assert not ok
+
+
+def test_rejects_missing_value():
+    ok, _ = validate_extra_args("backtest", ["--strategy"])
+    assert not ok
+
+
+def test_rejects_value_only():
+    ok, _ = validate_extra_args("backtest", ["lowvol_indz"])
+    assert not ok
+
+
+def test_rejects_bad_enum_value():
+    ok, _ = validate_extra_args("factor_research", ["--sample", "hourly"])
+    assert not ok
+    ok, _ = validate_extra_args("factor_research", ["--sample", "monthly"])
+    assert ok
+
+
+def test_rejects_args_for_task_that_allows_none():
+    ok, _ = validate_extra_args("refresh", ["--anything", "1"])
+    assert not ok
+
+
+def test_rejects_unregistered_task():
+    ok, _ = validate_extra_args("totally_made_up", ["--x", "1"])
+    assert not ok
+
+
+def test_empty_args_always_ok():
+    for task_id in ALLOWED_ARGS:
+        ok, err = validate_extra_args(task_id, None)
+        assert ok, f"{task_id}: {err}"
+
+
+def test_submit_rejects_injected_args():
+    """端到端：submit 必须挡住非法参数，不能只是 submit 内部忽略。"""
+    from api.task_api import TaskQueue
+
+    q = TaskQueue()
+    ok, msg, _instance = q.submit("backtest", extra_args=["--save-dir", "/tmp/evil"])
+    assert not ok
+    assert "白名单" in msg
+    # 被拒后不应留下任务记录
+    assert not any(t.family == "backtest" for t in q.tasks.values())

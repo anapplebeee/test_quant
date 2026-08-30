@@ -46,3 +46,39 @@ def check_holdings_risk(
         if pct > max_position_pct:
             warnings.append(f"{sym}: 当前持仓占比 {pct:.1%} 超过上限 {max_position_pct:.1%}")
     return warnings
+
+
+def make_weight_validator(max_position_pct: float, collect: list[str] | None = None):
+    """构造回测可用的风控钩子（签名匹配 BacktestEngine.risk_pipeline）。
+
+    风控此前**只在实盘路径生效**——回测跑出的组合可以违反单票上限，
+    实盘才被截断，导致回测组合 ≠ 实盘组合。用本函数造出的钩子注入
+    `BacktestEngine(risk_pipeline=...)`，两条路径就受同一约束。
+
+    Parameters
+    ----------
+    max_position_pct:
+        单票权重上限（建议用 `risk.max_position_pct` 配置值，
+        而非 `strategy.max_weight_pct`——后者是策略内部的分散度参数）。
+    collect:
+        可选列表，用于收集每条违规记录（供回测报告汇总）。
+
+    Example
+    -------
+    >>> from quart.config import load_config
+    >>> from quart.risk.rules import make_weight_validator
+    >>> cfg = load_config()
+    >>> violations: list[str] = []
+    >>> engine = BacktestEngine(
+    ...     md, strategy,
+    ...     risk_pipeline=make_weight_validator(
+    ...         cfg["risk"]["max_position_pct"], collect=violations),
+    ... )
+    """
+    def _validator(targets: dict[str, float], prices: pd.Series, equity: float) -> dict[str, float]:
+        clean, violations = validate_weights(targets, prices, equity, max_position_pct)
+        if collect is not None:
+            collect.extend(violations)
+        return clean
+
+    return _validator

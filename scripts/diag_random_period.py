@@ -10,46 +10,14 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
-from quart.backtest.engine import BacktestEngine, BaseStrategy, MarketData
+from quart.backtest.engine import BacktestEngine
 from quart.config import load_config
+from quart.data.market import MarketData
 from quart.data.store import BarStore
 from quart.data.universe import filter_for_simulation
-from quart.strategy.filters import apply_liquidity
+from quart.research.baseline import RandomTopKStrategy
 
 console = Console()
-
-
-class RandomTopKStrategy(BaseStrategy):
-    """每 rebalance_days 从流动性合格池随机等权抽取 top_k 只，不做任何择时。"""
-
-    name = "random_topk20"
-
-    def prepare(self, md: MarketData) -> None:
-        self._md = md
-        self.top_k = int(self.params.get("top_k", 20))
-        self.rebalance_days = int(self.params.get("rebalance_days", 20))
-        self.max_weight = float(self.params.get("max_weight_pct", 0.15))
-        self.min_avg_amount = self.params.get("min_avg_amount")
-        self.liquidity_days = int(self.params.get("liquidity_days", 20))
-        self.min_price = self.params.get("min_price")
-        self.warmup = self.liquidity_days + 1
-        self._rng = np.random.default_rng(int(self.params.get("seed", 0)))
-        self._next_rebalance = self.warmup
-
-    def target_weights(self, i: int) -> dict[str, float]:
-        md = self._md
-        if i < self.warmup or i < self._next_rebalance:
-            return {}
-        self._next_rebalance = i + self.rebalance_days
-        scores = pd.Series(0.0, index=md.closes.columns)
-        volume_row = md.volumes.iloc[i]
-        scores = scores.loc[volume_row[volume_row.fillna(0) > 0].index]
-        scores = apply_liquidity(scores, md, i, self.min_avg_amount, self.liquidity_days, self.min_price)
-        if len(scores) < self.top_k:
-            return {}
-        picks = self._rng.choice(scores.index.to_numpy(), size=self.top_k, replace=False)
-        weight = min(1.0 / len(picks), self.max_weight)
-        return {sym: weight for sym in picks}
 
 
 def main() -> None:

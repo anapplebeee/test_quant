@@ -56,6 +56,12 @@ risk:
   max_position_pct: 0.25
   max_daily_loss_pct: 0.05
 
+manual_trading:
+  enabled: true
+  account_name: manual
+  database: ./state/trading.db
+  auto_migrate_holdings: true
+
 notify:
   dingtalk_webhook: ""
   dingtalk_secret: ""

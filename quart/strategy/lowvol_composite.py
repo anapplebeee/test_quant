@@ -3,7 +3,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quart.backtest.engine import FLAT, BaseStrategy, MarketData
+from quart.data.market import MarketData
+from quart.execution.constraints import FLAT
+from quart.strategy.base import BaseStrategy
 from quart.strategy.filters import apply_liquidity, regime_flat_series
 
 
@@ -22,6 +24,22 @@ class LowVolCompositeStrategy(BaseStrategy):
 
     name = "lowvol_composite"
     industry_z = False  # prepare() 中按 params 覆盖；类级默认供注册检查
+
+    PARAMS_SCHEMA = {
+        "top_k": (int, 10, "持仓数量"),
+        "rebalance_days": (int, 5, "调仓周期（交易日）"),
+        "max_weight_pct": (float, 0.15, "单票权重上限"),
+        "min_avg_amount": ((int, float, type(None)), None, "流动性门槛"),
+        "liquidity_days": (int, 20, "流动性回看窗口"),
+        "min_price": ((int, float, type(None)), None, "最低价过滤"),
+        "use_regime_filter": (bool, False, "是否启用指数择时"),
+        "regime_filter_days": (int, 20, "择时均线窗口"),
+        "regime_band": (float, 0.02, "择时迟滞带宽度"),
+        "rev_weight": (float, 0.0, "反转因子权重"),
+        "rank_buffer": (float, 0.0, "排名缓冲带（换手控制）"),
+        "selection": (str, "composite", "选股模式 composite/bounce"),
+        "industry_z": (bool, False, "是否行业内 z-score 中性化"),
+    }
 
     @staticmethod
     def _buffer_select(ranked_syms: list[str], held: set[str], top_k: int, buffer: float) -> list[str]:
@@ -71,7 +89,7 @@ class LowVolCompositeStrategy(BaseStrategy):
         return df.div(sd_b, axis=0).sub(mu_b.div(sd_b, axis=0), axis=0).astype("float32")
 
     def prepare(self, md: MarketData) -> None:
-        self._md = md
+        super().prepare(md)
         p = self.params
         self.top_k = int(p.get("top_k", 10))
         self.rebalance_days = int(p.get("rebalance_days", 5))

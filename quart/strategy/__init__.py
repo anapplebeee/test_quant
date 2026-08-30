@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from quart.backtest.engine import BaseStrategy
 from quart.config import load_config
+from quart.strategy.base import BaseStrategy
 from quart.strategy.dual_ma import DualMAStrategy
 from quart.strategy.lowvol_composite import LowVolCompositeStrategy
 from quart.strategy.ml_rank import MLRankStrategy
@@ -15,6 +15,9 @@ REGISTRY: dict[str, type[BaseStrategy]] = {
     # 行业内 z-score 打分变体（R2 因子研究：rel_ind_mom20 ICIR 最稳）
     "lowvol_indz": LowVolCompositeStrategy,
 }
+
+#: 非策略参数的配置键，传入策略前必须剥离
+_NON_PARAM_KEYS = {"name", "overrides"}
 
 
 def resolve_params(name: str, params: dict) -> dict:
@@ -30,20 +33,31 @@ def resolve_params(name: str, params: dict) -> dict:
     """
     cfg = load_config()
     overrides = ((cfg.get("strategy") or {}).get("overrides") or {}).get(name) or {}
-    if not overrides:
-        return dict(params)
     merged = dict(overrides)
     merged.update(params)
     return merged
 
 
+def _filter_to_schema(cls: type[BaseStrategy], params: dict) -> dict:
+    """按 PARAMS_SCHEMA 过滤参数。
+
+    未声明 schema 的策略：只剥离已知的非参数键（name/overrides）。
+    已声明 schema 的策略：只保留 schema 键——这样配置里混入的任意杂项
+    （如 overrides 子字典）都不会作为策略参数传入。
+    """
+    if not cls.PARAMS_SCHEMA:
+        return {k: v for k, v in params.items() if k not in _NON_PARAM_KEYS}
+    return {k: v for k, v in params.items() if k in cls.PARAMS_SCHEMA}
+
+
 def build_strategy(name: str, **params) -> BaseStrategy:
     if name not in REGISTRY:
         raise KeyError(f"unknown strategy '{name}', available: {sorted(REGISTRY)}")
-    params = resolve_params(name, params)
+    cls = REGISTRY[name]
+    params = _filter_to_schema(cls, resolve_params(name, params))
     if name == "lowvol_indz":
         params.setdefault("industry_z", True)
-    return REGISTRY[name](**params)
+    return cls(**params)
 
 
-__all__ = ["BaseStrategy", "build_strategy", "resolve_params", "REGISTRY"]
+__all__ = ["BaseStrategy", "REGISTRY", "build_strategy", "resolve_params"]

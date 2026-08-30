@@ -7,5 +7,9 @@ __pycache__/
 /logs/
 /reports/
 /state/
+# 制品仓库：与 reports/ 一样是运行结果，不入库。
+# 区别在于 artifacts/ 的 manifest.json 记录了参数/数据版本/代码版本/指纹，
+# 需要长期留存时用 scripts 导出或直接备份该目录。
+/artifacts/
 /gradio_flag
 *.log

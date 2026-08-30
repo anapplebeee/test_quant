@@ -99,14 +99,16 @@ def test_limit_down_blocks_sell_then_retries():
 
 
 def test_impact_slip_widens_spread():
+    """冲击成本按 ADV 参与率平方根叠加（滑点归属于 Fees，不归属引擎）。"""
     fees = Fees(slippage_rate=0.001, impact_coef=0.1)
-    engine = BacktestEngine.__new__(BacktestEngine)
-    engine.fees = fees
-    slip_small = engine._slip(notional=10_000, adv=1e8)
-    slip_big = engine._slip(notional=5_000_000, adv=1e8)
+    slip_small = fees.slip_rate(notional=10_000, adv=1e8)
+    slip_big = fees.slip_rate(notional=5_000_000, adv=1e8)
     assert slip_small == pytest.approx(0.001 + 0.1 * 0.01)
     assert slip_big > slip_small
     assert slip_big < 0.001 + 0.1
+    # 无 ADV 数据或关闭冲击时退化为纯基础滑点
+    assert fees.slip_rate(notional=1e6, adv=0) == pytest.approx(0.001)
+    assert Fees(slippage_rate=0.002, impact_coef=0.0).slip_rate(1e6, 1e8) == pytest.approx(0.002)
 
 
 def test_drop_incomplete_uses_cn_tz_and_cutoff():

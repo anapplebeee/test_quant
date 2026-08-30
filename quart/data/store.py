@@ -1,3 +1,31 @@
+"""行情仓库（Parquet + DuckDB）。
+
+存储布局
+--------
+新布局（分区，默认写入）：
+
+    data/daily/year=2024/600519.parquet
+    data/daily/year=2025/600519.parquet
+    data/index/year=2024/IDX000300.parquet
+
+旧布局（单股全史单文件，仍可读取）：
+
+    data/daily/600519.parquet
+
+为什么分区
+----------
+1. **谓词下推**：DuckDB 能用 `hive_partitioning` 直接跳过无关年份目录。
+   回测常只取最近 1-2 年，全市场扫描可省掉 70%+ 的 IO。
+2. **增量写入只重写当年**：旧布局每只票增量 1 天也要重写全史
+   （read-modify-write 整个文件）。分区后只 touching 当前年份分区。
+3. **旧布局 `load()` 把 5000+ 文件路径拼进 SQL 字符串**，
+   查询文本大到接近 DuckDB 解析器上限。分区后可以用目录通配符。
+
+兼容性
+------
+`_paths(symbol)` 同时识别新旧两种布局，读取侧无缝兼容。
+用 `scripts/migrate_partition_store.py` 做一次性迁移。
+"""
 from __future__ import annotations
 
 import datetime as dt
@@ -5,7 +33,6 @@ import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import duckdb
 import pandas as pd
 from loguru import logger
 
@@ -14,6 +41,10 @@ from quart.config import data_root
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
 BAR_COLUMNS = ["date", "symbol", "open", "high", "low", "close", "volume", "amount"]
+
+#: 分区列名与前缀
+PARTITION_COLUMN = "year"
+PARTITION_PREFIX = "year="
 
 
 def drop_incomplete_today(df: pd.DataFrame) -> pd.DataFrame:
@@ -27,6 +58,7 @@ def drop_incomplete_today(df: pd.DataFrame) -> pd.DataFrame:
     today_midnight = pd.Timestamp(now.date())
     return df[df["date"] < today_midnight]
 
+
 EMPTY_BARS = pd.DataFrame({c: pd.Series(dtype=t) for c, t in {
     "date": "datetime64[ns]", "symbol": "object", "open": "float64",
     "high": "float64", "low": "float64", "close": "float64",
@@ -35,17 +67,59 @@ EMPTY_BARS = pd.DataFrame({c: pd.Series(dtype=t) for c, t in {
 
 
 class BarStore:
-    def __init__(self, root: str | Path | None = None):
+    """行情仓库。
+
+    Parameters
+    ----------
+    partitioned:
+        None（默认）= 自动检测：目录里已有 `year=` 子目录则用分区布局，
+        否则用旧布局。迁移期间两种布局可以共存。
+    """
+
+    def __init__(self, root: str | Path | None = None, partitioned: bool | None = None):
         self.root = Path(root) if root else data_root()
         self.daily_dir = self.root / "daily"
         self.index_dir = self.root / "index"
         self.universe_dir = self.root / "universe"
         for d in (self.daily_dir, self.index_dir, self.universe_dir):
             d.mkdir(parents=True, exist_ok=True)
+        self._partitioned = self._detect_layout() if partitioned is None else partitioned
+
+    # ---------------- 布局 ----------------
+
+    @property
+    def partitioned(self) -> bool:
+        return self._partitioned
+
+    def _detect_layout(self) -> bool:
+        """存在任何 `year=` 子目录即认为已迁移到分区布局。"""
+        return any(
+            p.is_dir() and p.name.startswith(PARTITION_PREFIX)
+            for p in list(self.daily_dir.iterdir())[:1000]
+        ) if self.daily_dir.exists() else False
+
+    def _base_dir(self, symbol: str) -> Path:
+        return self.index_dir if symbol.startswith("IDX") else self.daily_dir
 
     def _path(self, symbol: str) -> Path:
-        subdir = self.index_dir if symbol.startswith("IDX") else self.daily_dir
-        return subdir / f"{symbol}.parquet"
+        """旧布局路径（单股单文件）。"""
+        return self._base_dir(symbol) / f"{symbol}.parquet"
+
+    def _paths(self, symbol: str) -> list[Path]:
+        """该 symbol 的全部数据文件（新旧布局均支持，按年份升序）。"""
+        base = self._base_dir(symbol)
+        if not self._partitioned:
+            p = base / f"{symbol}.parquet"
+            return [p] if p.exists() else []
+        return sorted(
+            base.glob(f"{PARTITION_PREFIX}*/{symbol}.parquet"),
+            key=lambda p: p.parent.name,
+        )
+
+    def _partition_path(self, symbol: str, year: int) -> Path:
+        return self._base_dir(symbol) / f"{PARTITION_PREFIX}{year}" / f"{symbol}.parquet"
+
+    # ---------------- 写入 ----------------
 
     def save(self, df: pd.DataFrame, replace: bool = False) -> int:
         if df is None or df.empty:
@@ -54,6 +128,7 @@ class BarStore:
         df["date"] = pd.to_datetime(df["date"])
         for col in ("open", "high", "low", "close", "volume", "amount"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
         # 保护：qfq 前复权在极端股本变动（重组/债转股）下会把历史价格算成负值，
         # 收益率/波动率因子随之失真。负价格行置 NaN 并告警（应改用 hfq 重拉）。
         for sym, g in df.groupby("symbol"):
@@ -65,6 +140,35 @@ class BarStore:
                     sym, int(neg.sum()),
                 )
                 df.loc[g.index[neg], ["open", "high", "low", "close"]] = float("nan")
+
+        if not self._partitioned:
+            return self._save_flat(df, replace)
+
+        written = 0
+        # 按 (symbol, year) 分组：增量只重写涉及的年份分区，
+        # 而不是像旧布局那样重写该 symbol 的全史。
+        df = df.assign(**{PARTITION_COLUMN: df["date"].dt.year})
+        for (symbol, year), group in df.groupby(["symbol", PARTITION_COLUMN]):
+            written += self._write_partition(
+                str(symbol), int(year), group.drop(columns=[PARTITION_COLUMN]), replace
+            )
+        return written
+
+    def _write_partition(self, symbol: str, year: int, group: pd.DataFrame, replace: bool) -> int:
+        path = self._partition_path(symbol, year)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and not replace:
+            existing = pd.read_parquet(path)
+            group = pd.concat([existing, group], ignore_index=True)
+            group = group.drop_duplicates(subset=["date", "symbol"], keep="last")
+        group = group.sort_values("date").reset_index(drop=True)
+        tmp = path.with_suffix(".parquet.tmp")
+        group.to_parquet(tmp, index=False)
+        os.replace(tmp, path)
+        return len(group)
+
+    def _save_flat(self, df: pd.DataFrame, replace: bool) -> int:
+        """旧布局写入（保留以兼容未迁移的环境）。"""
         written = 0
         for symbol, group in df.groupby("symbol"):
             path = self._path(str(symbol))
@@ -79,6 +183,8 @@ class BarStore:
             written += len(group)
         return written
 
+    # ---------------- 读取 ----------------
+
     def load(
         self,
         symbols: list[str] | None = None,
@@ -88,12 +194,111 @@ class BarStore:
     ) -> pd.DataFrame:
         if symbols is not None:
             return self._load_symbols(list(symbols), start, end, include_index)
+
+        if self._partitioned:
+            return self._query_partitioned(start, end, include_index)
+
         dirs = [self.daily_dir] + ([self.index_dir] if include_index else [])
         files: list[Path] = []
         for d in dirs:
             files.extend(d.glob("*.parquet"))
         if not files:
             return EMPTY_BARS.copy()
+        return self._query_files(files, start, end)
+
+    def _query_partitioned(self, start, end, include_index: bool) -> pd.DataFrame:
+        """分区查询：用目录通配符 + hive_partitioning 让 DuckDB 裁剪年份。"""
+        globs = self._partition_globs(start, end, include_index)
+        if not globs:
+            return EMPTY_BARS.copy()
+        try:
+            import duckdb
+        except ImportError:
+            return self._query_globs_pandas(globs, start, end)
+
+        listing = ", ".join(f"'{g}'" for g in globs)
+        conds = ["date IS NOT NULL"]
+        if start:
+            conds.append(f"date >= DATE '{start}'")
+        if end:
+            conds.append(f"date <= DATE '{end}'")
+        where = "WHERE " + " AND ".join(conds)
+        query = (
+            f"SELECT * FROM read_parquet([{listing}], hive_partitioning=true) "
+            f"{where} ORDER BY date, symbol"
+        )
+        df = duckdb.sql(query).df()
+        # 分区列是 DuckDB 从目录名推导的，落盘时不应出现
+        return df.drop(columns=[PARTITION_COLUMN], errors="ignore")
+
+    def _partition_globs(self, start, end, include_index: bool) -> list[str]:
+        """按起止年份收窄需要扫描的分区目录。
+
+        这是分区改造的核心收益：只 glob 涉及的年份，
+        而不是每天把全市场的全部历史文件都塞进查询。
+        """
+        dirs = [self.daily_dir] + ([self.index_dir] if include_index else [])
+        years = self._years_in_range(start, end)
+        globs: list[str] = []
+        for d in dirs:
+            if years is None:
+                globs.append((d / f"{PARTITION_PREFIX}*" / "*.parquet").as_posix())
+            else:
+                for y in years:
+                    p = d / f"{PARTITION_PREFIX}{y}"
+                    if p.exists():
+                        globs.append((p / "*.parquet").as_posix())
+                # 旧布局遗留文件（迁移后仍可能有未迁移的 symbol）
+        return globs
+
+    def _years_in_range(self, start, end) -> list[int] | None:
+        """返回查询涉及的年份列表；无法确定范围时返回 None（扫全部分区）。"""
+        if not start and not end:
+            return None
+        lo = pd.Timestamp(start).year if start else self._min_partition_year()
+        hi = pd.Timestamp(end).year if end else self._max_partition_year()
+        if lo is None or hi is None or hi < lo:
+            return None
+        return list(range(int(lo), int(hi) + 1))
+
+    def _partition_years(self, directory: Path) -> list[int]:
+        if not directory.exists():
+            return []
+        return sorted(
+            int(p.name[len(PARTITION_PREFIX):])
+            for p in directory.iterdir()
+            if p.is_dir() and p.name.startswith(PARTITION_PREFIX)
+            and p.name[len(PARTITION_PREFIX):].isdigit()
+        )
+
+    def _min_partition_year(self) -> int | None:
+        ys = self._partition_years(self.daily_dir)
+        return ys[0] if ys else None
+
+    def _max_partition_year(self) -> int | None:
+        ys = self._partition_years(self.daily_dir)
+        return ys[-1] if ys else None
+
+    def _query_globs_pandas(self, globs: list[str], start, end) -> pd.DataFrame:
+        import glob as _glob
+
+        files: list[Path] = []
+        for g in globs:
+            files.extend(Path(p) for p in _glob.glob(g))
+        return self._query_files_pandas(files, start, end)
+
+    def _query_files(self, files: list[Path], start: str | None, end: str | None) -> pd.DataFrame:
+        """全量查询。优先 DuckDB（列式下推 + 谓词过滤），不可用时回退 pandas。
+
+        duckdb 延迟导入：它在 `load()` 之外的路径（单文件读写、索引查询）
+        完全用不到，顶层 import 会让核心数据层对可选依赖产生硬耦合。
+        """
+        try:
+            import duckdb
+        except ImportError:
+            logger.debug("duckdb unavailable, falling back to pandas scan")
+            return self._query_files_pandas(files, start, end)
+
         quoted = "[" + ", ".join(f"'{f.as_posix()}'" for f in sorted(files)) + "]"
         conds = ["date IS NOT NULL"]
         if start:
@@ -103,6 +308,23 @@ class BarStore:
         where = "WHERE " + " AND ".join(conds)
         query = f"SELECT * FROM read_parquet({quoted}) {where} ORDER BY date, symbol"
         return duckdb.sql(query).df()
+
+    def _query_files_pandas(self, files: list[Path], start: str | None, end: str | None) -> pd.DataFrame:
+        frames = []
+        for f in sorted(files):
+            try:
+                frames.append(pd.read_parquet(f))
+            except Exception as exc:
+                logger.warning("skip unreadable {}: {}", f, exc)
+        if not frames:
+            return EMPTY_BARS.copy()
+        out = pd.concat(frames, ignore_index=True)
+        out = out[out["date"].notna()]
+        if start:
+            out = out[out["date"] >= pd.Timestamp(start)]
+        if end:
+            out = out[out["date"] <= pd.Timestamp(end)]
+        return out.sort_values(["date", "symbol"]).reset_index(drop=True)
 
     def _load_symbols(
         self,
@@ -117,44 +339,89 @@ class BarStore:
             if sym.startswith("IDX") and not include_index:
                 missing.append(sym)
                 continue
-            path = self._path(sym)
-            if not path.exists():
+            paths = self._paths(sym)
+            if not paths:
                 missing.append(sym)
                 continue
-            frames.append(pd.read_parquet(path))
+            # 分区布局下按年份过滤，避免读取无关年份
+            paths = self._filter_paths_by_year(paths, start, end)
+            if not paths:
+                missing.append(sym)
+                continue
+            frames.extend(pd.read_parquet(p) for p in paths)
         if missing:
             logger.warning("symbols not in store: {}", sorted(missing)[:20])
         if not frames:
             return EMPTY_BARS.copy()
         out = pd.concat(frames, ignore_index=True)
+        out = out.drop(columns=[PARTITION_COLUMN], errors="ignore")
         if start:
             out = out[out["date"] >= pd.Timestamp(start)]
         if end:
             out = out[out["date"] <= pd.Timestamp(end)]
         return out.sort_values(["date", "symbol"]).reset_index(drop=True)
 
+    def _filter_paths_by_year(self, paths: list[Path], start, end) -> list[Path]:
+        if not self._partitioned or (not start and not end):
+            return paths
+        lo = pd.Timestamp(start).year if start else -9999
+        hi = pd.Timestamp(end).year if end else 9999
+        kept = []
+        for p in paths:
+            name = p.parent.name
+            if not name.startswith(PARTITION_PREFIX):
+                kept.append(p)
+                continue
+            y = int(name[len(PARTITION_PREFIX):])
+            if lo <= y <= hi:
+                kept.append(p)
+        return kept
+
     def load_benchmark(self, code: str) -> pd.DataFrame:
-        path = self.index_dir / f"IDX{code}.parquet"
-        if not path.exists():
-            return EMPTY_BARS.copy()
-        return pd.read_parquet(path)
+        return self._load_symbols([f"IDX{code}"], None, None, include_index=True)
+
+    # ---------------- 元数据 ----------------
 
     def last_date(self, symbol: str) -> pd.Timestamp | None:
-        path = self._path(symbol)
-        if not path.exists():
+        """最新日期：分区布局下从最大年份往回找（避免全史扫描）。"""
+        paths = self._paths(symbol)
+        if not paths:
             return None
-        dates = pd.read_parquet(path, columns=["date"])["date"]
-        return None if dates.empty else pd.Timestamp(dates.max())
+        for p in reversed(paths):
+            try:
+                dates = pd.read_parquet(p, columns=["date"])["date"]
+            except Exception:
+                continue
+            if not dates.empty:
+                return pd.Timestamp(dates.max())
+        return None
 
     def first_date(self, symbol: str) -> pd.Timestamp | None:
-        path = self._path(symbol)
-        if not path.exists():
+        """最早日期：分区布局下从最小年份开始找。"""
+        paths = self._paths(symbol)
+        if not paths:
             return None
-        dates = pd.read_parquet(path, columns=["date"])["date"]
-        return None if dates.empty else pd.Timestamp(dates.min())
+        for p in paths:
+            try:
+                dates = pd.read_parquet(p, columns=["date"])["date"]
+            except Exception:
+                continue
+            if not dates.empty:
+                return pd.Timestamp(dates.min())
+        return None
 
     def symbols(self) -> list[str]:
-        return sorted(p.stem for p in self.daily_dir.glob("*.parquet"))
+        """全部股票代码（新旧布局均支持）。"""
+        if self._partitioned:
+            found = {
+                p.stem
+                for p in self.daily_dir.glob(f"{PARTITION_PREFIX}*/*.parquet")
+            }
+        else:
+            found = {p.stem for p in self.daily_dir.glob("*.parquet")}
+        # 迁移期两种布局可能共存
+        found |= {p.stem for p in self.daily_dir.glob("*.parquet")}
+        return sorted(found)
 
     def freshness_days(self, reference: str | None = None) -> int | None:
         """Newest bar age in calendar days vs CN-now (or given YYYYMMDD)."""
@@ -164,14 +431,75 @@ class BarStore:
             today = pd.Timestamp(_dt.datetime.strptime(reference, "%Y%m%d").date())
         else:
             today = pd.Timestamp(dt.datetime.now(CN_TZ).date())
+
         latest = None
-        for d in (self.daily_dir, self.index_dir):
-            for p in d.glob("*.parquet"):
-                try:
-                    mx = pd.read_parquet(p, columns=["date"])["date"].max()
-                except Exception:
-                    continue
-                latest = mx if latest is None or mx > latest else latest
+        # 分区布局下先看最新年份目录，命中即提前返回（避免扫全部历史）
+        candidates: list[Path] = []
+        if self._partitioned:
+            for d in (self.daily_dir, self.index_dir):
+                years = self._partition_years(d)
+                for y in reversed(years):
+                    candidates.extend((d / f"{PARTITION_PREFIX}{y}").glob("*.parquet"))
+        else:
+            for d in (self.daily_dir, self.index_dir):
+                candidates.extend(d.glob("*.parquet"))
+
+        # 只看最近一批文件：freshness 关心的是"最新到哪天"，
+        # 扫到足够新的日期即可停机
+        for p in candidates:
+            try:
+                mx = pd.read_parquet(p, columns=["date"])["date"].max()
+            except Exception:
+                continue
+            if latest is None or mx > latest:
+                latest = mx
+            if latest is not None and (today - pd.Timestamp(latest).normalize()).days <= 0:
+                break
         if latest is None:
             return None
         return int((today - pd.Timestamp(latest).normalize()).days)
+
+    # ---------------- 迁移 ----------------
+
+    def migrate_to_partitioned(self, progress=None) -> dict:
+        """把旧布局（单股全史单文件）迁移到分区布局。
+
+        幂等：已迁移的文件会跳过；迁移后旧文件被删除。
+        返回 {"symbols": n, "files": n, "skipped": n}。
+        """
+        stats = {"symbols": 0, "files": 0, "skipped": 0}
+        for d in (self.daily_dir, self.index_dir):
+            for src in sorted(d.glob("*.parquet")):
+                try:
+                    df = pd.read_parquet(src)
+                except Exception as exc:
+                    logger.warning("migrate skip {}: {}", src.name, exc)
+                    stats["skipped"] += 1
+                    continue
+                if df.empty or "date" not in df.columns:
+                    stats["skipped"] += 1
+                    continue
+                symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns else src.stem
+                df = df.assign(**{PARTITION_COLUMN: pd.to_datetime(df["date"]).dt.year})
+                for year, group in df.groupby(PARTITION_COLUMN):
+                    dst = d / f"{PARTITION_PREFIX}{int(year)}" / f"{symbol}.parquet"
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if dst.exists():
+                        try:
+                            existing = pd.read_parquet(dst)
+                            group = pd.concat([existing, group], ignore_index=True)
+                            group = group.drop_duplicates(subset=["date", "symbol"], keep="last")
+                        except Exception:
+                            pass
+                    group = group.drop(columns=[PARTITION_COLUMN]).sort_values("date")
+                    tmp = dst.with_suffix(".parquet.tmp")
+                    group.to_parquet(tmp, index=False)
+                    os.replace(tmp, dst)
+                    stats["files"] += 1
+                src.unlink()
+                stats["symbols"] += 1
+                if progress:
+                    progress(f"migrated {symbol}")
+
+        self._partitioned = self._detect_layout()
+        return stats

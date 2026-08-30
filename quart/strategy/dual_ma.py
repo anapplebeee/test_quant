@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quart.backtest.engine import BaseStrategy, MarketData
+from quart.data.market import MarketData
+from quart.strategy.base import BaseStrategy
 
 
 class DualMAStrategy(BaseStrategy):
@@ -10,8 +11,16 @@ class DualMAStrategy(BaseStrategy):
 
     name = "dual_ma"
 
+    PARAMS_SCHEMA = {
+        "fast_days": (int, 5, "快线均线窗口"),
+        "slow_days": (int, 20, "慢线均线窗口"),
+        "max_names": (int, 10, "最大持仓数"),
+        "max_weight_pct": (float, 0.15, "单票权重上限"),
+        "rebalance_days": (int, 1, "调仓周期（交易日）"),
+    }
+
     def prepare(self, md: MarketData) -> None:
-        self._md = md
+        super().prepare(md)
         p = self.params
         self.fast = int(p.get("fast_days", 5))
         self.slow = int(p.get("slow_days", 20))

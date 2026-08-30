@@ -97,16 +97,40 @@ TASKS = {
         "result_tab": "📈 回测中心",
     },
     "factor_research": {
-"name": "因子研究",
-"script": "scripts/factor_research.py",
-"args": ["--sample", "monthly"],
-"icon": "🔬",
-"resource": "data",
-"timeout": 3600,
+        "name": "因子研究",
+        "script": "scripts/factor_research.py",
+        "args": ["--sample", "monthly"],
+        "icon": "🔬",
+        "resource": "data",
+        "timeout": 3600,
         "outputs": {
             "因子分析输出": "reports/factor_*.csv",
         },
         "result_tab": "🔬 因子研究",
+    },
+    "walk_forward": {
+        "name": "Walk-Forward 验证",
+        "script": "scripts/walk_forward.py",
+        "args": [],
+        "icon": "🔁",
+        "resource": "compute",
+        "timeout": 7200,
+        "outputs": {
+            "逐折明细": "reports/wfa_*.csv",
+            "制品目录": "artifacts/wfa_*/manifest.json",
+        },
+        "result_tab": "📈 回测中心",
+        "has_strategy_select": True,
+    },
+    "migrate_store": {
+        "name": "存储分区迁移",
+        "script": "scripts/migrate_partition_store.py",
+        "args": [],
+        "icon": "🗄️",
+        "resource": "data",
+        "timeout": 3600,
+        "outputs": {},
+        "result_tab": "🗃️ 数据总览",
     },
 }
 
@@ -116,6 +140,86 @@ RESOURCE_LIMITS = {
     "data": 1,      # 数据资源串行
     "compute": 2,   # 计算资源可并行2个
 }
+
+# 每个任务允许从 UI 传入的参数白名单：选项 -> 取值校验正则
+# task_api 用 subprocess 拼命令行，未校验的 UI 输入 = 任意参数注入
+# （例如注入 --save-dir 把产物写到任意路径）。
+ALLOWED_ARGS: dict[str, dict[str, str]] = {
+    "backtest": {
+        "--strategy": r"^[A-Za-z0-9_]+$",
+        "--start": r"^\d{4}-\d{2}-\d{2}$",
+        "--end": r"^\d{4}-\d{2}-\d{2}$",
+        "--rebalance-days": r"^\d{1,3}$",
+        "--top-k": r"^\d{1,3}$",
+        "--no-regime": None,   # 开关型，不带值
+        "--no-risk": None,
+    },
+    "sweep": {
+        "--strategy": r"^[A-Za-z0-9_]+$",
+        "--start": r"^\d{4}-\d{2}-\d{2}$",
+        "--end": r"^\d{4}-\d{2}-\d{2}$",
+        "--combo": r"^[A-Za-z0-9_=.,\-]+$",
+    },
+    "walk_forward": {
+        "--strategy": r"^[A-Za-z0-9_]+$",
+        "--start": r"^\d{4}-\d{2}-\d{2}$",
+        "--end": r"^\d{4}-\d{2}-\d{2}$",
+        "--train": r"^\d{1,4}$",
+        "--test": r"^\d{1,4}$",
+        "--step": r"^\d{1,4}$",
+        "--embargo": r"^\d{1,3}$",
+        "--metric": r"^(sharpe|cagr|calmar|total_return|bench_excess_cagr)$",
+        "--min-trades": r"^\d{1,6}$",
+        "--grid": r"^[A-Za-z0-9_=.,\-]+$",
+        "--anchored": None,
+        "--no-risk": None,
+    },
+    "migrate_store": {"--root": r"^[A-Za-z0-9_.:/\\\-]+$", "--dry-run": None},
+    "signal": {"--strategy": r"^[A-Za-z0-9_]+$"},
+    "refresh": {},
+    "ml_train": {"--start": r"^\d{8}$"},
+    "factor_research": {
+        "--sample": r"^(daily|weekly|monthly)$",
+        "--start": r"^\d{4}-\d{2}-\d{2}$",
+    },
+}
+
+# 开关型参数（不带值）
+_FLAG_ONLY = {"--no-regime", "--no-risk", "--anchored", "--dry-run"}
+
+
+def validate_extra_args(task_id: str, extra_args: Optional[list]) -> tuple[bool, str]:
+    """校验 UI 传入的命令行参数。
+
+    Returns
+    -------
+    (是否通过, 错误信息)
+    """
+    if not extra_args:
+        return True, ""
+    allowed = ALLOWED_ARGS.get(task_id)
+    if allowed is None:
+        return False, f"任务 '{task_id}' 不接受外部参数"
+
+    args = [str(a) for a in extra_args]
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg not in allowed:
+            return False, f"参数 '{arg}' 不在任务 '{task_id}' 的白名单内"
+        pattern = allowed[arg]
+        if arg in _FLAG_ONLY or pattern is None:
+            i += 1
+            continue
+        if i + 1 >= len(args):
+            return False, f"参数 '{arg}' 缺少取值"
+        import re
+
+        value = args[i + 1]
+        if not re.fullmatch(pattern, value):
+            return False, f"参数 '{arg}' 取值非法: {value!r}"
+        i += 2
+    return True, ""
 
 
 @dataclass
@@ -196,6 +300,11 @@ class TaskQueue:
         """
         if task_id not in TASKS:
             return False, f"未知任务: {task_id}", ""
+
+        # UI 传入的参数直接进命令行，必须白名单校验
+        ok, err = validate_extra_args(task_id, extra_args)
+        if not ok:
+            return False, err, ""
 
         with self._lock:
             # 检查是否有相同任务在排队/运行

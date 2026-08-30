@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from quart.backtest.engine import FLAT, BaseStrategy, MarketData
+from quart.data.market import MarketData
 from quart.config import PROJECT_ROOT
+from quart.execution.constraints import FLAT
+from quart.strategy.base import BaseStrategy
 from quart.strategy.filters import apply_liquidity
 
 
@@ -18,8 +20,23 @@ class MLRankStrategy(BaseStrategy):
 
     name = "ml_rank"
 
+    PARAMS_SCHEMA = {
+        "top_k": (int, 10, "持仓数量"),
+        "rebalance_days": (int, 5, "调仓周期（交易日）"),
+        "max_weight_pct": (float, 0.15, "单票权重上限"),
+        "min_score": ((int, float, type(None)), None, "分数下限"),
+        "stale_days": (int, 10, "分数保鲜期（日），超期不再驱动选股"),
+        "min_avg_amount": ((int, float, type(None)), None, "流动性门槛"),
+        "liquidity_days": (int, 20, "流动性回看窗口"),
+        "min_price": ((int, float, type(None)), None, "最低价过滤"),
+        "use_regime_filter": (bool, True, "是否启用指数择时"),
+        "regime_filter_days": (int, 20, "择时均线窗口"),
+        "regime_band": (float, 0.0, "择时迟滞带宽度"),
+        "scores_path": ((str, type(None)), None, "ML 分数文件路径"),
+    }
+
     def prepare(self, md: MarketData) -> None:
-        self._md = md
+        super().prepare(md)
         p = self.params
         self.top_k = int(p.get("top_k", 10))
         self.rebalance_days = int(p.get("rebalance_days", 5))

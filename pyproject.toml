@@ -22,6 +22,8 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
 ]
 research = [
     "pyqlib>=0.9.7",
@@ -44,3 +46,44 @@ default-groups = ["dev"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = [".venv", "build", "dist", "data"]
+
+[tool.ruff.lint]
+# E/F/W: pycodestyle+pyflakes 基础
+# I: import 排序  B: bugbear（常见 bug 模式）
+# UP: pyupgrade  SIM: 简化  RUF: ruff 专属规则
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+    # E501 行宽：中文注释与长文档字符串居多，交给 formatter 而非 linter
+    "E501",
+    # B008 函数调用默认值：Gradio/Dependency 风格在 API 层常见
+    "B008",
+    # RUF012 可变类属性需 ClassVar：策略类大量使用，改造面过大
+    "RUF012",
+    # 中文文案/注释自然使用全角标点，不作为 Unicode 易混淆字符错误
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试文件允许 assert、私有成员访问、未使用参数
+"tests/*" = ["S101"]
+# 脚本层允许 print（CLI 输出）
+"scripts/*" = ["T201"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+# pandas/numpy/akshare 等缺少完整类型存根，先不因缺存根报错
+ignore_missing_imports = true
+# 存量代码注解不全，先放宽；新模块应保持严格
+check_untyped_defs = false
+exclude = ["scripts/", "frontend/", "api/", "tests/"]

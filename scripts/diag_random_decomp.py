@@ -16,50 +16,14 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
-from quart.backtest.engine import BacktestEngine, BaseStrategy, MarketData
+from quart.backtest.engine import BacktestEngine, MarketData
 from quart.config import load_config
 from quart.data.store import BarStore
 from quart.data.universe import filter_for_simulation
+from quart.research.baseline import RandomTopKStrategy
 from quart.strategy.filters import apply_liquidity
 
 console = Console()
-
-
-class RandomTopKStrategy(BaseStrategy):
-    """与 baseline_random.py 完全一致的随机选股策略（诊断用副本）。"""
-
-    name = "random_topk"
-
-    def prepare(self, md: MarketData) -> None:
-        self._md = md
-        self.top_k = int(self.params.get("top_k", 10))
-        self.rebalance_days = int(self.params.get("rebalance_days", 5))
-        self.max_weight = float(self.params.get("max_weight_pct", 0.15))
-        self.min_avg_amount = self.params.get("min_avg_amount")
-        self.liquidity_days = int(self.params.get("liquidity_days", 20))
-        self.min_price = self.params.get("min_price")
-        self.warmup = self.liquidity_days + 1
-        self._rng = np.random.default_rng(int(self.params.get("seed", 0)))
-        self._next_rebalance = self.warmup
-
-    def target_weights(self, i: int) -> dict[str, float]:
-        md = self._md
-        if i < self.warmup or i < self._next_rebalance:
-            return {}
-        self._next_rebalance = i + self.rebalance_days
-        vol = md.volumes.iloc[i]
-        tradable = vol[vol.fillna(0) > 0].index
-        if len(tradable) == 0:
-            return {}
-        holder = pd.Series(1.0, index=tradable)
-        pool = apply_liquidity(
-            holder, md, i, self.min_avg_amount, self.liquidity_days, self.min_price
-        )
-        if len(pool) < self.top_k:
-            return {}
-        pick = self._rng.choice(pool.index.to_numpy(), size=self.top_k, replace=False)
-        weight = min(1.0 / len(pick), self.max_weight)
-        return {sym: weight for sym in pick}
 
 
 def yearly(curve: pd.Series) -> pd.Series:

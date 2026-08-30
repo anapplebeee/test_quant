@@ -9,7 +9,43 @@ from loguru import logger
 from quart.config import data_root
 
 
-def get_constituents(index_code: str = "000300") -> list[str]:
+def get_constituents(
+    index_code: str = "000300",
+    as_of: str | pd.Timestamp | None = None,
+    strict_pit: bool = False,
+) -> list[str]:
+    """获取成分股。
+
+    Parameters
+    ----------
+    as_of:
+        查询某**历史日期**的成分股（消除前视偏差）。
+        传入后优先查 PIT 变更记录（`universe_history` 模块）。
+        找不到记录时：默认回退到当前快照并打 WARNING（回测数字含前视偏差）；
+        `strict_pit=True` 则直接抛错。
+    strict_pit:
+        True 时拒绝"无历史就回退快照"的静默降级。
+
+    为什么重要
+    ----------
+    用今天的成分股跑 2020 年的回测 = 前视偏差。A 股实测量级 3-8pp/yr，
+    比本项目已修复的退市股偏差（-2.0~-2.6pp/yr）更大。
+    """
+    if as_of is not None:
+        from quart.data.universe_history import constituents_at
+
+        pit = constituents_at(index_code, as_of)
+        if pit:
+            return pit
+        msg = (
+            f"{index_code} 无 {pd.Timestamp(as_of).date()} 的 PIT 成分股记录，"
+            f"回退到当前快照（回测结果含前视偏差）。"
+            f"运行 scripts/build_universe_history.py 构建历史。"
+        )
+        if strict_pit:
+            raise RuntimeError(msg)
+        logger.warning(msg)
+
     cached = _cache_path(index_code)
     if cached.exists():
         df = pd.read_parquet(cached)

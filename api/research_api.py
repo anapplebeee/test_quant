@@ -3,23 +3,35 @@
 背景（2026-08-28 审计）：新验证的策略结果（18 组合终版 sweep、调仓周期曲线、
 缓冲带对照、随机基线定标）只存在于 reports/ 的 csv/md 中，前端任何页面都
 看不到——"新验证的策略结果在哪"由此而来。本模块供回测中心/首页取数。
+
+路径一律走 `common.reports_dir()`，不再硬编码 "reports"。
 """
 from __future__ import annotations
 
-import glob
-import os
 import re
 
 import pandas as pd
-from loguru import logger
+
+from common import degraded, reports_dir, safe_path, valid_name
 
 
-def _warn(where: str, exc: Exception) -> None:
-    logger.warning("research_api[{}] degraded: {}", where, exc)
+def _warn(where: str, exc: BaseException) -> None:
+    degraded(f"research_api[{where}]", exc)
 
 
 def _safe_name(name: str) -> bool:
-    return bool(name) and not re.search(r"[\\/]", name) and name not in (".", "..")
+    """文件名白名单：只允许字母数字下划线与点，禁止路径分隔符与 . .。"""
+    if not name or name in (".", "..") or ".." in name:
+        return False
+    return valid_name(re.sub(r"[^A-Za-z0-9_]", "_", name))
+
+
+def _resolve(fname: str):
+    """在 reports/ 内解析文件名，防目录穿越；非法或不存在返回 None。"""
+    if not _safe_name(fname):
+        return None
+    path = safe_path(reports_dir(), fname)
+    return path if path is not None and path.is_file() else None
 
 
 # ---------------- 参数扫描 ----------------
@@ -33,19 +45,18 @@ SWEEP_SHOW_COLS = [
 
 def list_sweeps() -> list[str]:
     """参数扫描结果文件名列表（不含 equity 曲线文件），文件名升序=时间升序。"""
-    files = [
-        os.path.basename(f)
-        for f in glob.glob(os.path.join("reports", "sweep_*.csv"))
-        if not os.path.basename(f).startswith("sweep_equity_")
-    ]
-    return sorted(files)
+    return sorted(
+        p.name
+        for p in reports_dir().glob("sweep_*.csv")
+        if not p.name.startswith("sweep_equity_")
+    )
 
 
 def load_sweep(fname: str) -> pd.DataFrame | None:
-    if not _safe_name(fname) or not fname.startswith("sweep_") or fname.startswith("sweep_equity_"):
+    if not fname.startswith("sweep_") or fname.startswith("sweep_equity_"):
         return None
-    path = os.path.join("reports", fname)
-    if not os.path.isfile(path):
+    path = _resolve(fname)
+    if path is None:
         return None
     try:
         return pd.read_csv(path)
@@ -117,24 +128,50 @@ def latest_sweep_headlines() -> pd.DataFrame:
 
 def list_research_reports() -> list[str]:
     """reports/ 下的研究/审计报告（md），文件名升序。"""
-    files = [os.path.basename(f) for f in glob.glob(os.path.join("reports", "*.md"))]
-    return sorted(files)
+    return sorted(p.name for p in reports_dir().glob("*.md"))
 
 
 def load_research_report(fname: str) -> str:
-    if not _safe_name(fname) or not fname.endswith(".md"):
-        return "⚠️ 非法文件名"
-    path = os.path.join("reports", fname)
-    if not os.path.isfile(path):
-        return "⚠️ 文件不存在"
+    """读取研究报告内容。
+
+    返回 `str` 是被 Gradio 回调约束的——`rep_dd.change(load_research_report, ...)`
+    需要简单类型，失败只能以 ⚠️ 前缀文案表达。
+
+    业务调用方请改用 `load_research_report_result()`：它返回
+    `ReportResult`，用字段区分成功与失败，不必靠字符串匹配判断。
+    """
+    result = load_research_report_result(fname)
+    return result.content if result.ok else f"⚠️ {result.error}"
+
+
+class ReportResult:
+    """结构化读取结果（API 层不产出 UI 文案，由调用方决定如何展示）。"""
+
+    __slots__ = ("content", "error")
+
+    def __init__(self, content: str = "", error: str | None = None):
+        self.content = content
+        self.error = error
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
+def load_research_report_result(fname: str) -> ReportResult:
+    if not fname.endswith(".md") or not _safe_name(fname):
+        return ReportResult(error="非法文件名（仅支持 reports/ 下的 .md）")
+    path = _resolve(fname)
+    if path is None:
+        return ReportResult(error="文件不存在")
     try:
         with open(path, encoding="utf-8") as f:
             content = f.read()
     except Exception as e:
         _warn("load_research_report", e)
-        return "⚠️ 读取失败"
+        return ReportResult(error=f"读取失败: {e}")
     # 超长报告截断（gr.Markdown 渲染保护）
     limit = 60_000
     if len(content) > limit:
         content = content[:limit] + "\n\n*（内容过长已截断，请直接查看 reports/ 下原文件）*"
-    return content
+    return ReportResult(content=content)

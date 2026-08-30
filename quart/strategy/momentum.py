@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quart.backtest.engine import FLAT, BaseStrategy, MarketData
+from quart.data.market import MarketData
+from quart.execution.constraints import FLAT
+from quart.strategy.base import BaseStrategy
 from quart.strategy.filters import apply_liquidity, regime_flat_series
 
 
@@ -15,8 +17,23 @@ class MomentumRotationStrategy(BaseStrategy):
 
     name = "momentum_rotation"
 
+    PARAMS_SCHEMA = {
+        "lookback_days": (int, 60, "动量回看窗口（交易日）"),
+        "top_k": (int, 10, "持仓数量"),
+        "rebalance_days": (int, 5, "调仓周期（交易日）"),
+        "max_weight_pct": (float, 0.15, "单票权重上限"),
+        "min_avg_amount": ((int, float, type(None)), None, "流动性门槛（N日均成交额）"),
+        "liquidity_days": (int, 20, "流动性回看窗口"),
+        "min_price": ((int, float, type(None)), None, "最低价过滤"),
+        "industry_neutral": (bool, False, "是否行业中性化"),
+        "industry_level": (str, "first", "行业层级 first/second/third"),
+        "use_regime_filter": (bool, True, "是否启用指数择时"),
+        "regime_filter_days": (int, 20, "择时均线窗口"),
+        "regime_band": (float, 0.0, "择时迟滞带宽度（动量策略默认关闭）"),
+    }
+
     def prepare(self, md: MarketData) -> None:
-        self._md = md
+        super().prepare(md)
         p = self.params
         self.lookback = int(p.get("lookback_days", 60))
         self.top_k = int(p.get("top_k", 10))
