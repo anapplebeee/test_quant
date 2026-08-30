@@ -38,7 +38,7 @@ TASKS = {
 "resource": "data",
 "timeout": 1800,
         "outputs": {
-            "日线数据": "data/daily/*.parquet",
+            "日线数据": "data/daily/year=*/（分区布局）",
             "股票池快照": "data/universe/*.parquet",
         },
         "result_tab": "🗃️ 数据总览",

@@ -1,13 +1,14 @@
 """数据 API - 数据总览相关。
 
-路径全部走 `common.data_dir()`（源自 settings.yaml 的 data.root），
-不再硬编码 "data"——此前改配置会导致核心库照新路径写、API 层读空且静默返回空。
+路径统一走 `quart.data.store.BarStore`（分区/旧布局自动识别），
+不再直读 `daily_dir()/*.parquet`——存储迁移为 year=YYYY 分区布局后，
+旧 per-symbol 直读会静默返回空（2026-08-31 架构检视修复）。
 """
 from __future__ import annotations
 
 import pandas as pd
 
-from common import daily_dir, data_dir, degraded, index_dir, safe_path, universe_dir, valid_symbol
+from common import degraded, index_dir, universe_dir
 
 
 def _count_parquet(directory) -> int:
@@ -16,9 +17,24 @@ def _count_parquet(directory) -> int:
     return sum(1 for f in directory.glob("*.parquet"))
 
 
+def _count_partitioned(directory) -> int:
+    """兼容分区布局（year=YYYY/*.parquet）与旧平铺布局。"""
+    if not directory.exists():
+        return 0
+    flat = directory.glob("*.parquet")
+    partitioned = directory.glob("year=*/*.parquet")
+    return sum(1 for _ in flat) + sum(1 for _ in partitioned)
+
+
+def _bar_store():
+    from quart.data.store import BarStore
+
+    return BarStore()
+
+
 def get_stock_stats() -> dict:
-    """获取股票统计数据"""
-    scores_path = data_dir() / "scores" / "preds.csv"
+    """获取股票统计数据（BarStore 双布局兼容）"""
+    scores_path = _scores_path()
 
     stats = {
         "stock_count": 0,
@@ -28,7 +44,7 @@ def get_stock_stats() -> dict:
     }
 
     try:
-        stats["stock_count"] = _count_parquet(daily_dir())
+        stats["stock_count"] = len(_bar_store().symbols())
     except Exception as e:
         degraded("stock_count", e)
 
@@ -38,7 +54,7 @@ def get_stock_stats() -> dict:
         degraded("universe_count", e)
 
     try:
-        stats["index_count"] = _count_parquet(index_dir())
+        stats["index_count"] = _count_partitioned(index_dir())
     except Exception as e:
         degraded("index_count", e)
 
@@ -76,28 +92,24 @@ def get_universe(limit: int = 50) -> pd.DataFrame:
 
 
 def _read_daily(symbol: str) -> pd.DataFrame | None:
-    if not valid_symbol(symbol):
+    """个股全史日线（分区/旧布局自动识别）。"""
+    try:
+        bars = _bar_store().load(symbols=[str(symbol).zfill(6)])
+        return bars if not bars.empty else None
+    except Exception as e:
+        degraded("get_stock_data", e)
         return None
-    path = safe_path(daily_dir(), f"{symbol}.parquet")
-    if path is None or not path.exists():
-        return None
-    df = pd.read_parquet(path)
-    return df if "date" in df.columns else None
 
 
 def get_sample_data() -> pd.DataFrame | None:
     """获取样本数据（平安银行）"""
-    try:
-        return _read_daily("000001")
-    except Exception as e:
-        degraded("get_sample_data", e)
-        return None
+    return _read_daily("000001")
 
 
 def get_stock_list() -> list[str]:
-    """获取所有股票代码列表"""
+    """获取所有股票代码列表（双布局）"""
     try:
-        return sorted(f.stem for f in daily_dir().glob("*.parquet"))
+        return _bar_store().symbols()
     except Exception as e:
         degraded("get_stock_list", e)
         return []
@@ -105,8 +117,10 @@ def get_stock_list() -> list[str]:
 
 def get_stock_data(symbol: str) -> pd.DataFrame | None:
     """获取指定股票的日线数据"""
-    try:
-        return _read_daily(symbol)
-    except Exception as e:
-        degraded("get_stock_data", e)
-        return None
+    return _read_daily(symbol)
+
+
+def _scores_path():
+    from common import data_dir
+
+    return data_dir() / "scores" / "preds.csv"

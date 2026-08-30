@@ -10,7 +10,7 @@ import json
 
 import pandas as pd
 
-from common import daily_dir, degraded, reports_dir, safe_path, valid_name
+from common import degraded, reports_dir, safe_path, valid_name
 
 
 def _warn(where: str, exc: BaseException) -> None:
@@ -112,19 +112,22 @@ def get_cost_breakdown(name: str) -> dict | None:
     turnover_2way = float(df["amount"].sum())
 
     # 滑点成本：成交价 vs 当日开盘价的偏离（买入为正偏离、卖出为负偏离）
+    from quart.data.store import BarStore
+
     opens_cache: dict[str, pd.Series | None] = {}
     slip_cost = 0.0
     matched = 0
+    try:
+        bars = BarStore().load(symbols=[str(s).zfill(6) for s in df["symbol"].unique()])
+        if not bars.empty:
+            bars["date"] = pd.to_datetime(bars["date"])
+            for code, grp0 in bars.groupby("symbol"):
+                opens_cache[str(code)] = grp0.set_index("date")["open"]
+    except Exception:
+        pass
     for sym, grp in df.groupby("symbol"):
         code = str(sym).zfill(6)
-        if code not in opens_cache:
-            try:
-                bar = pd.read_parquet(safe_path(daily_dir(), f"{code}.parquet"))
-                bar["date"] = pd.to_datetime(bar["date"])
-                opens_cache[code] = bar.set_index("date")["open"]
-            except Exception:
-                opens_cache[code] = None
-        op = opens_cache[code]
+        op = opens_cache.get(code)
         if op is None:
             continue
         for _, row in grp.iterrows():

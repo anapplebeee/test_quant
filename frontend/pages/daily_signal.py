@@ -1,21 +1,19 @@
 """每日信号页面"""
 from __future__ import annotations
 
-import os
-import glob
-
 import gradio as gr
 
+from common import reports_dir
 from frontend.theme import page_header
 
 
 def _load_signal(date: str) -> str:
-    """加载信号报告"""
+    """加载信号报告（路径走 common.reports_dir()，避免配置根目录漂移）"""
     from common import safe_path, valid_date8
 
     if not valid_date8(date):
         return "非法日期格式"
-    path = safe_path("reports", f"signal_{date}.md")
+    path = safe_path(reports_dir(), f"signal_{date}.md")
     if path is not None and path.exists():
         with open(path, encoding="utf-8") as f:
             return f.read()
@@ -26,7 +24,7 @@ def _snapshot():
     """扫描信号文件，返回 (日期选项, 最新日期, 最新内容)"""
     signal_files = sorted([
         f.replace("signal_", "").replace(".md", "")
-        for f in os.listdir("reports") if f.startswith("signal_")
+        for f in reports_dir().glob("signal_*.md")
     ])
     if not signal_files:
         return [], None, "暂无信号报告，运行 scripts/daily_signal.py 生成"

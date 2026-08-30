@@ -40,10 +40,19 @@ def render():
         gr.Markdown("### 📈 股票日线数据")
         
         stock_list = get_stock_list()
+        # 默认标的 000001 必须落在 choices 内，否则 Gradio 报
+        # "value not in list of choices" 警告；allow_custom_value 允许用户检索前100只之外的任意标的
+        default_symbol = "000001"
+        top100 = stock_list[:100]
+        if default_symbol in stock_list and default_symbol not in top100:
+            dropdown_choices = [default_symbol] + top100
+        else:
+            dropdown_choices = top100
         stock_selector = gr.Dropdown(
             label="选择股票",
-            choices=stock_list[:100],  # 显示前100只
-            value="000001",
+            choices=dropdown_choices,  # 显示前100只（必要时前置默认标的）
+            value=default_symbol,
+            allow_custom_value=True,
             interactive=True,
         )
         

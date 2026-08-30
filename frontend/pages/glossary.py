@@ -8,40 +8,70 @@ from frontend.theme import page_header
 
 def render():
     """渲染参数词典 Tab"""
+    from quart.config import load_config
+    from quart.strategy import build_strategy
+
+    cfg = load_config()
+    s = cfg.get("strategy", {})
+    r = cfg.get("risk", {})
+    b = cfg.get("backtest", {})
+    m = cfg.get("manual_trading", {})
+    # 当前生效值 = 默认策略（config.strategy.name）解析后的参数，与回测/信号同源
+    try:
+        d = build_strategy(s.get("name", "lowvol_indz")).params
+        cur_top_k = int(d.get("top_k", s.get("top_k", 10)))
+        cur_rebalance = int(d.get("rebalance_days", s.get("rebalance_days", 5)))
+    except Exception:
+        cur_top_k = int(s.get("top_k", 10))
+        cur_rebalance = int(s.get("rebalance_days", 5))
+    cur_regime = s.get("use_regime_filter", True)
+
     with gr.Tab("📖 参数词典"):
         gr.HTML(page_header("📖 量化参数词典", "所有关键参数的含义、计算方法和经验取值"))
+        gr.Markdown(
+            f"> 当前生效值来自 `config/settings.yaml`，默认策略 `{s.get('name')}`（"
+            f"与回测中心/信号生成同源，2026-08-31 起不再硬编码）"
+        )
 
         with gr.Accordion("⚙️ 策略参数", open=True):
-            gr.Markdown("""
+            gr.Markdown(
+                f"""
             | 参数名 | 含义 | 常用范围 | 当前值 |
             |--------|------|----------|--------|
-            | `lookback_days` | 动量回看天数 | 20-252天 | 60 |
-            | `top_k` | 持仓股票数 | 5-50只 | 10 |
-            | `rebalance_days` | 调仓周期 | 1-20天 | 5 |
-            | `max_weight_pct` | 单股最大权重 | 5%-20% | 15% |
-            | `min_avg_amount` | 流动性门槛 | 1000万-1亿 | 5000万 |
-            | `use_regime_filter` | 市场环境过滤 | true/false | true |
-            """)
+            | `lookback_days` | 动量回看天数 | 20-252天 | {s.get('lookback_days', 60)} |
+            | `top_k` | 持仓股票数 | 5-50只 | {cur_top_k} |
+            | `rebalance_days` | 调仓周期 | 5-60天 | {cur_rebalance} |
+            | `max_weight_pct` | 单股最大权重 | 5%-20% | {s.get('max_weight_pct', 0.15) * 100:.0f}% |
+            | `min_avg_amount` | 流动性门槛 | 1000万-1亿 | {s.get('min_avg_amount', 50_000_000) / 1e4:.0f}万 |
+            | `use_regime_filter` | 市场环境过滤 | true/false | {str(cur_regime).lower()} |
+            | `live_allowlist` | 正式信号白名单 | - | {s.get('live_allowlist') or '全部研究'} |
+            """
+            )
 
         with gr.Accordion("🛡️ 风控参数", open=False):
-            gr.Markdown("""
+            gr.Markdown(
+                f"""
             | 参数名 | 含义 | 常用范围 | 当前值 |
             |--------|------|----------|--------|
-            | `max_position_pct` | 单股最大持仓权重 | 10%-30% | 25% |
-            | `max_daily_loss_pct` | 单日最大亏损止损 | 3%-10% | 5% |
-            """)
+            | `max_position_pct` | 单股最大持仓权重 | 10%-30% | {r.get('max_position_pct', 0.25) * 100:.0f}% |
+            | `max_daily_loss_pct` | 单日最大亏损止损 | 3%-10% | {r.get('max_daily_loss_pct', 0.05) * 100:.0f}% |
+            """
+            )
 
         with gr.Accordion("💰 回测参数（交易成本）", open=False):
-            gr.Markdown("""
+            gr.Markdown(
+                f"""
             | 参数名 | 含义 | 常用范围 | 当前值 |
             |--------|------|----------|--------|
-            | `initial_cash` | 初始资金 | 10万-1000万 | 100万 |
-            | `commission_rate` | 佣金率 | 0.01%-0.05% | 0.025% |
-            | `stamp_tax_rate` | 印花税(卖出) | 0.05% | 0.05% |
-            | `slippage_rate` | 滑点率 | 0.05%-0.2% | 0.1% |
+            | `initial_cash` | 初始资金 | 10万-1000万 | {b.get('initial_cash', 1_000_000):,.0f} |
+            | `commission_rate` | 佣金率 | 0.01%-0.05% | {b.get('commission_rate', 0.00025) * 100:.3f}% |
+            | `stamp_tax_rate` | 印花税(卖出) | 0.05% | {b.get('stamp_tax_rate', 0.0005) * 100:.2f}% |
+            | `slippage_rate` | 滑点率 | 0.05%-0.2% | {b.get('slippage_rate', 0.001) * 100:.1f}% |
+            | `min_order_value` | 最小委托金额 | - | {b.get('min_order_value', 1000):,.0f} |
 
-            **交易成本影响估算：** 换手率200%策略，年化成本≈200%×0.25%=0.5%
-            """)
+            **交易成本影响估算：** 换手率200%策略，年化成本≈200%×0.25%=0.5%（佣金）
+            """
+            )
 
         with gr.Accordion("📊 绩效指标", open=False):
             gr.Markdown("""

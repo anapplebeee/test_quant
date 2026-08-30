@@ -24,9 +24,10 @@ def _fmt_num(v, digits: int = 2) -> str:
 
 
 def _color_by_sign(v) -> str:
+    """A 股配色：红涨绿跌（与沪深市场习惯一致）。"""
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return "gray"
-    return "green" if v > 0 else ("red" if v < 0 else "gray")
+    return "red" if v > 0 else ("green" if v < 0 else "gray")
 
 
 def _summary_html(name: str | None) -> str:
