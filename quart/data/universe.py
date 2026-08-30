@@ -35,7 +35,11 @@ def get_constituents(
         from quart.data.universe_history import constituents_at
 
         pit = constituents_at(index_code, as_of)
-        if pit:
+        # None = 无历史记录；[] = 有历史但该日无成分（如指数尚未成立）。
+        # 后者必须返回空股票池，不能回退当前快照——否则会在指数未成立的
+        # 早期日期注入今日成分股（前视偏差）。
+        # 2026-08-31 审查修复：旧代码 `if pit:` 把 [] 也判假，静默回退快照。
+        if pit is not None:
             return pit
         msg = (
             f"{index_code} 无 {pd.Timestamp(as_of).date()} 的 PIT 成分股记录，"

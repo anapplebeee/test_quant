@@ -99,6 +99,12 @@ def main() -> None:
     idx = features.index.get_level_values(0)
     dates = pd.DatetimeIndex(idx.unique())
     months = month_starts(dates, args.min_train_bars)
+    if not months:
+        raise SystemExit(
+            f"训练窗口不足：可用日期 {len(dates)} 个，"
+            f"需至少 min_train_bars={args.min_train_bars} 个预热月份。"
+            f"请扩大 --start 范围或降低 --min-train-bars。"
+        )
     console.print(f"features {features.shape}, rolling over {len(months)} months: {months[0].date()} ~ {months[-1].date()}")
 
     preds_frames = []

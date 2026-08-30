@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 
+import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -146,14 +147,24 @@ def fetch_daily(
     end_date: str,
     adjust: str = "qfq",
 ) -> pd.DataFrame:
-    df = _fetch_daily_tencent(symbol, start_date, end_date, adjust)
+    # 2026-08-31 审查修复：腾讯异常（列名变更/网络故障）也必须走东财兜底，
+    # 否则单只股票会永久拉取失败且被记 failed。
+    try:
+        df = _fetch_daily_tencent(symbol, start_date, end_date, adjust)
+    except Exception as exc:
+        logger.debug("tencent daily {} failed, fallback to eastmoney: {}", symbol, str(exc)[:80])
+        df = _EMPTY.copy()
     if not df.empty:
         return df
     return _fetch_daily_eastmoney(symbol, start_date, end_date, adjust)
 
 
 def fetch_index_daily(code: str, start_date: str, end_date: str) -> pd.DataFrame:
-    df = _fetch_index_tencent(code)
+    try:
+        df = _fetch_index_tencent(code)
+    except Exception as exc:
+        logger.debug("tencent index {} failed, fallback to eastmoney: {}", code, str(exc)[:80])
+        df = _EMPTY.copy()
     if not df.empty:
         return df
     return _fetch_index_eastmoney(code, start_date, end_date)
@@ -206,6 +217,30 @@ def _align_schema(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return out
 
 
+def _normalize_volume_unit(df: pd.DataFrame) -> pd.DataFrame:
+    """统一腾讯源成交量为「手」（与东财/引擎口径一致）。
+
+    2026-08-31 审查修复：`stock_zh_a_hist_tx` 对 000 开头（老深主板）返回
+    volume 单位=手，其余（002/300/6xx/688）返回单位=股，同一横截面相差 100 倍，
+    导致 volume 类因子（net_flow20、volume_ratio20 等）跨股票比较失真。
+    用 amount / (close × volume) 的中位比值自动判定：≈1 → 股 → ÷100 转手；
+    ≈100 → 已是手 → 保持不变。
+    """
+    if df is None or df.empty or "volume" not in df.columns:
+        return df
+    v = df["volume"].replace(0, np.nan)
+    px = df["close"].replace(0, np.nan)
+    amt = df["amount"]
+    ratio = (amt / (px * v)).median()
+    if np.isnan(ratio):
+        return df
+    if 0.5 <= ratio <= 2.0:  # volume 单位是股 → 转手
+        out = df.copy()
+        out["volume"] = out["volume"] / 100.0
+        return out
+    return df
+
+
 def _fetch_daily_tencent(symbol: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
     import akshare as ak
 
@@ -223,7 +258,7 @@ def _fetch_daily_tencent(symbol: str, start_date: str, end_date: str, adjust: st
         return _EMPTY.copy()
     if raw is None or raw.empty:
         return _EMPTY.copy()
-    return _align_schema(raw[TX_BAR_COLUMNS].copy(), symbol)
+    return _normalize_volume_unit(_align_schema(raw[TX_BAR_COLUMNS].copy(), symbol))
 
 
 def _fetch_index_eastmoney(code: str, start_date: str, end_date: str) -> pd.DataFrame:

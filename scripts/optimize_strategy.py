@@ -53,12 +53,15 @@ def main() -> None:
     parser.add_argument("--strategy", default="lowvol_indz")
     parser.add_argument("--start", default="2020-01-01")
     parser.add_argument("--end", default=None)
-    parser.add_argument("--save", default="reports/strategy_optimization_2026-08-31.md")
+    parser.add_argument("--save", default="reports/strategy_optimization.json",
+                        help="实验数据 JSON 输出路径（不带扩展名时自动补 .json）")
     args = parser.parse_args()
 
     cfg = load_config()
     store = BarStore()
     bars = store.load(start=args.start, end=args.end)
+    if bars.empty:
+        raise SystemExit("本地数据为空，请先运行 scripts/update_data.py 或 scripts/update_indices.py")
     bench = store.load_benchmark(cfg["benchmark"])
     bench = bench[(bench["date"] >= args.start) & (args.end is None or bench["date"] <= args.end)]
     data_cfg = cfg.get("data", {})

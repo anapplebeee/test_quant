@@ -70,7 +70,12 @@ def build_price_factors(md: MarketData) -> dict[str, pd.DataFrame]:
 
 
 def build_fundamental_factors(md: MarketData) -> dict[str, pd.DataFrame]:
-    """财务因子对齐到日频：报告期 + DISCLOSE_LAG_DAYS 起可用，ffill。"""
+    """财务因子对齐到日频：报告期 + DISCLOSE_LAG_DAYS（交易日）起可用，ffill。
+
+    2026-08-31 审查修复：此前用 `pd.Timedelta(days=DISCLOSE_LAG_DAYS)` 按自然日偏移，
+    120 自然日 ≈ 84 个交易日，财报被视为提前约 36 个交易日披露 → ep/bp/roe 因子
+    产生前视偏差、IC 虚高。现改为在交易日序列中向后偏移 120 个交易日。
+    """
     path = PROJECT_ROOT / "data" / "factors" / "financials.parquet"
     if not path.exists():
         console.print("[yellow]financials.parquet 不存在，跳过财务因子[/yellow]")
@@ -80,11 +85,19 @@ def build_fundamental_factors(md: MarketData) -> dict[str, pd.DataFrame]:
 
     dates = md.dates
     closes = md.close_val
+    # 报告期 → 披露可用日 = 报告期之后第 DISCLOSE_LAG_DAYS 个交易日
+    # （searchsorted side="right" 保证严格在报告期之后）
+    sorted_dates = np.array(dates, dtype="datetime64[ns]")
+    def _available(report_dates: pd.DatetimeIndex) -> pd.DatetimeIndex:
+        positions = np.searchsorted(sorted_dates, np.array(report_dates, dtype="datetime64[ns]"), side="right")
+        positions = positions + DISCLOSE_LAG_DAYS - 1
+        valid = positions < len(dates)
+        return pd.DatetimeIndex(dates[positions[valid]])
+
     out: dict[str, pd.DataFrame] = {}
     for col, label in [("eps", "ep"), ("bps", "bp")]:
         raw = fin.pivot_table(index="date", columns="symbol", values=col, aggfunc="last")
-        available = raw.index + pd.Timedelta(days=DISCLOSE_LAG_DAYS)
-        raw_aligned = raw.set_axis(available)
+        raw_aligned = raw.set_axis(_available(raw.index))
         f = raw_aligned.reindex(dates).ffill()
         if label == "ep":
             f = f / closes  # earnings yield = eps / price
@@ -94,8 +107,7 @@ def build_fundamental_factors(md: MarketData) -> dict[str, pd.DataFrame]:
     for col, label in [("roe", "roe"), ("gross_margin", "gross_margin"),
                        ("rev_yoy", "rev_yoy"), ("profit_yoy", "profit_yoy")]:
         raw = fin.pivot_table(index="date", columns="symbol", values=col, aggfunc="last")
-        available = raw.index + pd.Timedelta(days=DISCLOSE_LAG_DAYS)
-        raw_aligned = raw.set_axis(available)
+        raw_aligned = raw.set_axis(_available(raw.index))
         out[label] = raw_aligned.reindex(dates).ffill()
     return {k: v.astype("float64") for k, v in out.items()}
 

@@ -100,6 +100,11 @@ def main() -> None:
             br = bench_fwd.iloc[i]
             spreads.append(float(spread - br) if not np.isnan(br) else float(spread))
 
+        if not ics:
+            # 采样点全部因流动性/数据不足被跳过时，跳过该因子而不是产出 NaN 污染表
+            # （2026-08-31 审查修复：旧代码 pd.Series([]) 的 mean/std 均为 NaN，
+            # 且 (s>0).mean() 也是 NaN，整行进入结果表）
+            continue
         s = pd.Series(ics)
         half = max(len(s) // 2, 1)
         rows[name] = {

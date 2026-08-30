@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import common
+
 import argparse
 import datetime as dt
 import json
@@ -28,7 +30,7 @@ def main() -> None:
     parser.add_argument("--start", default="2020-01-01")
     parser.add_argument("--end", default=None)
     parser.add_argument("--no-regime", action="store_true")
-    parser.add_argument("--save-dir", default="reports")
+    parser.add_argument("--save-dir", default=str(common.reports_dir()))
     # 前端可调参数：显式传入时覆盖 config（含 config.strategy.overrides 按策略覆盖）
     parser.add_argument("--rebalance-days", type=int, default=None,
                         help="换手频率（交易日），覆盖 config")

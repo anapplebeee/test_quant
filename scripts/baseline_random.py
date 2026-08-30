@@ -18,6 +18,8 @@
 """
 from __future__ import annotations
 
+import common
+
 import argparse
 import datetime as dt
 from pathlib import Path
@@ -44,7 +46,7 @@ def main() -> None:
     parser.add_argument("--end", default=None)
     parser.add_argument("--seeds", type=int, default=20)
     parser.add_argument("--top-k", type=int, default=10)
-    parser.add_argument("--save-dir", default="reports")
+    parser.add_argument("--save-dir", default=str(common.reports_dir()))
     args = parser.parse_args()
 
     cfg = load_config()

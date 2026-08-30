@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import common
+
 import argparse
 import datetime as dt
 from pathlib import Path
@@ -92,7 +94,7 @@ def main() -> None:
     parser.add_argument("--start", default="2020-01-01")
     parser.add_argument("--end", default=None)
     parser.add_argument("--combo", action="append", default=[], help="e.g. --combo \"use_regime_filter=true,regime_filter_days=60\"")
-    parser.add_argument("--save-dir", default="reports")
+    parser.add_argument("--save-dir", default=str(common.reports_dir()))
     parser.add_argument("--no-risk", action="store_true",
                         help="关闭回测内风控（默认启用，与实盘同一约束）")
     args = parser.parse_args()

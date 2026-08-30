@@ -73,8 +73,59 @@ def _git_revision() -> str:
     return "unknown"
 
 
+def _global_data_dates(store) -> tuple[str | None, str | None]:
+    """全市场最早/最新交易日（不依赖单只票）。
+
+    2026-08-31 审查修复：旧实现只取 `symbols[0]/symbols[-1]` 两只票的日期，
+    其余股票更新（退市回填、数据修正）不改变指纹，可复现性契约失效。
+    分区布局下只扫最小/最大年份目录，开销可控。
+    """
+    if store._partitioned:
+        years = store._partition_years(store.daily_dir)
+        if not years:
+            return None, None
+        last: pd.Timestamp | None = None
+        first: pd.Timestamp | None = None
+        for p in (store.daily_dir / f"year={max(years)}").glob("*.parquet"):
+            try:
+                d = pd.read_parquet(p, columns=["date"])["date"]
+            except Exception:
+                continue
+            if not d.empty:
+                m = d.max()
+                last = m if (last is None or m > last) else last
+        for p in (store.daily_dir / f"year={min(years)}").glob("*.parquet"):
+            try:
+                d = pd.read_parquet(p, columns=["date"])["date"]
+            except Exception:
+                continue
+            if not d.empty:
+                m = d.min()
+                first = m if (first is None or m < first) else first
+        return (
+            str(last.date()) if last is not None else None,
+            str(first.date()) if first is not None else None,
+        )
+    # 旧平铺布局：遍历全部代码（数据量小，直接读 date 列）
+    last = first = None
+    for sym in store.symbols():
+        try:
+            d = pd.read_parquet(store.daily_dir / f"{sym}.parquet", columns=["date"])["date"]
+        except Exception:
+            continue
+        if d.empty:
+            continue
+        mx, mn = d.max(), d.min()
+        last = mx if (last is None or mx > last) else last
+        first = mn if (first is None or mn < first) else first
+    return (
+        str(last.date()) if last is not None else None,
+        str(first.date()) if first is not None else None,
+    )
+
+
 def data_version(store=None) -> dict:
-    """数据版本指纹：股票数 + 最新日期 + 最早日期。
+    """数据版本指纹：股票数 + 全市场最新日期 + 最早日期。
 
     结果数字必须能回答"跑在哪份数据上"——数据变了，
     fingerprint 就变，旧结论自动失效而不必靠人工记忆。
@@ -87,10 +138,11 @@ def data_version(store=None) -> dict:
         symbols = store.symbols()
         if not symbols:
             return {"symbols": 0, "last_date": None, "first_date": None}
+        last_date, first_date = _global_data_dates(store)
         return {
             "symbols": len(symbols),
-            "last_date": str(store.last_date(symbols[-1]) or "")[:10] or None,
-            "first_date": str(store.first_date(symbols[0]) or "")[:10] or None,
+            "last_date": last_date,
+            "first_date": first_date,
         }
     except Exception:
         return {"symbols": 0, "last_date": None, "first_date": None}

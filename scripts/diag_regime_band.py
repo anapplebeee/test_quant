@@ -9,14 +9,14 @@ from quart.backtest.engine import BacktestEngine, MarketData
 from quart.config import load_config
 from quart.data.store import BarStore
 from quart.data.universe import filter_for_simulation
-from quart.strategy.lowvol_composite import LowVolCompositeStrategy
+from quart.strategy import build_strategy
 
 cfg = load_config()
 store = BarStore()
 bars = store.load(start="2020-01-01")
 bench = store.load_benchmark(cfg["benchmark"])
 bench = bench[bench["date"] >= "2020-01-01"]
-dl = pd.read_csv("data/universe/delisted.csv", dtype={"symbol": str})
+dl = pd.read_csv(store.universe_dir / "delisted.csv", dtype={"symbol": str})
 delisted = set(dl["symbol"].str.zfill(6))
 dc = cfg.get("data", {})
 bars_old = filter_for_simulation(
@@ -28,12 +28,16 @@ bars_old = filter_for_simulation(
 )
 md = MarketData.from_bars(bars_old, benchmark=bench)
 years = len(md.dates) / 252.0
-base = {k: v for k, v in cfg["strategy"].items() if k != "name"}
 
 for band in (0.0, 0.02):
-    eq = BacktestEngine(
-        md, LowVolCompositeStrategy(**{**base, "top_k": 20, "rank_buffer": 0.0, "industry_z": True, "regime_band": band})
-    ).run()
+    # 走 build_strategy：resolve_params 保证 overrides/全局参数正确合并
+    # （2026-08-31 审查修复：旧代码直接把 cfg["strategy"] 全量传入
+    #  LowVolCompositeStrategy，live_allowlist/overrides 等键会抛"未知参数"，且绕过 overrides）
+    strategy = build_strategy(
+        "lowvol_indz",
+        top_k=20, rank_buffer=0.0, regime_band=band,
+    )
+    eq = BacktestEngine(md, strategy).run()
     cagr = (eq.iloc[-1] / eq.iloc[0]) ** (1 / years) - 1
     yr = eq.groupby(eq.index.year)
     yret = {k: f"{v:+.1%}" for k, v in (yr.last() / yr.first() - 1).round(3).items()}

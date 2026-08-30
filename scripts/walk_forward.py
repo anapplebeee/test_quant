@@ -30,6 +30,8 @@ uv run python scripts/walk_forward.py --strategy lowvol_indz `
 """
 from __future__ import annotations
 
+import common
+
 import argparse
 import datetime as dt
 from pathlib import Path
@@ -94,7 +96,7 @@ def main() -> None:
     parser.add_argument("--grid", action="append", default=[], metavar="key=v1,v2")
     parser.add_argument("--min-trades", type=int, default=0, help="train 段最少成交笔数")
     parser.add_argument("--no-risk", action="store_true", help="关闭回测内风控")
-    parser.add_argument("--save-dir", default="reports")
+    parser.add_argument("--save-dir", default=str(common.reports_dir()))
     args = parser.parse_args()
 
     store = BarStore()

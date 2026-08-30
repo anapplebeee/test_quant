@@ -18,6 +18,7 @@ from quart.backtest.engine import BacktestEngine, MarketData
 from quart.config import load_config
 from quart.data.store import BarStore
 from quart.data.universe import filter_for_simulation
+from quart.strategy import build_strategy
 from quart.strategy.lowvol_composite import LowVolCompositeStrategy
 
 console = Console()
@@ -28,9 +29,15 @@ BASE = dict(top_k=20, rank_buffer=0.0, industry_z=True)
 class NoDelistedPickStrategy(LowVolCompositeStrategy):
     """退市股保留在 md/z 统计中，但 composite 中删列（不可被选入）。"""
 
+    # 2026-08-31 审查修复：validate_params 拒绝未知键，delisted_symbols 必须声明进 schema
+    PARAMS_SCHEMA = {
+        **LowVolCompositeStrategy.PARAMS_SCHEMA,
+        "delisted_symbols": ((set, type(None)), None, "不可选入的退市股代码集合"),
+    }
+
     def prepare(self, md: MarketData) -> None:
         super().prepare(md)
-        dl = set(self.params.get("delisted_symbols", ()))
+        dl = set(self.params.get("delisted_symbols", ()) or ())
         if dl:
             self.composite = self.composite.loc[:, ~self.composite.columns.isin(dl)]
 
@@ -68,13 +75,15 @@ def main() -> None:
     md_full = MarketData.from_bars(bars_full, benchmark=bench)
     md_old = MarketData.from_bars(bars_old, benchmark=bench)
     years = len(md_full.dates) / 252.0
-    base = {k: v for k, v in cfg["strategy"].items() if k != "name"}
+    # 2026-08-31 审查修复：走 build_strategy（resolve_params 合并 overrides/全局参数），
+    # 不再直接实例化——旧代码把 cfg["strategy"] 全量传入会抛"未知参数"且绕过 overrides
 
-    eq_c = BacktestEngine(md_old, LowVolCompositeStrategy(**{**base, **BASE})).run()
+    eq_c = BacktestEngine(md_old, build_strategy("lowvol_indz", **BASE)).run()
     eq_a = BacktestEngine(
-        md_full, NoDelistedPickStrategy(**{**base, **BASE, "delisted_symbols": delisted})
+        md_full,
+        NoDelistedPickStrategy(**build_strategy("lowvol_indz", **BASE).params, delisted_symbols=delisted),
     ).run()
-    eq_b = BacktestEngine(md_full, LowVolCompositeStrategy(**{**base, **BASE})).run()
+    eq_b = BacktestEngine(md_full, build_strategy("lowvol_indz", **BASE)).run()
 
     t = Table(title="退市股效应隔离 (lowvol_indz top_k=20, buffer=0)")
     for c in ["场景", "CAGR", "2020", "2021", "2022", "2023", "2024", "2025", "2026"]:
