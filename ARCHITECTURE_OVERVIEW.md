@@ -100,7 +100,7 @@ sequenceDiagram
 
 ## 6. 仍待实现（按规划）
 
-- 阶段 F：`BrokerAdapter` 回报统一写入 `FillService`、API 订单状态机与计划链路打通
+- 阶段 F：**具体券商 SDK 接入**（BrokerAdapter 契约 / PaperBroker 状态机 / `sync_broker_fills`
+  回报统一入账 / 前端模拟执行入口均已完成，2026-08-31；真实券商需权限与联调环境）
 - 因子生态：拥挤度（截面离散度）、失效预警（滚动 IC 时序）——需因子研究管线输出
-- XLSX 券商成交文件列映射
 - 归因页：价值/反转/流动性暴露需 Barra 类风格因子数据源

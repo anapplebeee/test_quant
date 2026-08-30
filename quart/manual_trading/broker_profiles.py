@@ -139,6 +139,67 @@ def convert_broker_csv(
         if errors:
             raise ValueError("券商成交 CSV 转换失败:\n" + "\n".join(errors))
 
+    return _write_normalized(target_path, rows)
+
+
+def convert_broker_xlsx(
+    source: Path | str,
+    target: Path | str,
+    sheet: str | int = 0,
+    profile: str | None = None,
+) -> Path:
+    """把券商导出的 XLSX 成交表转换为通用模板 CSV。
+
+    列名归一化与 CSV 版本共用 `COLUMN_ALIASES`；首行为表头。
+    依赖 openpyxl（项目依赖已含）。
+    """
+    source_path = Path(source)
+    target_path = Path(target)
+    del profile
+    try:
+        import openpyxl
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("读取 XLSX 需要 openpyxl: pip install openpyxl") from exc
+
+    workbook = openpyxl.load_workbook(source_path, read_only=True, data_only=True)
+    ws = workbook[sheet] if isinstance(sheet, str) else workbook.worksheets[sheet]
+    iterator = ws.iter_rows(values_only=True)
+    try:
+        header = next(iterator)
+    except StopIteration as exc:
+        raise ValueError("XLSX 工作表为空") from exc
+
+    columns = [str(value).strip() if value is not None else "" for value in header]
+    mapping = _resolve_columns(columns)
+    missing_required = [
+        name for name in ("trade_date", "symbol", "side", "quantity", "price")
+        if name not in mapping
+    ]
+    if missing_required:
+        raise ValueError(
+            f"成交 XLSX 缺少必需列 {missing_required}; 实际列: {columns}"
+        )
+
+    rows: list[dict[str, str]] = []
+    errors: list[str] = []
+    for line_number, values in enumerate(iterator, start=2):
+        if all(value is None or str(value).strip() == "" for value in values):
+            continue  # 跳过尾部空行
+        raw = {columns[i]: values[i] for i in range(len(columns)) if i < len(values)}
+        try:
+            rows.append(_convert_row(raw, mapping))
+        except Exception as exc:
+            errors.append(f"第 {line_number} 行: {exc}")
+    workbook.close()
+    if errors:
+        raise ValueError("券商成交 XLSX 转换失败:\n" + "\n".join(errors))
+    if not rows:
+        raise ValueError("XLSX 中没有有效成交行")
+
+    return _write_normalized(target_path, rows)
+
+
+def _write_normalized(target_path: Path, rows: list[dict[str, str]]) -> Path:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     with target_path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=CANONICAL_FIELDS)
@@ -173,8 +234,11 @@ def _convert_row(raw: dict[str, str], mapping: dict[str, str]) -> dict[str, str]
     if not row["symbol"]:
         raise ValueError("证券代码为空")
     quantity = row.get("quantity", "")
-    if not quantity.isdigit():
-        raise ValueError(f"成交数量无效: {quantity!r}")
+    try:
+        # XLSX 数字单元格可能是 100 / 100.0；统一按整数处理
+        row["quantity"] = str(int(float(quantity)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"成交数量无效: {quantity!r}") from exc
     try:
         float(row["price"])
     except (KeyError, ValueError) as exc:
@@ -187,6 +251,7 @@ __all__ = [
     "CANONICAL_FIELDS",
     "COLUMN_ALIASES",
     "convert_broker_csv",
+    "convert_broker_xlsx",
     "normalize_date",
     "normalize_side",
     "normalize_symbol",

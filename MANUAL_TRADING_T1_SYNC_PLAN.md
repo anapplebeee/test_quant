@@ -23,10 +23,10 @@
 - ~~Gradio 手动交易操作页~~（已完成）；
 - ~~计划订单调减的前端/CLI 操作~~（已完成）；
 - ~~人工下单 CSV 导出~~（已完成）；
-- ~~各券商 CSV/XLSX 列映射~~（CSV 已完成 `quart/manual_trading/broker_profiles.py`；XLSX 待需要时补）；
+- ~~各券商 CSV/XLSX 列映射~~（CSV + XLSX 已完成 `quart/manual_trading/broker_profiles.py` + `import_broker_fill_file` 自动分流）；
 - ~~权威 A 股交易日历~~（已完成 `quart/data/calendar.py` + 操作中心更新入口）；
 - ~~未对账账户对正式计划的强制阻断~~（已完成，approve_plan 门禁 + 测试）；
-- 券商 API、自动报单和订单回报（阶段 F 剩余：Adapter 回报接入 FillService、订单状态机与计划链路打通）。
+- ~~券商 API、自动报单和订单回报~~（阶段 F：BrokerAdapter 契约 + PaperBroker 状态机 + `sync_broker_fills` 回报统一入账 + 前端模拟执行联调入口已完成；真实券商 SDK 接入需券商权限与联调环境，按规划"稳定运行后"再实施）。
 
 ## 1. 建设目标
 
@@ -664,9 +664,10 @@ API 模式：BrokerAdapter 下单 -> 回报订阅/查询 -> FillService
 
 - [x] 定义 `BrokerAdapter`；
 - [x] 建立模拟 Adapter（PaperBrokerAdapter 内存状态机）；
-- [ ] 将人工导入和 Adapter 回报统一写入 FillService；
-- [ ] 实现 API 订单状态机；
-- [ ] 保留人工模式作为应急通道。
+- [x] 将人工导入和 Adapter 回报统一写入 FillService（`quart/broker/sync.py`，与 record_fill 同一管线）；
+- [x] 实现 API 订单状态机（`paper_trade_action`：计划→订单→成交→回报入账全链路，仅 APPROVED 可执行）；
+- [x] 保留人工模式作为应急通道（记录成交/CSV/XLSX 导入与 PAPER_BROKER 并存，来源可区分）；
+- [ ] 具体券商 SDK 接入（需券商权限/联调环境，按规划稳定运行后再设计）。
 
 验收：接入具体券商时不修改策略、组合、风控和账户核心模型。
 

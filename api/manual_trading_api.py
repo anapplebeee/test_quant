@@ -369,6 +369,81 @@ def reconcile_action(snapshot_json: str, confirm: bool = False, resolution: str 
         return f"❌ 对账失败：{exc}", pd.DataFrame()
 
 
+def paper_trade_action(
+    choice: str | None,
+    execution_date: str | None = None,
+    slippage_bps: float = 10.0,
+    full_only: bool = False,
+) -> str:
+    """Paper Broker 模拟执行：把已审批计划的订单提交给模拟券商并回填账本。
+
+    阶段 F 联调闭环（MANUAL_TRADING_T1_SYNC_PLAN.md）：
+    计划 → BrokerOrderRequest → PaperBroker 状态机 → BrokerFill 回报 →
+    `sync_broker_fills` 统一写入账本（与人工录入同一入账管线）。
+    用于在接真实券商前验证"订单状态机 + 回报入账 + 计划状态推进"全链路。
+    """
+    try:
+        plan_id = _required_plan_id(choice)
+        repo = repository()
+        detail = repo.plan_detail(plan_id)
+        if detail is None:
+            return f"❌ 计划不存在：`{plan_id}`"
+        plan = detail["plan"]
+        if plan["status"] != "APPROVED":
+            return f"❌ 仅 APPROVED 计划可执行（当前 `{plan['status']}`）"
+
+        from quart.broker.models import BrokerOrderRequest
+        from quart.broker.paper import PaperBrokerAdapter
+        from quart.broker.sync import sync_broker_fills
+
+        account_id = plan["account_id"]
+        trade_date = _date_text(execution_date or plan["intended_trade_date"])
+        slip = float(slippage_bps) / 10_000.0
+        adapter = PaperBrokerAdapter()
+        broker_orders = []
+        for order in detail["orders"]:
+            quantity = int(order["approved_quantity"] or order["strategy_quantity"])
+            if order["status"] in ("COMPLETED", "CANCELED", "EXPIRED") or quantity <= 0:
+                continue
+            request = BrokerOrderRequest(
+                symbol=order["symbol"],
+                side=order["side"],
+                quantity=quantity,
+                client_order_id=f"{plan_id}:{order['planned_order_id']}",
+                planned_order_id=int(order["planned_order_id"]),
+            )
+            submitted = adapter.submit_order(request)
+            # 模拟 T+1 成交：参考价 ± 不利方向滑点（与回测口径一致）
+            ref = float(order["reference_price"] or 0.0)
+            if ref <= 0:
+                return f"❌ 订单 {order['planned_order_id']} 缺少参考价，无法模拟成交"
+            exec_price = ref * (1 + slip) if order["side"] == BUY else ref * (1 - slip)
+            adapter.apply_fill(
+                submitted.broker_order_id,
+                quantity,
+                round(exec_price, 4),
+                trade_date=trade_date,
+                broker_fill_id=f"{plan_id}_f{order['planned_order_id']}",
+            )
+            broker_orders.append(submitted)
+
+        fills = adapter.list_fills()
+        if not fills:
+            return "⚠️ 计划中没有可执行订单（可能已全部成交/取消）"
+
+        fill_ids = sync_broker_fills(repo, account_id, fills, source="PAPER_BROKER")
+        final_status = repo.plan_detail(plan_id)["plan"]["status"]
+        total_amount = sum(f.quantity * f.price for f in fills)
+        return (
+            f"✅ Paper Broker 模拟执行完成：{len(fills)} 笔成交回填账本\n"
+            f"fill_ids={fill_ids}\n"
+            f"成交额 {total_amount:,.2f}（含估算费用），计划状态 → `{final_status}`\n"
+            f"*这是联调用模拟成交，非真实下单；人工模式（记录成交/导入 CSV）不受影响。*"
+        )
+    except Exception as exc:
+        return f"❌ Paper Broker 执行失败：{exc}"
+
+
 def execution_view(choice: str | None) -> tuple[str, pd.DataFrame]:
     plan_id = plan_id_from_choice(choice)
     if not plan_id:
@@ -467,6 +542,7 @@ __all__ = [
     "initialize_account_action",
     "latest_prices",
     "manual_settings",
+    "paper_trade_action",
     "plan_id_from_choice",
     "plan_view",
     "plans_view",

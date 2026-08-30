@@ -15,6 +15,7 @@ from api.manual_trading_api import (
     fills_view,
     import_fills_action,
     initialize_account_action,
+    paper_trade_action,
     plan_view,
     plans_view,
     reconcile_action,
@@ -244,6 +245,22 @@ def render() -> None:
                 outputs=[execution_summary, execution_table],
             )
 
+        with gr.Accordion("🧪 Paper Broker 模拟执行（券商 API 联调）", open=False):
+            gr.Markdown(
+                "> 把已审批计划的订单提交给内存模拟券商（PaperBroker），按参考价±滑点模拟成交，"
+                "再把成交回报**统一写入交易账本**（与人工录入同一入账管线，来源 `PAPER_BROKER`）。"
+                "用于验证订单状态机与回报入账链路；接真实券商时仅替换 Adapter，不动账本。"
+            )
+            with gr.Row():
+                paper_exec_date = gr.Textbox(label="模拟成交日期", value=today)
+                paper_slip = gr.Number(label="不利滑点(bps)", value=10.0)
+                paper_button = gr.Button("🚀 模拟执行所选计划", variant="secondary")
+            paper_status = gr.Markdown()
+            paper_evt = paper_button.click(
+                paper_trade_action,
+                inputs=[plan_selector, paper_exec_date, paper_slip],
+                outputs=[paper_status],
+            )
         # ===== 计划面板级联刷新：所有组件创建后统一追加 =====
         # 背景（2026-08-31 体验审查）：审批/取消/调减/成交/对账改变计划与账本状态后，
         # 列表、详情、复盘、账户面板需要同步刷新，否则用户以为操作未生效。
@@ -253,7 +270,7 @@ def render() -> None:
             plans_table, plan_selector, plan_summary, orders_table,
             execution_summary, execution_table,
         ]
-        for evt in (adjust_evt, approve_evt, cancel_evt, fill_evt, import_evt, reconcile_evt):
+        for evt in (adjust_evt, approve_evt, cancel_evt, fill_evt, import_evt, reconcile_evt, paper_evt):
             evt.then(
                 _refresh_plan_bundle,
                 inputs=[plan_selector, account_date],

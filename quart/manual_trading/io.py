@@ -125,6 +125,41 @@ def import_broker_csv(
         normalized_path.unlink(missing_ok=True)
 
 
+def import_broker_fill_file(
+    repository: TradingRepository,
+    account_id: int,
+    path: Path | str,
+    estimate_missing_fees: bool = True,
+) -> list[int]:
+    """按扩展名自动分流导入券商成交文件（CSV / XLSX）。
+
+    与 CSV 共用同一列名归一化（`COLUMN_ALIASES`）与入账管线。
+    """
+    from quart.manual_trading.broker_profiles import convert_broker_xlsx
+
+    source = Path(path)
+    suffix = source.suffix.lower()
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", suffix="_broker_normalized.csv", delete=False
+    ) as handle:
+        normalized_path = Path(handle.name)
+    try:
+        if suffix == ".xlsx":
+            convert_broker_xlsx(source, normalized_path)
+        elif suffix in (".csv", ".txt", ".tsv"):
+            convert_broker_csv(source, normalized_path)
+        else:
+            raise ValueError(f"不支持的成交文件类型: {suffix or '(无扩展名)'}")
+        return import_fills_csv(
+            repository,
+            account_id,
+            normalized_path,
+            estimate_missing_fees=estimate_missing_fees,
+        )
+    finally:
+        normalized_path.unlink(missing_ok=True)
+
+
 def export_plan_csv(repository: TradingRepository, plan_id: str, path: Path | str) -> Path:
     """导出券商客户端可人工参考的委托 CSV，不包含自动报单指令。"""
     detail = repository.plan_detail(plan_id)
@@ -228,6 +263,7 @@ def _normalize_symbol(value: str) -> str:
 __all__ = [
     "export_plan_csv",
     "import_broker_csv",
+    "import_broker_fill_file",
     "import_fills_csv",
     "load_snapshot_json",
     "write_fill_template",
