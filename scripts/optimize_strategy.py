@@ -89,6 +89,12 @@ def main() -> None:
         ("A7 反转叠加 rev0.3", {"rev_weight": 0.3}, None),
         ("A8 宽迟滞带 band0.05", {"regime_band": 0.05}, None),
         ("A9 零成本(A0 同参)", {}, zero_fees),
+        # B 系列：A 轮优胜项组合
+        ("B1 top50+60d+择时", {"top_k": 50, "rebalance_days": 60}, None),
+        ("B2 top50+60d+buf.5+rev0.3", {"top_k": 50, "rebalance_days": 60, "rev_weight": 0.3}, None),
+        ("B3 top50+45d+rev0.3", {"top_k": 50, "rev_weight": 0.3}, None),
+        ("B4 top50+60d+rev0.5", {"top_k": 50, "rebalance_days": 60, "rev_weight": 0.5}, None),
+        ("B5 零成本(B2 同参)", {"top_k": 50, "rebalance_days": 60, "rev_weight": 0.3}, zero_fees),
     ]
 
     rows: list[dict] = []
