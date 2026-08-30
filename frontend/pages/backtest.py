@@ -259,7 +259,7 @@ def render():
                     value=_strategy_defaults(STRATEGY_CHOICES[0])["top_k"], precision=0,
                 )
                 start_in = gr.Textbox(label="起始日期", value="2020-01-01")
-            run_btn = gr.Button("🚀 运行回测", variant="primary")
+            run_btn = gr.Button("🚀 运行回测", variant="primary", size="lg")
             run_out = gr.Markdown()
 
             def _on_strategy_change(name: str):
@@ -299,7 +299,7 @@ def render():
                     info="留空 = 固定参数前推，只检验稳健性",
                 )
                 wfa_anchored = gr.Checkbox(label="锚定窗口（train 逐折变长）", value=False)
-            wfa_run_btn = gr.Button("🔁 运行 Walk-Forward", variant="primary")
+            wfa_run_btn = gr.Button("🔁 运行 Walk-Forward", variant="primary", size="lg")
             wfa_run_out = gr.Markdown()
             wfa_run_btn.click(
                 _run_wfa,
@@ -309,8 +309,6 @@ def render():
             )
 
         # ---- Walk-Forward 过拟合诊断 + 制品追溯 ----
-        # 放在回测列表之前：这两个面板不依赖 reports/，即使从未跑过回测也能用，
-        # 且提前 return 会跳过它们。
         render_wfa_panel()
         render_artifacts_panel()
 
@@ -327,6 +325,7 @@ def render():
                 label="选择回测", choices=backtest_names, value=default_name,
                 filterable=True,
             )
+            refresh_btn = gr.Button("🔄 刷新列表", size="sm")
 
         def _refresh_list():
             """重建回测列表并加载最新一个（新回测跑完后可刷新发现）"""
@@ -347,14 +346,12 @@ def render():
             inputs=[selected_bt],
             outputs=[summary_md, equity_plot, dd_plot, trades_table],
         )
-
-        refresh_btn = gr.Button("🔄 刷新回测列表", size="sm")
         refresh_btn.click(
             _refresh_list,
             outputs=[selected_bt, summary_md, equity_plot, dd_plot, trades_table],
         )
 
-        # ---- 参数扫描结果浏览器：reports/sweep_*.csv（数据关联前端化）----
+        # ---- 参数扫描结果浏览器 ----
         with gr.Accordion("🧪 参数扫描结果（reports/sweep_*.csv，按 CAGR 排序）", open=False):
             sweep_files = list_sweeps()
             if sweep_files:
@@ -372,7 +369,7 @@ def render():
             else:
                 gr.Markdown("*暂无扫描结果，运行 scripts/sweep.py 后刷新*")
 
-        # ---- 研究报告浏览器：reports/*.md（新验证结论的入口）----
+        # ---- 研究报告浏览器 ----
         with gr.Accordion("📚 研究报告（引擎终审/退市回填/调仓周期/缓冲带等验证结论）", open=False):
             report_files = list_research_reports()
             if report_files:

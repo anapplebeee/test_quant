@@ -5,7 +5,7 @@ import gradio as gr
 import plotly.express as px
 
 from api.data_api import get_index_coverage, get_stock_stats, get_universe, get_stock_list, get_stock_data
-from frontend.theme import metric_card, page_header
+from frontend.theme import metric_card, page_header, info_card
 
 
 def _board_text(stats: dict) -> str:
@@ -20,7 +20,6 @@ def render():
         gr.HTML(page_header("🗃️ 数据总览", "股票池状态 / 数据覆盖 / 市场概览"))
 
         stats = get_stock_stats()
-        # 指标卡与股票池表改为组件 + 定时/手动刷新（修复：新数据落库后页面停在启动时快照）
         with gr.Row():
             m1 = gr.HTML(metric_card("股票数量", f"{stats['stock_count']:,}", "blue"))
             m2 = gr.HTML(metric_card("股票池快照", str(stats['universe_count']), "green"))
@@ -45,74 +44,72 @@ def render():
         gr.Timer(60).tick(_refresh_overview, outputs=[m1, m2, m3, m4, board_md, universe_df])
 
         gr.Markdown("---")
-        gr.Markdown("### 📊 指数覆盖（按板块分类）")
-        gr.Markdown(
-            "*口径说明：**指数数量 = 已覆盖指数个数**（与股票数量的「唯一代码数」口径一致）；"
-            f"实际指数日线文件 {stats.get('index_file_count', '-')} 个（按年分区，上证指数历史可回溯至 1990 年）。"
-            "⬜ 未拉取时可在 🧰 操作中心运行「更新常用指数」批量补齐。*"
-        )
-        coverage = get_index_coverage()
-        gr.Dataframe(value=coverage, interactive=False, max_height=320)
+
+        with gr.Accordion("📊 指数覆盖（按板块分类）", open=False):
+            gr.Markdown(
+                "*口径说明：**指数数量 = 已覆盖指数个数**（与股票数量的「唯一代码数」口径一致）；"
+                f"实际指数日线文件 {stats.get('index_file_count', '-')} 个（按年分区，上证指数历史可回溯至 1990 年）。"
+                "⬜ 未拉取时可在 🧰 操作中心运行「更新常用指数」批量补齐。*"
+            )
+            coverage = get_index_coverage()
+            gr.Dataframe(value=coverage, interactive=False, max_height=320)
 
         gr.Markdown("---")
-        gr.Markdown("### 📈 股票日线数据")
-        
-        stock_list = get_stock_list()
-        # 默认标的 000001 必须落在 choices 内，否则 Gradio 报
-        # "value not in list of choices" 警告；allow_custom_value 允许用户检索前100只之外的任意标的
-        default_symbol = "000001"
-        top100 = stock_list[:100]
-        if default_symbol in stock_list and default_symbol not in top100:
-            dropdown_choices = [default_symbol] + top100
-        else:
-            dropdown_choices = top100
-        stock_selector = gr.Dropdown(
-            label="选择股票",
-            choices=dropdown_choices,  # 显示前100只（必要时前置默认标的）
-            value=default_symbol,
-            allow_custom_value=True,
-            interactive=True,
-        )
-        
-        stock_info = gr.Markdown()
-        stock_plot = gr.Plot()
-        
-        def update_stock_chart(symbol):
-            df = get_stock_data(symbol)
-            if df is None or df.empty:
-                return f"未找到 {symbol} 的数据", None
-            
-            name_map = {}
-            try:
-                from common import load_stock_names
-                name_map = load_stock_names()
-            except Exception:
-                pass
-            
-            stock_name = name_map.get(symbol, "")
-            display_name = f"{symbol} {stock_name}" if stock_name else symbol
-            
-            info = f"**{display_name}** | 起始: {df['date'].iloc[0]} | 结束: {df['date'].iloc[-1]} | 交易日: {len(df):,}"
-            
-            fig = px.line(df, x="date", y="close",
-                         labels={"close": "收盘价", "date": "日期"})
-            fig.update_layout(
-                title=f"{display_name} 价格走势",
-                height=400,
-                margin=dict(l=0, r=0, t=40, b=0),
-                xaxis_title="日期",
-                yaxis_title="收盘价",
-                template="plotly_white",
+
+        with gr.Accordion("📈 股票日线数据", open=True):
+            stock_list = get_stock_list()
+            default_symbol = "000001"
+            top100 = stock_list[:100]
+            if default_symbol in stock_list and default_symbol not in top100:
+                dropdown_choices = [default_symbol] + top100
+            else:
+                dropdown_choices = top100
+            stock_selector = gr.Dropdown(
+                label="选择股票",
+                choices=dropdown_choices,
+                value=default_symbol,
+                allow_custom_value=True,
+                interactive=True,
             )
-            return info, fig
-        
-        stock_selector.change(
-            fn=update_stock_chart,
-            inputs=[stock_selector],
-            outputs=[stock_info, stock_plot],
-        )
-        
-        # 初始加载
-        init_info, init_plot = update_stock_chart("000001")
-        stock_info.value = init_info
-        stock_plot.value = init_plot
+
+            stock_info = gr.Markdown()
+            stock_plot = gr.Plot()
+
+            def update_stock_chart(symbol):
+                df = get_stock_data(symbol)
+                if df is None or df.empty:
+                    return f"未找到 {symbol} 的数据", None
+
+                name_map = {}
+                try:
+                    from common import load_stock_names
+                    name_map = load_stock_names()
+                except Exception:
+                    pass
+
+                stock_name = name_map.get(symbol, "")
+                display_name = f"{symbol} {stock_name}" if stock_name else symbol
+
+                info = f"**{display_name}** | 起始: {df['date'].iloc[0]} | 结束: {df['date'].iloc[-1]} | 交易日: {len(df):,}"
+
+                fig = px.line(df, x="date", y="close",
+                             labels={"close": "收盘价", "date": "日期"})
+                fig.update_layout(
+                    title=f"{display_name} 价格走势",
+                    height=400,
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    xaxis_title="日期",
+                    yaxis_title="收盘价",
+                    template="plotly_white",
+                )
+                return info, fig
+
+            stock_selector.change(
+                fn=update_stock_chart,
+                inputs=[stock_selector],
+                outputs=[stock_info, stock_plot],
+            )
+
+            init_info, init_plot = update_stock_chart("000001")
+            stock_info.value = init_info
+            stock_plot.value = init_plot

@@ -180,7 +180,7 @@ def render():
             info=" | ".join(f"{k}={v['label']}" for k, v in STRATEGY_META.items()),
         )
 
-        # ===== 策略准入状态（research/candidate/admitted 与 live_allowlist 对齐） =====
+        # ===== 策略准入状态 =====
         gr.Markdown("### 🎯 策略准入状态")
         gr.Markdown(
             "> **准入** = 允许生成正式 T+1 实盘信号（`strategy.live_allowlist`）；"
@@ -207,18 +207,17 @@ def render():
             max_height=300,
         )
 
-        task_status_bar = gr.Textbox(label="执行状态", interactive=False)
-        queue_status = gr.Textbox(label="📋 任务队列", lines=8, interactive=False,
-                                  value=task_queue.get_status_summary())
-        task_output = gr.Textbox(label="最新任务输出（日志）", lines=12, interactive=False)
-        task_artifacts = gr.Markdown(value="*任务完成后此处显示产出文件清单和结果位置*",
-                                     label="📦 任务产出")
-
-        # ===== 取消运行中任务 =====
         with gr.Row():
+            task_status_bar = gr.Textbox(label="执行状态", interactive=False)
             cancel_select = gr.Dropdown(label="选择要取消的任务实例",
                                         choices=[], interactive=True)
-            btn_cancel = gr.Button("⛔ 取消所选任务", variant="stop", size="sm")
+            btn_cancel = gr.Button("⛔ 取消任务", variant="stop", size="sm")
+
+        queue_status = gr.Textbox(label="📋 任务队列", lines=6, interactive=False,
+                                  value=task_queue.get_status_summary())
+        task_output = gr.Textbox(label="最新任务输出（日志）", lines=10, interactive=False)
+        task_artifacts = gr.Markdown(value="*任务完成后此处显示产出文件清单和结果位置*",
+                                     label="📦 任务产出")
 
         def _active_choices():
             return [
@@ -251,7 +250,7 @@ def render():
                          outputs=[task_output, queue_status, task_status_bar, task_artifacts])
         btn_status.click(on_refresh_status, outputs=[queue_status])
 
-        # 自动刷新队列状态 + 跟随最新任务日志（每3秒，修复任务跑完日志区停在旧输出）
+        # 自动刷新队列状态 + 跟随最新任务日志（每3秒）
         timer = gr.Timer(3)
         timer.tick(on_refresh_status, outputs=[queue_status])
         timer.tick(
@@ -265,48 +264,48 @@ def render():
         gr.Markdown("---")
 
         # ===== 调仓日历 =====
-        gr.Markdown("### 📅 调仓日历")
-        try:
-            import yaml
-            with open("config/settings.yaml", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f)
-            rebalance_days = cfg.get("strategy", {}).get("rebalance_days", 5)
-        except Exception:
-            rebalance_days = 5
+        with gr.Accordion("📅 调仓日历", open=True):
+            try:
+                import yaml
+                with open("config/settings.yaml", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f)
+                rebalance_days = cfg.get("strategy", {}).get("rebalance_days", 5)
+            except Exception:
+                rebalance_days = 5
 
-        today = datetime.now().date()
-        next_reb = today
-        added = 0
-        while added < rebalance_days:
-            next_reb += timedelta(days=1)
-            if next_reb.weekday() < 5:
-                added += 1
+            today = datetime.now().date()
+            next_reb = today
+            added = 0
+            while added < rebalance_days:
+                next_reb += timedelta(days=1)
+                if next_reb.weekday() < 5:
+                    added += 1
 
-        with gr.Row():
-            gr.HTML(metric_card("调仓周期", f"{rebalance_days} 交易日", "blue"))
-            gr.HTML(metric_card("下次调仓", next_reb.strftime("%Y-%m-%d"), "green"))
-            gr.HTML(metric_card("倒计时", f"{(next_reb - today).days} 天", "orange"))
+            with gr.Row():
+                gr.HTML(metric_card("调仓周期", f"{rebalance_days} 交易日", "blue"))
+                gr.HTML(metric_card("下次调仓", next_reb.strftime("%Y-%m-%d"), "green"))
+                gr.HTML(metric_card("倒计时", f"{(next_reb - today).days} 天", "orange"))
 
         gr.Markdown("---")
 
         # ===== 持仓分析 =====
-        gr.Markdown("### 💰 当前持仓分析")
-        pos_df, summary = _get_holdings_data()
+        with gr.Accordion("💰 当前持仓分析", open=True):
+            pos_df, summary = _get_holdings_data()
 
-        if summary:
-            with gr.Row():
-                gr.HTML(metric_card("现金", f"{summary['cash']:,.0f} CNY", "green"))
-                gr.HTML(metric_card("持仓市值", f"{summary['equity']:,.0f} CNY", "blue"))
-                gr.HTML(metric_card("账户总值", f"{summary['total']:,.0f} CNY", "purple"))
-            gr.Dataframe(value=pos_df, interactive=False)
+            if summary:
+                with gr.Row():
+                    gr.HTML(metric_card("现金", f"{summary['cash']:,.0f} CNY", "green"))
+                    gr.HTML(metric_card("持仓市值", f"{summary['equity']:,.0f} CNY", "blue"))
+                    gr.HTML(metric_card("账户总值", f"{summary['total']:,.0f} CNY", "purple"))
+                gr.Dataframe(value=pos_df, interactive=False)
 
-            gr.Markdown("### 🛡️ 风控规则")
-            gr.Markdown("""
-            | 参数 | 当前值 | 含义 |
-            |------|--------|------|
-            | `max_position_pct` | 25% | 单只股票最大持仓权重 |
-            | `max_daily_loss_pct` | 5% | 单日最大亏损（触发止损） |
-            | `min_avg_amount` | 5000万 | 最低日均成交额（流动性门槛） |
-            """)
-        else:
-            gr.Info("当前无持仓")
+                gr.Markdown("### 🛡️ 风控规则")
+                gr.Markdown("""
+                | 参数 | 当前值 | 含义 |
+                |------|--------|------|
+                | `max_position_pct` | 25% | 单只股票最大持仓权重 |
+                | `max_daily_loss_pct` | 5% | 单日最大亏损（触发止损） |
+                | `min_avg_amount` | 5000万 | 最低日均成交额（流动性门槛） |
+                """)
+            else:
+                gr.Info("当前无持仓")
