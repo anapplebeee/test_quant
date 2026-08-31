@@ -25,6 +25,33 @@ def test_slippage_direction():
     assert fees.sell_price(100.0) < 100.0
 
 
+def test_fee_scale_applies_to_all_cost_components():
+    fees = Fees(
+        commission_rate=0.00025,
+        commission_min=5.0,
+        stamp_tax_rate=0.0005,
+        transfer_fee_rate=0.00001,
+        slippage_rate=0.001,
+        impact_coef=0.1,
+    ).scaled(2)
+
+    assert fees == Fees(
+        commission_rate=0.0005,
+        commission_min=10.0,
+        stamp_tax_rate=0.001,
+        transfer_fee_rate=0.00002,
+        slippage_rate=0.002,
+        impact_coef=0.2,
+    )
+
+
+def test_fee_scale_rejects_negative_multiplier():
+    import pytest
+
+    with pytest.raises(ValueError, match="non-negative"):
+        Fees().scaled(-1)
+
+
 def test_max_drawdown_known_series():
     eq = pd.Series([100.0, 110.0, 90.0, 100.0])
     mdd, trough = max_drawdown(eq)

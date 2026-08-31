@@ -100,3 +100,36 @@ def test_describe_reports_missing_history(tmp_path, monkeypatch):
     msg = describe("000300")
     assert "前视偏差" in msg
     assert load_history("000300") is None
+
+
+def test_filter_for_pit_universe_applies_membership_per_date(monkeypatch):
+    from quart.data import universe
+
+    dates = pd.date_range("2020-01-01", periods=3, freq="D")
+    bars = pd.DataFrame({
+        "date": dates.repeat(2), "symbol": ["1", "2"] * 3,
+        "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 1.0,
+    })
+    hist = pd.DataFrame({
+        "symbol": ["000001", "000002"],
+        "in_date": [dates[0], dates[1]], "out_date": [dates[0], dates[2]],
+    })
+    monkeypatch.setattr("quart.data.universe_history.load_history", lambda index: hist)
+    out = universe.filter_for_pit_universe(bars, "TEST")
+    assert list(out[["date", "symbol"]].itertuples(index=False, name=None)) == [
+        (dates[0], "1"), (dates[1], "2"), (dates[2], "2"),
+    ]
+
+
+def test_filter_for_pit_universe_blocks_missing_coverage(monkeypatch):
+    from quart.data import universe
+
+    dates = pd.date_range("2020-01-01", periods=2, freq="D")
+    bars = pd.DataFrame({
+        "date": dates, "symbol": ["1", "1"], "open": 1.0,
+        "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+    })
+    hist = pd.DataFrame({"symbol": ["000001"], "in_date": [dates[0]], "out_date": [dates[0]]})
+    monkeypatch.setattr("quart.data.universe_history.load_history", lambda index: hist)
+    with pytest.raises(RuntimeError, match="未覆盖"):
+        universe.filter_for_pit_universe(bars, "TEST")

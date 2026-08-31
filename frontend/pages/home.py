@@ -1,20 +1,31 @@
-"""首页页面：可选择查看的回测结果 + 区间窗口指标 + 策略库/最新验证结果。"""
+"""首页页面：交易日工作台 + 回测结果查看。
+
+工作台风格：
+- 顶部：当前日期 / 交易日状态 / 数据新鲜度 / 下一交易日倒计时
+- 中部：账户概览快捷区 + 最新回测指标
+- 底部：功能模块导航
+"""
 from __future__ import annotations
+
+from datetime import date, timedelta
 
 import gradio as gr
 import pandas as pd
 
-from api.backtest_api import get_backtest_list, get_backtest_summary, get_window_stats
+import data_bus
+from api.backtest_api import get_backtest_summary, get_window_stats, scan_summaries
+from api.manual_trading_api import account_view, manual_settings, latest_prices
 from api.research_api import latest_sweep_headlines
-from api.strategy_api import strategy_catalog
-from frontend.theme import metric_card, page_header, info_card
+from api.strategy_api import strategy_catalog, live_allowlist
+from common import load_stock_names
+from frontend.theme import metric_card, page_header, info_card, status_badge
 
 
 def _fmt_pct(v, digits: int = 1) -> str:
     """统一百分比格式：+12.3% / -4.5%；None/NaN → '-'"""
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return "-"
-    return f"{v * 100:+.{digits}f}%"
+    return f"{v*100:+.{digits}f}%"
 
 
 def _fmt_num(v, digits: int = 2) -> str:
@@ -28,6 +39,100 @@ def _color_by_sign(v) -> str:
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return "gray"
     return "red" if v > 0 else ("green" if v < 0 else "gray")
+
+
+def _today_status_card() -> str:
+    """生成顶部工作台状态卡：日期、交易日状态、数据新鲜度、账户。"""
+    today = date.today()
+    weekday_cn = ["周二", "周三", "周四", "周五", "周六", "周日", "周一"]
+    wd_label = weekday_cn[today.weekday()]
+    date_str = today.strftime("%Y-%m-%d")
+
+    # 是否为交易日（工作日即视为交易日，精确判断需交易日库）
+    is_weekday = today.weekday() < 5
+
+    # 数据新鲜度
+    stale_text = "-"
+    stale_color = "gray"
+    try:
+        from quart.data.store import BarStore
+        store = BarStore()
+        days = store.freshness_days()
+        if days is None:
+            stale_text = "无数据"
+            stale_color = "red"
+        elif days <= 1:
+            stale_text = f"最新 ({days}天)"
+            stale_color = "green"
+        elif days <= 5:
+            stale_text = f"滞后 {days} 天"
+            stale_color = "orange"
+        else:
+            stale_text = f"过期 {days} 天"
+            stale_color = "red"
+    except Exception:
+        stale_text = "无法检测"
+
+    # 下一交易日
+    next_td_text = "-"
+    countdown_text = "-"
+    try:
+        from quart.manual_trading.repository import next_trade_date
+        nxt = next_trade_date(today)
+        nxt_date = date.fromisoformat(nxt)
+        next_td_text = nxt
+        countdown_text = str((nxt_date - today).days) + " 天"
+    except Exception:
+        pass
+
+    # 账户快照
+    cash_text = "-"
+    total_text = "-"
+    try:
+        summary, _ = account_view(today.isoformat())
+        # 从 markdown 摘要里提取数字比较麻烦，直接调用一次
+        _, account_name = manual_settings()
+        from api.manual_trading_api import repository
+        repo = repository()
+        state = repo.account_state(account_name, today.isoformat())
+        if state:
+            cash_text = f"{state.cash_total:,.0f}"
+            total_text = f"{state.cash_total + sum(pos.total_quantity * latest_prices(list(state.positions)).get(pos.symbol, 0) for pos in state.positions.values()):,.0f}"
+    except Exception:
+        pass
+
+    trade_badge = status_badge("active") if is_weekday else status_badge("inactive")
+
+    return f"""
+    <div style="background: linear-gradient(135deg, #ffffff 0%, #f0f4ff 100%);
+                border-radius: 16px; padding: 1.5rem; margin-bottom: 1.5rem;
+                color: #1a2332; box-shadow: 0 4px 20px rgba(0,0,0,0.06); border: 1px solid #e2e8f0;">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem;">
+            <div style="text-align: center;">
+                <div style="font-size: 0.95rem; color: #64748b; font-weight: 500;">今天</div>
+                <div style="font-size: 1.5rem; font-weight: 700; letter-spacing: 0.5px; color: #1e293b;">{date_str} {wd_label}</div>
+                <div style="margin-top: 0.3rem;">{trade_badge}</div>
+            </div>
+            <div style="text-align: center;">
+                <div style="font-size: 0.95rem; color: #64748b; font-weight: 500;">数据新鲜度</div>
+                <div style="font-size: 1.4rem; font-weight: 700; color: {'#15803d' if stale_color=='green' else '#c2410c' if stale_color=='orange' else '#dc2626' if stale_color=='red' else '#64748b'};">{stale_text}</div>
+            </div>
+            <div style="text-align: center;">
+                <div style="font-size: 0.95rem; color: #64748b; font-weight: 500;">下一交易日</div>
+                <div style="font-size: 1.4rem; font-weight: 700; letter-spacing: 0.5px; color: #1e293b;">{next_td_text}</div>
+                <div style="font-size: 0.9rem; color: #94a3b8;">{countdown_text}</div>
+            </div>
+            <div style="text-align: center;">
+                <div style="font-size: 0.95rem; color: #64748b; font-weight: 500;">账户现金 (CNY)</div>
+                <div style="font-size: 1.4rem; font-weight: 700; letter-spacing: 0.5px; color: #1e293b;">{cash_text}</div>
+            </div>
+            <div style="text-align: center;">
+                <div style="font-size: 0.95rem; color: #64748b; font-weight: 500;">总资产 (CNY)</div>
+                <div style="font-size: 1.4rem; font-weight: 700; letter-spacing: 0.5px; color: #1e293b;">{total_text}</div>
+            </div>
+        </div>
+    </div>
+    """
 
 
 def _summary_html(name: str | None) -> str:
@@ -105,7 +210,6 @@ def _summary_html(name: str | None) -> str:
                 metric_card("年化收益", _fmt_pct(s.get("cagr")), _color_by_sign(s.get("cagr"))),
                 metric_card("夏普比率", _fmt_num(s.get("sharpe")), "purple"),
                 metric_card("年化波动", _fmt_pct(s.get("annual_vol")), "gray"),
-                # 持仓日胜率：剔除空仓/零收益日，避免对含择时策略的系统性低估
                 metric_card("日胜率(持仓)", _fmt_pct(s.get("invested_win_rate", s.get("daily_win_rate"))), "teal"),
             ],
         ),
@@ -114,43 +218,106 @@ def _summary_html(name: str | None) -> str:
     parts = [info_html]
     for title, cards in rows:
         parts.append(f'<div style="margin: 1rem 0 0.5rem 0; font-weight: 600; color: #333;">{title}</div>')
-        parts.append("<div style='display:flex; gap:12px; flex-wrap:wrap'>" + "".join(cards) + "</div>")
+        parts.append('<div class=\"metric-grid\">' + "".join(cards) + "</div>")
     return "\n".join(parts)
 
 
-def render():
-    """渲染首页 Tab"""
-    with gr.Tab("🏠 首页"):
-        gr.HTML(page_header("📊 Quart 量化研究平台", "A-share 量化策略研究 · 因子挖掘 · 回测分析 · 风险管理"))
+def _sweep_table() -> pd.DataFrame:
+    """最新验证结果表（格式化后的 DataFrame；无数据时返回空表）"""
+    heads = latest_sweep_headlines()
+    if heads is None or heads.empty:
+        return pd.DataFrame()
+    show = heads.copy()
+    for c in ("CAGR", "最大回撤"):
+        if c in show.columns:
+            show[c] = show[c].map(_fmt_pct)
+    if "夏普" in show.columns:
+        show["夏普"] = show["夏普"].map(lambda v: _fmt_num(v))
+    if "换手x" in show.columns:
+        show["换手x"] = show["换手x"].map(lambda v: "-" if pd.isna(v) else f"{v:.1f}x")
+    return show
 
-        names = get_backtest_list()
-        default = names[-1] if names else None
-        
-        with gr.Accordion("📌 回测结果查看（可选择任意一次回测，默认最新）", open=True):
-            result_dd = gr.Dropdown(
-                label="选择要查看的回测结果",
-                choices=names,
-                value=default,
-                filterable=True,
+
+def render():
+    """渲染首页 Tab（交易日工作台）"""
+    with gr.Tab("🏠 首页"):
+        # ===== 工作台状态区 =====
+        status_html = gr.HTML(value=_today_status_card())
+
+        # ===== 回测结果查看：搜索 + 筛选 + 表格选择（与回测中心同源）=====
+        full_df = scan_summaries()
+        if full_df.empty:
+            gr.Info("暂无回测结果")
+            return
+
+        default_name = full_df["name"].iloc[0]
+        home_df_state = gr.State(full_df)
+        home_filtered_state = gr.State(full_df)
+
+        # ---- 辅助函数（必须在组件前定义，否则 Gradio build 阶段找不到）----
+        def _home_fmt(df: pd.DataFrame) -> pd.DataFrame:
+            df = df.copy()
+            for col in ("CAGR", "最大回撤", "波动"):
+                df[col] = df[col].apply(lambda v: f"{v*100:.2f}%" if pd.notna(v) else "")
+            for col in ("夏普", "卡玛"):
+                df[col] = df[col].apply(lambda v: f"{v:.2f}" if pd.notna(v) else "")
+            keep = ["label", "run_date", "区间", "CAGR", "夏普", "最大回撤", "波动", "卡玛", "name"]
+            return df[[c for c in keep if c in df.columns]]
+
+        def _home_filter(kw: str, st: str, full: pd.DataFrame):
+            f = full.copy()
+            if st and st != "全部":
+                f = f[f["strategy"] == st]
+            if kw:
+                kw = kw.lower()
+                mask = (
+                    f["label"].str.lower().str.contains(kw, na=False)
+                    | f["区间"].str.lower().str.contains(kw, na=False)
+                )
+                f = f[mask]
+            f = f.reset_index(drop=True)
+            return _home_fmt(f), f
+
+        def _home_select(evt: gr.SelectData, fdf: pd.DataFrame):
+            if evt.index is None:
+                return gr.update()
+            idx = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+            try:
+                name = str(fdf["name"].iloc[idx])
+            except Exception:
+                return "❌ 未找到匹配的回测"
+            return _summary_html(name)
+
+        summary_html = gr.HTML(value=_summary_html(default_name))
+
+        with gr.Accordion("📌 回测结果查看（搜索/筛选后点击行查看详情，默认最新）", open=True):
+            with gr.Row():
+                home_search = gr.Textbox(
+                    label="搜索（标签 / 策略 / 区间）",
+                    placeholder="输入关键字过滤…留空显示全部", scale=3,
+                )
+                home_strat = gr.Dropdown(
+                    label="策略筛选",
+                    choices=["全部"] + sorted(full_df["strategy"].unique().tolist()),
+                    value="全部",
+                )
+
+            home_table = gr.Dataframe(
+                value=_home_fmt(full_df),
+                interactive=False, max_height=300, wrap=True,
+                datatype=["str"] * len(_home_fmt(full_df).columns),
+                label="点击行查看详情（按时间倒序）",
             )
-            summary_html = gr.HTML(value=_summary_html(default))
-            result_dd.change(_summary_html, inputs=[result_dd], outputs=[summary_html])
+
+            home_search.change(_home_filter, [home_search, home_strat, home_df_state], [home_table, home_filtered_state])
+            home_strat.change(_home_filter, [home_search, home_strat, home_df_state], [home_table, home_filtered_state])
+            home_table.select(_home_select, [home_filtered_state], [summary_html])
 
         gr.Markdown("---")
 
-        # 最新验证结果：每个策略最新一次参数扫描的最优行（数据关联 reports/sweep_*.csv）
-        heads = latest_sweep_headlines()
-        if heads is not None and not heads.empty:
-            with gr.Accordion("🔬 最新验证结果（来自各策略最新参数扫描，按 CAGR 排序）", open=False):
-                show = heads.copy()
-                for c, fmt in (("CAGR", _fmt_pct), ("最大回撤", _fmt_pct)):
-                    if c in show.columns:
-                        show[c] = show[c].map(_fmt_pct)
-                if "夏普" in show.columns:
-                    show["夏普"] = show["夏普"].map(lambda v: _fmt_num(v))
-                if "换手x" in show.columns:
-                    show["换手x"] = show["换手x"].map(lambda v: "-" if pd.isna(v) else f"{v:.1f}x")
-                gr.Dataframe(value=show, interactive=False)
+        # 最新验证结果：每个策略最新一次参数扫描的最优行
+        with gr.Accordion("🔬 最新验证结果（来自各策略最新参数扫描，按 CAGR 排序）", open=False):
+            sweep_table = gr.Dataframe(value=_sweep_table(), interactive=False)
 
         with gr.Accordion("📚 策略库（由后端 REGISTRY 驱动，与回测中心/策略监控同源）", open=False):
             md_rows = ["| 策略 | 名称 | 状态 | 默认换手/持仓 | 说明 |", "|------|------|------|------|------|"]
@@ -161,58 +328,67 @@ def render():
                 )
             gr.Markdown("\n".join(md_rows))
 
-        with gr.Accordion("🧩 功能模块", open=True):
-            gr.Markdown("""
-            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem;">
-                <div class="info-card">
-                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🗃️</div>
-                    <div style="font-weight: 600; margin-bottom: 0.25rem;">数据总览</div>
-                    <div style="font-size: 0.9rem; color: #666;">股票池 / 数据覆盖 / 市场概览</div>
-                </div>
-                <div class="info-card">
-                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🔬</div>
-                    <div style="font-weight: 600; margin-bottom: 0.25rem;">因子研究</div>
-                    <div style="font-size: 0.9rem; color: #666;">IC/ICIR / 因子表现 / 选股能力</div>
-                </div>
-                <div class="info-card">
-                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📈</div>
-                    <div style="font-weight: 600; margin-bottom: 0.25rem;">回测中心</div>
-                    <div style="font-size: 0.9rem; color: #666;">净值曲线 / 完整交易记录 / 成本分解 / 参数扫描</div>
-                </div>
-                <div class="info-card">
-                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📋</div>
-                    <div style="font-weight: 600; margin-bottom: 0.25rem;">每日信号</div>
-                    <div style="font-size: 0.9rem; color: #666;">持仓建议 / 调仓信号 / ML预测</div>
-                </div>
-                <div class="info-card">
-                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📡</div>
-                    <div style="font-weight: 600; margin-bottom: 0.25rem;">策略监控</div>
-                    <div style="font-size: 0.9rem; color: #666;">任务执行 / 运行状态 / 持仓分析</div>
-                </div>
-                <div class="info-card">
-                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🧩</div>
-                    <div style="font-weight: 600; margin-bottom: 0.25rem;">归因分析</div>
-                    <div style="font-size: 0.9rem; color: #666;">Brinson归因 / 行业分布 / 收益分解</div>
-                </div>
-                <div class="info-card">
-                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🛡️</div>
-                    <div style="font-weight: 600; margin-bottom: 0.25rem;">风险管理</div>
-                    <div style="font-size: 0.9rem; color: #666;">VaR/CVaR / 集中度 / 流动性</div>
-                </div>
-                <div class="info-card">
-                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🌿</div>
-                    <div style="font-weight: 600; margin-bottom: 0.25rem;">因子生态</div>
-                    <div style="font-size: 0.9rem; color: #666;">IC衰减 / IC时序 / 拥挤度 / 预警</div>
-                </div>
-                <div class="info-card">
-                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🔍</div>
-                    <div style="font-weight: 600; margin-bottom: 0.25rem;">回测诊断</div>
-                    <div style="font-size: 0.9rem; color: #666;">Walk-Forward / 过拟合检验</div>
-                </div>
-                <div class="info-card">
-                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📖</div>
-                    <div style="font-weight: 600; margin-bottom: 0.25rem;">参数词典</div>
-                    <div style="font-size: 0.9rem; color: #666;">量化参数含义 / 计算方法</div>
-                </div>
-            </div>
-            """)
+        # ===== 跨页联动：任务完成 → 自动刷新本页数据 =====
+        seen_state = gr.State(data_bus.current())
+
+        def _poll_data_version(seen_val: int, kw: str, st: str):
+            """跨页联动：数据/回测变化时刷新表格、筛选器选项、状态卡片、扫描结果。"""
+            changed, cur = data_bus.poll(seen_val)
+            if not changed:
+                return (gr.skip(),) * 5 + (cur,)
+            new_full = scan_summaries()
+            if new_full.empty:
+                empty_fmt = _home_fmt(new_full)
+                return (
+                    _today_status_card(), empty_fmt, new_full,
+                    gr.update(choices=["全部"], value="全部"),
+                    _sweep_table(), cur,
+                )
+            new_choices = ["全部"] + sorted(new_full["strategy"].unique().tolist())
+            fmt_df, raw_df = _home_filter(kw, st, new_full)
+            return (
+                _today_status_card(),
+                fmt_df, raw_df,
+                gr.update(choices=new_choices, value=st if st in new_choices else "全部"),
+                _sweep_table(),
+                cur,
+            )
+
+        gr.Timer(5).tick(
+            _poll_data_version,
+            inputs=[seen_state, home_search, home_strat],
+            outputs=[status_html, home_table, home_filtered_state, home_strat,
+                     sweep_table, seen_state],
+        )
+
+        # ===== 功能区快捷导航 =====
+        # 用 [role=tab] 匹配标签页按钮并点击（避免硬编码下标和断链的转义）
+        def _nav(label: str, emoji: str, desc: str, tab_label: str) -> str:
+            js = (
+                "Array.from(document.querySelectorAll('[role=tab]'))"
+                ".find(function(t){return t.textContent.includes('" + tab_label + "')})"
+                "?.click();"
+            )
+            return (
+                f'<div class="info-card" style="cursor: pointer; text-align: center; padding: 0.8rem;" '
+                f'onclick="{js}">'
+                f'<div style="font-size: 1.3rem; margin-bottom: 0.25rem;">{emoji}</div>'
+                f'<div style="font-weight: 600; color: #333;">{label}</div>'
+                f'<div style="font-size: 0.8rem; color: #666;">{desc}</div></div>'
+            )
+
+        nav_entries = [
+            ("每日信号", "📋", "查看 T+1 交易计划", "每日信号"),
+            ("操作中心", "🧰", "执行回测/信号/刷新", "操作中心"),
+            ("手动交易", "💼", "账户/委托/对账", "手动交易"),
+            ("策略监控", "📡", "任务队列/持仓", "策略监控"),
+            ("因子研究", "🔬", "IC/ICIR 分析", "因子研究"),
+            ("风险管理", "🛡️", "VaR/CVaR/集中度", "风险管理"),
+        ]
+        cards = "".join(_nav(*e) for e in nav_entries)
+        gr.Markdown(f"""
+        <div style="margin-top: 1.5rem;">
+            <div style="font-weight: 600; margin-bottom: 0.5rem; color: #333;">⚡ 功能区快捷入口</div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.8rem;">{cards}</div>
+        </div>
+        """)

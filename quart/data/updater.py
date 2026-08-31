@@ -30,7 +30,14 @@ def update_universe_data(
     symbols: list[str],
     start: str = "20190101",
     max_names: int | None = None,
+    force_full: bool = False,
 ) -> dict:
+    """更新股票池与基准行情。
+
+    ``force_full`` 为显式全量刷新：忽略本地最后日期，从 ``start`` 重拉并
+    覆盖远端实际返回的年份分区。远端返回空表时保留旧数据，避免瞬时断网
+    或限流把本地有效历史清空。
+    """
     from quart.data.store import BarStore
 
     cfg = load_config()
@@ -47,7 +54,7 @@ def update_universe_data(
         try:
             adjust = "hfq" if symbol in hfq_pins else cfg["data"]["adjust"]
             first = store.first_date(symbol)
-            needs_full = first is None or (start and pd.Timestamp(start) < first)
+            needs_full = force_full or first is None or (start and pd.Timestamp(start) < first)
 
             if needs_full:
                 df = fetch_daily(symbol, start, today, adjust=adjust)
@@ -56,6 +63,8 @@ def update_universe_data(
                     empty += 1
                 else:
                     store.save(df, replace=True)
+                    if force_full:
+                        refreshed += 1
                     ok += 1
             else:
                 last = store.last_date(symbol)
@@ -88,5 +97,12 @@ def update_universe_data(
     bench_df = fetch_index_daily(index_code, start, today)
     bench_df = drop_incomplete_today(bench_df)
     if not bench_df.empty:
-        store.save(bench_df)
-    return {"total": len(targets), "ok": ok, "empty": empty, "failed": failed, "refreshed": refreshed}
+        store.save(bench_df, replace=force_full)
+    return {
+        "total": len(targets),
+        "ok": ok,
+        "empty": empty,
+        "failed": failed,
+        "refreshed": refreshed,
+        "full_refresh": force_full,
+    }

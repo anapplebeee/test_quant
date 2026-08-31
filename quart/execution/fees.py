@@ -29,7 +29,7 @@ class Fees:
     impact_coef: float = 0.0
 
     @classmethod
-    def from_config(cls) -> "Fees":
+    def from_config(cls) -> Fees:
         cfg = load_config()["backtest"]
         return cls(
             commission_rate=cfg["commission_rate"],
@@ -41,7 +41,7 @@ class Fees:
         )
 
     @classmethod
-    def zero(cls) -> "Fees":
+    def zero(cls) -> Fees:
         """零成本口径（用于孪生参照/成本隔离诊断）。"""
         return cls(
             commission_rate=0.0,
@@ -50,6 +50,20 @@ class Fees:
             transfer_fee_rate=0.0,
             slippage_rate=0.0,
             impact_coef=0.0,
+        )
+
+    def scaled(self, multiplier: float) -> Fees:
+        """按同一倍数缩放全部显性费用、滑点和冲击成本。"""
+        multiplier = float(multiplier)
+        if multiplier < 0:
+            raise ValueError("cost multiplier must be non-negative")
+        return Fees(
+            commission_rate=self.commission_rate * multiplier,
+            commission_min=self.commission_min * multiplier,
+            stamp_tax_rate=self.stamp_tax_rate * multiplier,
+            transfer_fee_rate=self.transfer_fee_rate * multiplier,
+            slippage_rate=self.slippage_rate * multiplier,
+            impact_coef=self.impact_coef * multiplier,
         )
 
     def buy_cost(self, amount: float) -> float:

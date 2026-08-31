@@ -19,6 +19,7 @@ class MLRankStrategy(BaseStrategy):
     """
 
     name = "ml_rank"
+    required_history_days = 21
 
     PARAMS_SCHEMA = {
         "top_k": (int, 10, "持仓数量"),
@@ -30,10 +31,21 @@ class MLRankStrategy(BaseStrategy):
         "liquidity_days": (int, 20, "流动性回看窗口"),
         "min_price": ((int, float, type(None)), None, "最低价过滤"),
         "use_regime_filter": (bool, True, "是否启用指数择时"),
+        "regime_mode": (str, "ma", "择时模式: ma=均线, score=R4多因子打分分级仓位"),
+        "timing_levels": (int, 3, "score 模式档位数（2=全仓/空仓, 3=加半仓档）"),
         "regime_filter_days": (int, 20, "择时均线窗口"),
         "regime_band": (float, 0.0, "择时迟滞带宽度"),
         "scores_path": ((str, type(None)), None, "ML 分数文件路径"),
     }
+
+    def __init__(self, **params):
+        super().__init__(**params)
+        self.required_history_days = max(
+            int(self.params.get("regime_filter_days", 20))
+            if self.params.get("use_regime_filter", True) else 0,
+            int(self.params.get("liquidity_days", 20))
+            if self.params.get("min_avg_amount") else 0,
+        ) + 1
 
     def prepare(self, md: MarketData) -> None:
         super().prepare(md)
@@ -49,8 +61,14 @@ class MLRankStrategy(BaseStrategy):
         self.liquidity_days = int(p.get("liquidity_days", 20))
         self.min_price = p.get("min_price")
         self.use_regime = bool(p.get("use_regime_filter", True))
+        self.regime_mode = str(p.get("regime_mode", "ma"))
+        self.timing_levels = int(p.get("timing_levels", 3))
         self.regime_days = int(p.get("regime_filter_days", 20))
         self.regime_band = float(p.get("regime_band", 0.0))
+        self.required_history_days = max(
+            self.regime_days if self.use_regime else 0,
+            self.liquidity_days if self.min_avg_amount else 0,
+        ) + 1
         self.regime_ma = (
             md.benchmark_close.rolling(self.regime_days).mean()
             if md.benchmark_close is not None
@@ -64,6 +82,14 @@ class MLRankStrategy(BaseStrategy):
             if self.regime_ma is not None
             else None
         )
+        # regime_mode="score"：R4 多因子打分分级仓位，与 MA 模式互斥
+        self.timing_exposure = None
+        if self.use_regime and self.regime_mode == "score":
+            from quart.strategy.timing import score_timing_exposure
+
+            self.timing_exposure = score_timing_exposure(
+                md, levels=self.timing_levels, breadth_ma_window=self.regime_days
+            )
 
         path = Path(p.get("scores_path") or PROJECT_ROOT / "data" / "scores" / "preds.csv")
         if not path.exists():
@@ -90,6 +116,12 @@ class MLRankStrategy(BaseStrategy):
             if bool(self.regime_flat.iloc[i]):
                 return {FLAT: 1.0}
 
+        exposure = 1.0
+        if self.use_regime and self.timing_exposure is not None:
+            exposure = float(self.timing_exposure.iloc[i])
+            if exposure <= 0:
+                return {FLAT: 1.0}
+
         if self.min_score is not None:
             row = row[row > float(self.min_score)]
             if row.empty:
@@ -104,4 +136,13 @@ class MLRankStrategy(BaseStrategy):
 
         top = row.nlargest(self.top_k)
         weight = min(1.0 / len(top), self.max_weight)
-        return {sym: weight for sym in top.index}
+        # 分级仓位：0<exposure<1 时权重按比例缩减，余下留现金（R4 仓位管理）
+        return {sym: weight * exposure for sym in top.index}
+
+    def state_dict(self):
+        return {"next_rebalance": int(self._next_rebalance)}
+
+    def load_state_dict(self, state):
+        super().load_state_dict(state)
+        if state and "next_rebalance" in state:
+            self._next_rebalance = int(state["next_rebalance"])

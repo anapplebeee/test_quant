@@ -23,6 +23,7 @@ class LowVolCompositeStrategy(BaseStrategy):
     """
 
     name = "lowvol_composite"
+    required_history_days = 21
     industry_z = False  # prepare() 中按 params 覆盖；类级默认供注册检查
 
     PARAMS_SCHEMA = {
@@ -33,6 +34,8 @@ class LowVolCompositeStrategy(BaseStrategy):
         "liquidity_days": (int, 20, "流动性回看窗口"),
         "min_price": ((int, float, type(None)), None, "最低价过滤"),
         "use_regime_filter": (bool, False, "是否启用指数择时"),
+        "regime_mode": (str, "ma", "择时模式: ma=均线, score=R4多因子打分分级仓位"),
+        "timing_levels": (int, 3, "score 模式档位数（2=全仓/空仓, 3=加半仓档）"),
         "regime_filter_days": (int, 20, "择时均线窗口"),
         "regime_band": (float, 0.02, "择时迟滞带宽度"),
         "rev_weight": (float, 0.0, "反转因子权重"),
@@ -40,6 +43,16 @@ class LowVolCompositeStrategy(BaseStrategy):
         "selection": (str, "composite", "选股模式 composite/bounce"),
         "industry_z": (bool, False, "是否行业内 z-score 中性化"),
     }
+
+    def __init__(self, **params):
+        super().__init__(**params)
+        self.required_history_days = max(
+            20,
+            int(self.params.get("regime_filter_days", 20))
+            if self.params.get("use_regime_filter", False) else 0,
+            int(self.params.get("liquidity_days", 20))
+            if self.params.get("min_avg_amount") else 0,
+        ) + 1
 
     @staticmethod
     def _buffer_select(ranked_syms: list[str], held: set[str], top_k: int, buffer: float) -> list[str]:
@@ -131,11 +144,26 @@ class LowVolCompositeStrategy(BaseStrategy):
         )
         # 带缓冲带的择时序列（hysteresis）：减少 MA 附近的反复全清全建
         self.regime_band = float(p.get("regime_band", 0.02))
+        self.required_history_days = max(
+            20,
+            self.regime_days if self.use_regime else 0,
+            self.liquidity_days if self.min_avg_amount else 0,
+        ) + 1
         self.regime_flat = (
             regime_flat_series(md.benchmark_close, self.regime_ma, self.regime_band)
             if self.regime_ma is not None
             else None
         )
+        # regime_mode="score"：R4 多因子打分分级仓位，与 MA 模式互斥
+        self.regime_mode = str(p.get("regime_mode", "ma"))
+        self.timing_levels = int(p.get("timing_levels", 3))
+        self.timing_exposure = None
+        if self.use_regime and self.regime_mode == "score":
+            from quart.strategy.timing import score_timing_exposure
+
+            self.timing_exposure = score_timing_exposure(
+                md, levels=self.timing_levels, breadth_ma_window=self.regime_days
+            )
         self._next_rebalance = 0
 
     def target_weights(self, i: int) -> dict[str, float]:
@@ -144,9 +172,15 @@ class LowVolCompositeStrategy(BaseStrategy):
             return {}
         self._next_rebalance = i + self.rebalance_days
 
+        exposure = 1.0
         if self.use_regime and self.regime_flat is not None:
             if bool(self.regime_flat.iloc[i]):
                 self._held = set()  # FLAT 已清仓，同步清空持仓记忆
+                return {FLAT: 1.0}
+        if self.use_regime and self.timing_exposure is not None:
+            exposure = float(self.timing_exposure.iloc[i])
+            if exposure <= 0:
+                self._held = set()
                 return {FLAT: 1.0}
 
         scores = self.composite.iloc[i]
@@ -173,4 +207,19 @@ class LowVolCompositeStrategy(BaseStrategy):
         picks = self._buffer_select(ranked, self._held, self.top_k, self.rank_buffer)
         self._held = set(picks)
         weight = min(1.0 / len(picks), self.max_weight)
-        return {sym: weight for sym in picks}
+        # 分级仓位：0<exposure<1 时权重按比例缩减，余下留现金（R4 仓位管理）
+        return {sym: weight * exposure for sym in picks}
+
+    def state_dict(self):
+        return {
+            "next_rebalance": int(self._next_rebalance),
+            "held": sorted(self._held),
+        }
+
+    def load_state_dict(self, state):
+        super().load_state_dict(state)
+        if state:
+            if "next_rebalance" in state:
+                self._next_rebalance = int(state["next_rebalance"])
+            if "held" in state:
+                self._held = {str(s) for s in state["held"]}

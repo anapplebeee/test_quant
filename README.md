@@ -69,6 +69,14 @@ uv run python app.py
 
 所有长任务都进入后端任务队列。前端只能传递白名单参数，不能执行任意 shell；写盘迁移默认仅预演并要求二次确认。
 
+数据刷新默认是增量模式；需要统一重拉历史时，在“操作中心 → 数据刷新”同时勾选“全量重拉并覆盖”和“确认全量覆盖”，或显式运行：
+
+```powershell
+uv run python scripts/update_data.py --universe all --start 20190101 --full-refresh
+```
+
+全量模式按股票原子覆盖，远端空响应不会清空本地历史。回测可用 `--cost-multiplier 0/2` 做零成本或双倍成本压力，`--rev-weight` 用于显式复现低波参数。
+
 ## 手动交易 T+1 同步
 
 当前阶段仍由用户在券商客户端手动下单。平台负责：
@@ -203,7 +211,7 @@ uv run python scripts/manual_trade.py reconcile state/broker_snapshot.json `
 |---|---|
 | `data` | 前复权采集 · 板块/ST/次新股(上市<120天)过滤 · hfq_pins 防复权再污染 · **退市股回填(195只, baostock, 幸存者偏差实测 -2.0~-2.6pp/yr)** |
 | `backtest` | 初始资金、佣金万2.5最低5元、印花税万5(卖出)、过户费、滑点千1(双边不利方向) |
-| `strategy` | 默认 `lowvol_indz` · 正式信号白名单 · **Top50 · 60日调仓** · `rank_buffer=0.5` · `rev_weight=0.3` · 行业内 z-score；其他策略使用独立 overrides（2026-08-31 更新，见下） |
+| `strategy` | 默认 `lowvol_indz` · 正式信号白名单 · **Top30 · 45日调仓** · `rank_buffer=0.5` · `rev_weight=0` · 行业内 z-score；其他策略使用独立 overrides（全市场复验后更新，见下） |
 | `risk` | 单票仓位上限25%、单日亏损阈值 |
 | `manual_trading` | 手动交易账本开关、账户名、SQLite 路径、旧持仓自动迁移 |
 | `notify` | 钉钉 webhook + 加签 secret（可用环境变量 QUART_DINGTALK_WEBHOOK/SECRET 覆盖） |
@@ -248,6 +256,7 @@ CLI 仍保留并与前端共用同一领域代码，适用于调度器、CI、�
 - [x] **手动 T+1 前端闭环**（账户、审批、成交、对账、执行偏差）
 - [x] **BrokerAdapter + PaperBroker 状态机**（真实券商接入前联调契约）
 - [ ] WFA 结论回填：把 README 的历史数字全部重跑为样本外口径
+- [x] 正式回测 PIT 股票池门禁（`--research-mode formal`；探索模式显式标记 `NON_PIT`）
 - [x] 前端按 run_id 展示制品（回测中心 Artifact 面板；`reports/` 仍双写兼容）
 - [ ] MiniQMT(xtquant) 自动执行通道（需券商权限）
 - [ ] ClickHouse 云端化迁移
@@ -269,6 +278,14 @@ uv run python scripts/walk_forward.py --strategy lowvol_indz `
 # 锚定窗口 + 更长隔离带
 uv run python scripts/walk_forward.py --strategy lowvol_indz `
     --anchored --embargo 10 --train 756 --test 126
+
+# 每折独立账户（仅用于单折诊断；正式报告默认 continuous）
+uv run python scripts/walk_forward.py --strategy lowvol_indz `
+    --account-mode independent
+
+# 正式研究：缺少覆盖完整的 PIT 成分股历史时直接失败
+uv run python scripts/run_backtest.py --strategy lowvol_indz `
+    --research-mode formal --universe-index 000300
 ```
 
 输出含过拟合诊断：
@@ -279,9 +296,10 @@ uv run python scripts/walk_forward.py --strategy lowvol_indz `
 | `参数一致率` | 各折选中同一参数的比例 | 1.0 = 每折选中同一组，真稳健 |
 | `n_folds_with_trades` | 样本外有成交的折数 | 为 0 说明窗口太短/过滤太严，此时衰减比无意义 |
 
-**防泄漏机制**：每个 fold 用 `MarketData.slice_by_pos()` 重切子面板，策略 `prepare()`
-会在子面板上重算滚动窗口，因此 train 段不可能用到 test 段数据；train 与 test 之间
-默认留 5 日 embargo，避免日频因子的持仓跨越边界。
+**防泄漏机制**：每个 fold 的策略只在 `test_lo - required_history_days` 到 `test_hi`
+的 PIT 上下文中 `prepare()`，测试首日可以使用测试日前历史，但不会读取测试结束日之后
+的数据；train 与 test 之间默认留 5 日 embargo。正式报告默认使用连续 OOS 账户，重叠
+测试窗口只保留每个交易日一次；如需区分每折表现，可用 `--account-mode independent`。
 
 ## 制品仓库 (ArtifactStore)
 
@@ -378,7 +396,7 @@ uv run python scripts/walk_forward.py --strategy ml_rank
 
 注（08-28 晚口径修正）：`_group_z` 改样本口径（ddof=1，与全市场 z 一致）后重测，top30@45d 全周期 CAGR +7.4%→+7.8%、近1年 +18.7%→+20.4%；top20@45d +7.1%→+6.5%。量级在参数敏感度内，结论不变。
 
-**注（08-31 参数落地，GLM）**：本地池（195 只）实验后，`lowvol_indz` 默认参数更新为 **Top50 / 60日 / rev_weight=0.3**（B2 组合）：全样本 CAGR +5.4%→**+11.2%**、Sharpe 0.42→**0.74**、MDD -27.1%→-28.0%。依据与风险见 `reports/strategy_optimization_2026-08-31.md`：小池口径 + WFA 衰减比 0.62，预期收益应打折（个位数年化）；全市场数据补齐后必须复验，衰减比 ≥0.8 且参数一致率 ≥0.75 方可长期保留。
+**注（08-31 全市场复验）**：BarStore 已覆盖 5,409 只股票后，`lowvol_indz` 默认回退为 **Top30 / 45日 / rev_weight=0**：完整区间 CAGR **+7.53%**、Sharpe **0.69**，2 倍成本压力下 CAGR **+6.09%**、Sharpe **0.57**；优于 Top50 / 60日 / rev0.3 的 +3.08% / 0.32。WFA 仍有多折无成交，结论定位为候选防御 sleeve，不代表已证明 alpha。详见 `reports/full_market_validation_2026-08-31.md`。
 
 注：上表前四行跑在早期朴素 MA 择时口径（无迟滞带）；lowvol_indz 旧值 -4.9% 已由 `scripts/diag_regime_band.py` 结案——差异 100% 来自择时迟滞带（+4.1pp/yr），旧 sweep 作废，以缓冲带行为准。
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import gradio as gr
 import plotly.express as px
 
+import data_bus
 from api.data_api import get_index_coverage, get_stock_stats, get_universe, get_stock_list, get_stock_data
 from frontend.theme import metric_card, page_header
 
@@ -41,7 +42,6 @@ def render():
         refresh_btn = gr.Button("🔄 刷新数据概览", size="sm")
         universe_df = gr.Dataframe(value=get_universe(), interactive=False)
         refresh_btn.click(_refresh_overview, outputs=[m1, m2, m3, m4, board_md, universe_df])
-        gr.Timer(60).tick(_refresh_overview, outputs=[m1, m2, m3, m4, board_md, universe_df])
 
         gr.Markdown("---")
 
@@ -52,7 +52,23 @@ def render():
                 "⬜ 未拉取时可在 🧰 操作中心运行「更新常用指数」批量补齐。*"
             )
             coverage = get_index_coverage()
-            gr.Dataframe(value=coverage, interactive=False, max_height=320)
+            coverage_df = gr.Dataframe(value=coverage, interactive=False, max_height=320)
+
+        # ===== 跨页联动：任务完成 → 自动刷新本页数据（版本门控，未变化时不产生流量） =====
+        seen_state = gr.State(data_bus.current())
+
+        def _poll_data_version(seen_val: int):
+            changed, cur = data_bus.poll(seen_val)
+            if not changed:
+                return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), seen_val
+            refreshed = _refresh_overview()
+            return *refreshed, get_index_coverage(), cur
+
+        gr.Timer(5).tick(
+            _poll_data_version,
+            inputs=[seen_state],
+            outputs=[m1, m2, m3, m4, board_md, universe_df, coverage_df, seen_state],
+        )
 
         gr.Markdown("---")
 

@@ -1,8 +1,8 @@
 """策略优化实验：复用一次数据加载，批量跑参数网格并输出对比表。
 
-背景（2026-08-31，GLM 策略诊断）：
-本地 BarStore 仅 229 只标的（全市场口径应为 3215 只），本实验在当前
-本地池上量化各参数与择时开关对成本后收益的贡献，并给出优化建议。
+背景（2026-08-31，全市场复验）：
+BarStore 覆盖规模以运行时实际数据为准；本实验显式固定候选参数，避免
+``config.strategy.overrides`` 变化后实验标签与真实参数不一致。
 结论写入 reports/strategy_optimization_2026-08-31.md。
 
 用法:
@@ -81,21 +81,22 @@ def main() -> None:
                      transfer_fee_rate=0.0, slippage_rate=0.0, impact_coef=0.0)
 
     # 实验矩阵：label -> (params, zero_cost)
+    baseline = {"top_k": 30, "rebalance_days": 45, "rev_weight": 0.0}
     experiments: list[tuple[str, dict, Fees | None]] = [
-        ("A0 基线(45d/top30/buf.5/择时)", {}, None),
-        ("A1 关闭择时", {"use_regime_filter": False}, None),
-        ("A2 top20", {"top_k": 20}, None),
-        ("A3 top50", {"top_k": 50}, None),
-        ("A4 rebalance20(高换手)", {"rebalance_days": 20}, None),
-        ("A5 rebalance60(低频)", {"rebalance_days": 60}, None),
-        ("A6 无排名缓冲(buffer0)", {"rank_buffer": 0.0}, None),
-        ("A7 反转叠加 rev0.3", {"rev_weight": 0.3}, None),
-        ("A8 宽迟滞带 band0.05", {"regime_band": 0.05}, None),
-        ("A9 零成本(A0 同参)", {}, zero_fees),
-        # B 系列：A 轮优胜项组合
-        ("B1 top50+60d+择时", {"top_k": 50, "rebalance_days": 60}, None),
+        ("A0 基线(top30/45d/buf.5/择时)", baseline, None),
+        ("A1 关闭择时", {**baseline, "use_regime_filter": False}, None),
+        ("A2 top20", {**baseline, "top_k": 20}, None),
+        ("A3 top50", {**baseline, "top_k": 50}, None),
+        ("A4 rebalance20(高换手)", {**baseline, "rebalance_days": 20}, None),
+        ("A5 rebalance60(低频)", {**baseline, "rebalance_days": 60}, None),
+        ("A6 无排名缓冲(buffer0)", {**baseline, "rank_buffer": 0.0}, None),
+        ("A7 反转叠加 rev0.3", {**baseline, "rev_weight": 0.3}, None),
+        ("A8 宽迟滞带 band0.05", {**baseline, "regime_band": 0.05}, None),
+        ("A9 零成本(A0 同参)", baseline, zero_fees),
+        # B 系列：分散度、频率和反转的组合
+        ("B1 top50+60d+择时", {**baseline, "top_k": 50, "rebalance_days": 60}, None),
         ("B2 top50+60d+buf.5+rev0.3", {"top_k": 50, "rebalance_days": 60, "rev_weight": 0.3}, None),
-        ("B3 top50+45d+rev0.3", {"top_k": 50, "rev_weight": 0.3}, None),
+        ("B3 top50+45d+rev0.3", {"top_k": 50, "rebalance_days": 45, "rev_weight": 0.3}, None),
         ("B4 top50+60d+rev0.5", {"top_k": 50, "rebalance_days": 60, "rev_weight": 0.5}, None),
         ("B5 零成本(B2 同参)", {"top_k": 50, "rebalance_days": 60, "rev_weight": 0.3}, zero_fees),
     ]

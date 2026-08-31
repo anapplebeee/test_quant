@@ -12,6 +12,9 @@ import pandas as pd
 
 from common import degraded, reports_dir, safe_path, valid_name
 
+# 策略中文名：单一数据源 → frontend/pages 同源；新增策略只需改 REGISTRY + STRATEGY_META。
+from api.strategy_api import STRATEGY_META
+
 
 def _warn(where: str, exc: BaseException) -> None:
     degraded(f"backtest_api[{where}]", exc)
@@ -23,12 +26,77 @@ def _latest(pattern: str):
     return files[-1] if files else None
 
 
-def get_backtest_list() -> list[str]:
-    """获取回测列表"""
-    return sorted(
+def get_backtest_list(limit: int | None = None) -> list[str]:
+    """获取回测列表（默认全传；limit>0 时仅返回最近 N 条，用于下拉控件收敛选项）"""
+    names = sorted(
         p.name[len("summary_"):-len(".json")]
         for p in reports_dir().glob("summary_*.json")
     )
+    if limit and limit > 0:
+        names = names[-limit:]
+    return names
+
+
+def scan_summaries(limit: int | None = None) -> pd.DataFrame:
+    """扫描全部回测摘要，返回关键指标表格（业界数据卡片/表格模式）。
+
+    列：
+      name        — 内部标识（文件名，隐藏不展示，仅作加载 key）
+      strategy    — 策略中文名（来自 STRATEGY_META，找不到则回退到英文 key）
+      label       — 人类可读标签，如"低波·行业内z · 20260831 10:33"
+      run_date    — 日期字符串 YYYY-MM-DD
+      run_dt      — 文件时间戳解析出的 datetime（用于可靠排序）
+      start / end — 回测区间端点
+      CAGR / 夏普 / 最大回撤 / 波动 / 卡玛
+
+    按 run_dt 降序（最新在前），排序完全来自文件名时间戳，不依赖字符串顺序。
+    """
+    import re
+
+    rows: list[dict] = []
+    names = get_backtest_list(limit=limit)
+    for name in names:
+        p = reports_dir() / f"summary_{name}.json"
+        if not p.exists():
+            continue
+        try:
+            with open(p, encoding="utf-8") as f:
+                s = json.load(f)
+        except Exception:
+            continue
+        # 解析文件名里的策略与时间：summary_<strategy>_<YYYYMMDD>_<HHMMSS>
+        m = re.match(r"^(.+)_(20\d{6})_(\d{6})$", name)
+        strategy_key = m.group(1) if m else name
+        cdate = m.group(2) if m else ""
+        ctime = m.group(3) if m else ""
+        run_date = f"{cdate[:4]}-{cdate[4:6]}-{cdate[6:8]}" if len(cdate) == 8 else ""
+        run_dt = None
+        try:
+            run_dt = pd.to_datetime(f"{cdate}{ ctime}", format="%Y%m%d%H%M%S")
+        except Exception:
+            pass
+        # 策略中文名：来自 STRATEGY_META 的 label 字段；找不到则回退英文 key
+        strategy_zh = STRATEGY_META.get(strategy_key, {}).get("label", strategy_key)
+        label = f"{strategy_zh} · {cdate} {ctime[:2]}:{ctime[2:4]}" if cdate else name
+        rows.append({
+            "name": name,
+            "strategy": strategy_zh,
+            "label": label,
+            "run_date": run_date,
+            "run_dt": run_dt,
+            "区间": f"{s.get('start','?')}" if s.get('end') is None else f"{s.get('start','?')} ~ {s.get('end','?')}",
+            "start": s.get("start"),
+            "end": s.get("end"),
+            "CAGR": s.get("cagr"),
+            "夏普": s.get("sharpe"),
+            "最大回撤": s.get("max_drawdown"),
+            "波动": s.get("annual_vol"),
+            "卡玛": s.get("calmar"),
+        })
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("run_dt", ascending=False, na_position="last").reset_index(drop=True)
+    return df
 
 
 def get_backtest_summary(name: str) -> dict | None:

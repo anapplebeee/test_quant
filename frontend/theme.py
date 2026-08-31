@@ -26,6 +26,15 @@ CUSTOM_CSS = """
     transform: translateY(-4px);
     box-shadow: 0 8px 25px rgba(0, 0, 0, 0.2);
 }
+/* 新增：指标卡容器从 flex 改为等宽 grid（消除参差），响应式 2-4 列 */
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin: 0.5rem 0 1rem 0;
+}
+/* 旧 flex 保留用于兼容，但新代码使用 .metric-grid 以获得等宽对齐 */
+.metric-flex { display: flex; gap: 12px; flex-wrap: wrap; margin: 0.5rem 0 1rem 0; }
 .metric-card h3 { margin: 0; font-size: 0.85rem; opacity: 0.9; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
 .metric-card p { margin: 0.5rem 0 0 0; font-size: 2rem; font-weight: bold; }
 .metric-blue { background: linear-gradient(135deg, #1E88E5 0%, #1565C0 100%); }

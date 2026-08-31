@@ -627,10 +627,10 @@ config/
 
 ### M1：研究可信度基线
 
-- [ ] 修复 WFA 连续上下文和预热；
-- [ ] 正式回测强制 PIT 股票池；
+- [x] 修复 WFA 连续上下文和预热（`required_history_days`、PIT 上下文、连续/独立账户、重叠 OOS 去重）；
+- [x] 正式回测强制 PIT 股票池（`--research-mode formal` 缺失/覆盖不完整即阻断；exploratory 明确标记 `NON_PIT`）；
 - [ ] 增加数据质量阻断；
-- [ ] Artifact 记录股票池和规则版本；
+- [x] Artifact 记录股票池和规则版本（模式、指数、来源、质量等级、`ashare_v1`）；
 - [ ] 建立成本与容量压力测试；
 - [ ] 重跑全部 README 历史结论。
 

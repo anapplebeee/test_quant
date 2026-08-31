@@ -46,13 +46,27 @@ def _stream_operation(task_id: str, extra_args: list[str], title: str):
         yield f"🟡 **{title}** 运行中\n\n```text\n{output}\n```"
 
 
-def _run_refresh(universe: str, index_code: str, start: str, max_symbols: float | None, keep_st: bool):
+def _run_refresh(
+    universe: str,
+    index_code: str,
+    start: str,
+    max_symbols: float | None,
+    keep_st: bool,
+    full_refresh: bool,
+    confirm_full_refresh: bool,
+):
+    if full_refresh and not confirm_full_refresh:
+        yield "❌ 全量刷新会重拉并覆盖所选股票历史，请先勾选确认。"
+        return
     extra = ["--universe", universe, "--index", index_code, "--start", start]
     if max_symbols:
         extra += ["--max", str(int(max_symbols))]
     if keep_st:
         extra.append("--keep-st")
-    yield from _stream_operation("refresh", extra, "数据刷新")
+    if full_refresh:
+        extra.append("--full-refresh")
+    title = "全量数据刷新" if full_refresh else "增量数据刷新"
+    yield from _stream_operation("refresh", extra, title)
 
 
 def _run_signal(strategy: str, trade_date: str, no_push: bool):
@@ -132,15 +146,28 @@ def render() -> None:
 
         with gr.Accordion("📥 数据刷新", open=True):
             with gr.Row():
-                refresh_universe = gr.Dropdown(label="股票池", choices=["index", "all"], value="index")
-                refresh_index = gr.Textbox(label="指数代码", value="000300")
+                refresh_universe = gr.Dropdown(label="股票池", choices=["index", "all"], value="all")
+                refresh_index = gr.Textbox(label="指数代码（仅 index 池生效）", value="000300")
                 refresh_start = gr.Textbox(label="历史起点 YYYYMMDD", value="20190101")
                 refresh_max = gr.Number(label="最多股票数（调试可空）", precision=0)
                 refresh_keep_st = gr.Checkbox(label="保留 ST", value=False)
+                refresh_full = gr.Checkbox(label="全量重拉并覆盖", value=False)
+                refresh_confirm_full = gr.Checkbox(label="确认全量覆盖", value=False)
+            gr.Markdown(
+                "默认执行增量更新。全量模式会从历史起点重拉所选股票；远端空响应不会删除本地旧数据。"
+            )
             refresh_button = gr.Button("🔄 执行数据刷新", variant="primary")
             refresh_button.click(
                 _run_refresh,
-                inputs=[refresh_universe, refresh_index, refresh_start, refresh_max, refresh_keep_st],
+                inputs=[
+                    refresh_universe,
+                    refresh_index,
+                    refresh_start,
+                    refresh_max,
+                    refresh_keep_st,
+                    refresh_full,
+                    refresh_confirm_full,
+                ],
                 outputs=[operation_output],
             )
 

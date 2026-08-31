@@ -4,15 +4,6 @@
 新验证结果（sweep csv / 研究报告 md）在前端无任何入口。
 """
 
-from quart.strategy import REGISTRY
-from api.strategy_api import (
-    STRATEGY_META,
-    get_strategy_defaults,
-    live_allowlist,
-    live_signal_choices,
-    strategy_catalog,
-    strategy_choices,
-)
 from api.research_api import (
     latest_sweep_headlines,
     list_research_reports,
@@ -21,6 +12,15 @@ from api.research_api import (
     load_sweep,
     sweep_headline,
 )
+from api.strategy_api import (
+    STRATEGY_META,
+    get_strategy_defaults,
+    live_allowlist,
+    live_signal_choices,
+    strategy_catalog,
+    strategy_choices,
+)
+from quart.strategy import REGISTRY
 
 
 def test_strategy_choices_covers_registry():
@@ -59,10 +59,10 @@ def test_catalog_marks_admitted_strategies():
 
 
 def test_defaults_lowvol_indz_uses_override():
-    # settings.yaml: 2026-08-31 起正式候选采用 60 日 / Top50 / rev0.3
+    # settings.yaml: 全市场复验后正式候选采用 45 日 / Top30 / rev0
     d = get_strategy_defaults("lowvol_indz")
-    assert d["rebalance_days"] == 60
-    assert d["top_k"] == 50
+    assert d["rebalance_days"] == 45
+    assert d["top_k"] == 30
     # 无 override 的策略回退全局默认
     d2 = get_strategy_defaults("ml_rank")
     assert d2["rebalance_days"] >= 1

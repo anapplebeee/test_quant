@@ -84,6 +84,62 @@ def sanitize(X: pd.DataFrame, y: pd.Series | None = None) -> tuple[pd.DataFrame,
     return X, y
 
 
+def augment_research_factors(features: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+    """在 Alpha158 特征上追加研报因子：技术指标面板（R3/R4）+ PIT 价值成长（R2）。
+
+    - 技术因子：本地 BarStore 日线 → quart.research.technicals.compute_panels
+      → stack 后与 qlib instrument 代码（原始 symbol）直接 join；
+    - 价值成长：data/factors/financials.parquet → pit_features，
+      内置 120 天披露时滞，训练期无前视；
+    - 任一步骤失败降级为纯 Alpha158（警告不中断训练）。
+    """
+    try:
+        from quart.data.market import MarketData
+        from quart.data.store import BarStore
+        from quart.config import load_config
+        from quart.research.technicals import compute_panels, stack_panels
+
+        console.print("[blue]computing research factors (technical + value-growth)...[/blue]")
+        # 指标预热：多加载约 180 个自然日的日线，避免前 60 个交易日的技术因子全 NaN
+        warm_start = (pd.Timestamp(start) - pd.Timedelta(days=180)).strftime("%Y-%m-%d")
+        store = BarStore()
+        bars = store.load(start=warm_start, end=end)
+        if bars.empty:
+            console.print("[yellow]no bars available, skip research factors[/yellow]")
+            return features
+        bench = store.load_benchmark(load_config()["benchmark"])
+        bench = bench[
+            (bench["date"] >= warm_start) & ((end is None) | (bench["date"] <= end))
+        ]
+        md = MarketData.from_bars(bars, benchmark=bench)
+        tech = stack_panels(compute_panels(md))
+        out = features.join(tech, how="left")
+        n_tech = tech.shape[1]
+
+        n_vg = 0
+        fin_path = PROJECT_ROOT / "data" / "factors" / "financials.parquet"
+        if fin_path.exists():
+            from quart.research.value_growth import pit_features
+
+            fin = pd.read_parquet(fin_path)
+            vg = pit_features(fin, features.index)
+            if not vg.empty:
+                out = out.join(vg, how="left")
+                n_vg = vg.shape[1]
+        else:
+            console.print("[yellow]financials.parquet not found, skip value-growth factors[/yellow]")
+        console.print(
+            f"[green]features augmented[/green]: +{n_tech} technical, "
+            f"+{n_vg} value-growth -> {out.shape[1]} cols"
+        )
+        return out
+    except Exception as exc:
+        console.print(
+            f"[yellow]research factor augmentation failed, using Alpha158 only: {exc}[/yellow]"
+        )
+        return features
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Rolling walk-forward Alpha158+LGBM training")
     parser.add_argument("--start", default=None, help="data start (default: earliest)")
@@ -95,6 +151,7 @@ def main() -> None:
     handler = build_handler(args.start or "2024-01-01", args.end or "2099-12-31")
     console.print("[blue]computing Alpha158 features...[/blue]")
     features, label = fetch_feature_label(handler)
+    features = augment_research_factors(features, args.start or "2024-01-01", args.end)
 
     idx = features.index.get_level_values(0)
     dates = pd.DatetimeIndex(idx.unique())

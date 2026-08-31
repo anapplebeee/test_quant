@@ -19,6 +19,11 @@ def main() -> None:
     parser.add_argument("--start", default="20190101", help="history start YYYYMMDD")
     parser.add_argument("--max", type=int, default=None, help="limit number of symbols (debug)")
     parser.add_argument("--keep-st", action="store_true", help="do not exclude ST names")
+    parser.add_argument(
+        "--full-refresh",
+        action="store_true",
+        help="re-fetch every selected symbol from --start and replace returned history",
+    )
     args = parser.parse_args()
 
     if args.universe == "all":
@@ -36,8 +41,20 @@ def main() -> None:
         except Exception as exc:
             logger.warning("ST filter skipped: {}", exc)
 
-    logger.info("updating {} symbols (universe={}, benchmark={})", len(codes), args.universe, args.index)
-    stats = update_universe_data(args.index, codes, start=args.start, max_names=args.max)
+    logger.info(
+        "updating {} symbols (universe={}, benchmark={}, full_refresh={})",
+        len(codes),
+        args.universe,
+        args.index,
+        args.full_refresh,
+    )
+    stats = update_universe_data(
+        args.index,
+        codes,
+        start=args.start,
+        max_names=args.max,
+        force_full=args.full_refresh,
+    )
     console.print(f"[green]done[/green] total={stats['total']} ok={stats['ok']} empty={stats['empty']} failed={stats['failed']} refreshed={stats.get('refreshed',0)}")
 
 

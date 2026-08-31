@@ -10,6 +10,7 @@ class DualMAStrategy(BaseStrategy):
     """Long symbols whose fast SMA is above slow SMA; equal weight, capped count."""
 
     name = "dual_ma"
+    required_history_days = 21
 
     PARAMS_SCHEMA = {
         "fast_days": (int, 5, "快线均线窗口"),
@@ -18,6 +19,10 @@ class DualMAStrategy(BaseStrategy):
         "max_weight_pct": (float, 0.15, "单票权重上限"),
         "rebalance_days": (int, 1, "调仓周期（交易日）"),
     }
+
+    def __init__(self, **params):
+        super().__init__(**params)
+        self.required_history_days = int(self.params.get("slow_days", 20)) + 1
 
     def prepare(self, md: MarketData) -> None:
         super().prepare(md)
@@ -28,6 +33,7 @@ class DualMAStrategy(BaseStrategy):
         self.max_weight = float(p.get("max_weight_pct", 0.15))
         self.rebalance_days = int(p.get("rebalance_days", 1))
         self.warmup = self.slow + 1
+        self.required_history_days = self.warmup
         self.fast_ma = md.closes.rolling(self.fast).mean()
         self.slow_ma = md.closes.rolling(self.slow).mean()
         self._next_rebalance = self.warmup
@@ -52,3 +58,11 @@ class DualMAStrategy(BaseStrategy):
         active = sorted(active, key=lambda s: fast_row[s] / slow_row[s] - 1, reverse=True)[: self.max_names]
         weight = min(1.0 / len(active), self.max_weight)
         return {sym: weight for sym in active}
+
+    def state_dict(self):
+        return {"next_rebalance": int(self._next_rebalance)}
+
+    def load_state_dict(self, state):
+        super().load_state_dict(state)
+        if state and "next_rebalance" in state:
+            self._next_rebalance = int(state["next_rebalance"])

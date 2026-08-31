@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import queue
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import gradio as gr
 import pandas as pd
 
+import data_bus
 from api.manual_trading_api import latest_prices, manual_settings, repository
 from api.strategy_api import (
     STRATEGY_META,
+    live_signal_choices,
     strategy_catalog,
 )
 from api.strategy_api import (
@@ -160,6 +162,7 @@ def render():
         > 💡 **并发规则**: 数据类任务（🔄刷新/📋信号/🔬因子）同一时间只运行1个；
         > 计算类任务（📈回测/🤖ML/🔍扫描）最多并行2个。
         > 相同任务重复提交会自动去重。
+        > **📋 生成信号**：仅允许启用实盘准入白名单的策略。
         """)
 
         with gr.Row():
@@ -177,6 +180,20 @@ def render():
             choices=strategy_choices,
             value=strategy_choices[0],
             info=" | ".join(f"{k}={v['label']}" for k, v in STRATEGY_META.items()),
+        )
+
+        # ===== 信号生成策略选择（仅白名单） =====
+        live_choices = live_signal_choices()
+        if not live_choices:
+            # 没有白名单时从全量列表中只取已准入的
+            live_choices = [item["name"] for item in strategy_catalog() if "准入" in item.get("admitted", "")]
+        signal_default = live_choices[0] if live_choices else (strategy_choices[0] if strategy_choices else "")
+
+        signal_strategy_select = gr.Dropdown(
+            label="📋 信号策略（仅实盘准入，受白名单约束）",
+            choices=live_choices if live_choices else ["(无准入策略)"],
+            value=signal_default if signal_default in (live_choices or []) else (live_choices[0] if live_choices else None),
+            info="仅出现在 backend/config/strategy.live_allowlist 中的策略可生成正式 T+1 信号",
         )
 
         # ===== 策略准入状态 =====
@@ -237,11 +254,13 @@ def render():
         btn_cancel.click(_on_cancel, inputs=[cancel_select],
                          outputs=[queue_status, task_status_bar, cancel_select])
 
+        # 注意：信号任务使用 signal_strategy_select（仅白名单），其他任务用 strategy_select（全量）
         btn_refresh.click(on_run_task, inputs=[gr.State("refresh"), strategy_select],
                           outputs=[task_output, queue_status, task_status_bar, task_artifacts])
         btn_backtest.click(on_run_task, inputs=[gr.State("backtest"), strategy_select],
                            outputs=[task_output, queue_status, task_status_bar, task_artifacts])
-        btn_signal.click(on_run_task, inputs=[gr.State("signal"), strategy_select],
+        # 信号任务仅能选白名单策略
+        btn_signal.click(on_run_task, inputs=[gr.State("signal"), signal_strategy_select],
                          outputs=[task_output, queue_status, task_status_bar, task_artifacts])
         btn_ml.click(on_run_task, inputs=[gr.State("ml_train"), strategy_select],
                      outputs=[task_output, queue_status, task_status_bar, task_artifacts])
@@ -272,13 +291,25 @@ def render():
             except Exception:
                 rebalance_days = 5
 
+            # 优先读取真实交易日历，否则退回工作日估算
             today = datetime.now().date()
-            next_reb = today
-            added = 0
-            while added < rebalance_days:
-                next_reb += timedelta(days=1)
-                if next_reb.weekday() < 5:
-                    added += 1
+            try:
+                from quart.data.calendar import next_market_trade_date, DEFAULT_CALENDAR_PATH
+                if DEFAULT_CALENDAR_PATH.exists():
+                    # 找到今日之后第 N 个交易日
+                    cursor = today
+                    for _ in range(rebalance_days):
+                        cursor = date.fromisoformat(next_market_trade_date(cursor))
+                    next_reb = cursor
+                else:
+                    raise FileNotFoundError
+            except Exception:
+                next_reb = today
+                added = 0
+                while added < rebalance_days:
+                    next_reb += timedelta(days=1)
+                    if next_reb.weekday() < 5:
+                        added += 1
 
             with gr.Row():
                 gr.HTML(metric_card("调仓周期", f"{rebalance_days} 交易日", "blue"))
@@ -291,20 +322,40 @@ def render():
         with gr.Accordion("💰 当前持仓分析", open=True):
             pos_df, summary = _get_holdings_data()
 
-            if summary:
-                with gr.Row():
-                    gr.HTML(metric_card("现金", f"{summary['cash']:,.0f} CNY", "green"))
-                    gr.HTML(metric_card("持仓市值", f"{summary['equity']:,.0f} CNY", "blue"))
-                    gr.HTML(metric_card("账户总值", f"{summary['total']:,.0f} CNY", "purple"))
-                gr.Dataframe(value=pos_df, interactive=False)
+            def _holdings_cards(summary) -> str:
+                if not summary:
+                    return "<div class='info-card'>*当前无持仓，或账本未初始化*</div>"
+                return (
+                    metric_card("现金", f"{summary['cash']:,.0f} CNY", "green")
+                    + metric_card("持仓市值", f"{summary['equity']:,.0f} CNY", "blue")
+                    + metric_card("账户总值", f"{summary['total']:,.0f} CNY", "purple")
+                )
 
-                gr.Markdown("### 🛡️ 风控规则")
-                gr.Markdown("""
-                | 参数 | 当前值 | 含义 |
-                |------|--------|------|
-                | `max_position_pct` | 25% | 单只股票最大持仓权重 |
-                | `max_daily_loss_pct` | 5% | 单日最大亏损（触发止损） |
-                | `min_avg_amount` | 5000万 | 最低日均成交额（流动性门槛） |
-                """)
-            else:
-                gr.Info("当前无持仓")
+            with gr.Row():
+                holdings_cards = gr.HTML(value=_holdings_cards(summary))
+            holdings_table = gr.Dataframe(value=pos_df, interactive=False)
+
+            gr.Markdown("### 🛡️ 风控规则")
+            gr.Markdown("""
+            | 参数 | 当前值 | 含义 |
+            |------|--------|------|
+            | `max_position_pct` | 25% | 单只股票最大持仓权重 |
+            | `max_daily_loss_pct` | 5% | 单日最大亏损（触发止损） |
+            | `min_avg_amount` | 5000万 | 最低日均成交额（流动性门槛） |
+            """)
+
+        # ===== 跨页联动：任务完成 → 自动刷新持仓（版本门控） =====
+        seen_state = gr.State(data_bus.current())
+
+        def _poll_data_version(seen_val: int):
+            changed, cur = data_bus.poll(seen_val)
+            if not changed:
+                return gr.skip(), gr.skip(), seen_val
+            new_df, new_summary = _get_holdings_data()
+            return _holdings_cards(new_summary), new_df, cur
+
+        gr.Timer(5).tick(
+            _poll_data_version,
+            inputs=[seen_state],
+            outputs=[holdings_cards, holdings_table, seen_state],
+        )

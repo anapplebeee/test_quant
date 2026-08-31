@@ -101,14 +101,57 @@ def test_all_pages_build(ui_stubs):
     assert not failed, "页面构建失败:\n  " + "\n  ".join(failed)
 
 
+def test_daily_signal_snapshot_reads_path_entries(tmp_path, ui_stubs, monkeypatch):
+    """信号目录非空时也必须能构建日期快照，防止把 Path 当字符串调用。"""
+    import common
+
+    (tmp_path / "signal_20260830.md").write_text("旧信号", encoding="utf-8")
+    (tmp_path / "signal_20260831.md").write_text("最新信号", encoding="utf-8")
+
+    mod = _import_page("daily_signal")
+    monkeypatch.setattr(common, "reports_dir", lambda: tmp_path)
+    monkeypatch.setattr(mod, "reports_dir", lambda: tmp_path)
+
+    choices, latest, content = mod._snapshot()
+
+    assert choices == ["20260830", "20260831"]
+    assert latest == "20260831"
+    assert content == "最新信号"
+
+
+def test_operations_full_refresh_requires_confirmation(ui_stubs, monkeypatch):
+    mod = _import_page("operations")
+    submitted = []
+
+    def fake_stream(task_id, extra_args, title):
+        submitted.append((task_id, extra_args, title))
+        yield "已提交"
+
+    monkeypatch.setattr(mod, "_stream_operation", fake_stream)
+
+    rejected = list(mod._run_refresh("all", "000300", "20190101", None, False, True, False))
+    assert rejected == ["❌ 全量刷新会重拉并覆盖所选股票历史，请先勾选确认。"]
+    assert submitted == []
+
+    accepted = list(mod._run_refresh("all", "000300", "20190101", None, False, True, True))
+    assert accepted == ["已提交"]
+    assert submitted == [
+        (
+            "refresh",
+            ["--universe", "all", "--index", "000300", "--start", "20190101", "--full-refresh"],
+            "全量数据刷新",
+        )
+    ]
+
+
 # ---------------------------------------------------------------- 组件
 
 
 def test_artifacts_panel_degrades_when_store_missing(tmp_path, ui_stubs, monkeypatch):
     """制品目录不存在时面板不能崩——这是最常见的首次运行状态。"""
+    import api.artifacts_api
     from quart.data.artifacts import ArtifactStore
 
-    import api.artifacts_api
     monkeypatch.setattr(api.artifacts_api, "_store",
                         lambda: ArtifactStore(root=tmp_path / "nope"))
 
@@ -118,9 +161,9 @@ def test_artifacts_panel_degrades_when_store_missing(tmp_path, ui_stubs, monkeyp
 
 
 def test_artifacts_panel_renders_with_data(tmp_path, ui_stubs, monkeypatch):
+    import api.artifacts_api
     from quart.data.artifacts import ArtifactStore
 
-    import api.artifacts_api
     store = ArtifactStore(root=tmp_path / "af")
     monkeypatch.setattr(api.artifacts_api, "_store", lambda: store)
 
@@ -143,6 +186,7 @@ def test_presentation_helpers_are_pure():
         assert callable(getattr(A, fn)), f"api.artifacts_api 缺少 {fn}"
 
     import inspect
+
     import frontend.components.artifacts_panel as P
     src = inspect.getsource(P)
     # 前端组件不应自己拼 Markdown 正文

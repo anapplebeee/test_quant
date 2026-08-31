@@ -5,6 +5,7 @@ from datetime import date
 
 import gradio as gr
 
+import data_bus
 from api.manual_trading_api import (
     account_view,
     adjust_order_action,
@@ -281,5 +282,27 @@ def render() -> None:
             lambda choice: (*plan_view(choice), *execution_view(choice)),
             inputs=[plan_selector],
             outputs=[plan_summary, orders_table, execution_summary, execution_table],
+        )
+
+        # ===== 跨页联动：任务完成（信号/刷新）→ 自动刷新账本与计划面板（版本门控） =====
+        seen_state = gr.State(data_bus.current())
+
+        def _poll_data_version(seen_val: int, plan_sel: str | None, acct_date: str):
+            changed, cur = data_bus.poll(seen_val)
+            if not changed:
+                return (*[gr.skip()] * 9, seen_val)
+            # 账户 + 成交
+            summary, positions = account_view(acct_date)
+            fills = fills_view()
+            # 计划 + 详情 + 复盘（保留当前选择）
+            plan_bundle = _refresh_plan_bundle(plan_sel, acct_date)
+            return (summary, positions, fills, *plan_bundle, cur)
+
+        gr.Timer(5).tick(
+            _poll_data_version,
+            inputs=[seen_state, plan_selector, account_date],
+            outputs=[account_summary, positions_table, fills_table,
+                     plans_table, plan_selector, plan_summary, orders_table,
+                     execution_summary, execution_table, seen_state],
         )
 
