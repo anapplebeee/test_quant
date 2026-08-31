@@ -300,7 +300,7 @@ git diff --check
 | ID | 工作项 | 主责 | 批次 | 优先级 | 依赖 | 完成标准 |
 |---|---|---|---|---|---|---|
 | ARCH-001 | 统一领域 ID、OrderIntent、RiskDecision、ExecutionReport | 架构师 + 后端交易 | 0 | P0 | 无 | ✅ 2026-09-01 完成：回测/手动/Broker 可转换到统一合同，PaperBroker 全程记录标准化状态回报 |
-| UI-AUDIT-001 | 页面直读与命令入口盘点 | 前端 | 0 | P0 | 无 | 页面/API/状态源矩阵完整，形成 UI-001 清单 |
+| UI-AUDIT-001 | 页面直读与命令入口盘点 | 前端 | 0 | P0 | 无 | ✅ 2026-08-31 完成（76a2aed）：`docs/UI_AUDIT_001.md` 页面×数据源矩阵（12 页面）+ 直读问题清单（DR-01~06）+ Job/Order/Risk 控制台原型与 DTO 需求 + UI-001 整改清单（UI-001-01~09） |
 | DB-001 | SQLite migration、WAL、busy timeout | 后端平台 | 1 | P0 | ARCH-001 | ✅ 2026-09-01 完成：`quart/infrastructure/db.py` migration 框架（user_version/WAL/busy_timeout/上下迁移） |
 | JOB-001 | 持久化 Job/Command | 后端平台 | 1 | P0 | DB-001 | ✅ 2026-09-01 完成：仓储层（2a29557）+ task_api 接线（提交先落库、幂等键去重、重启恢复水合、claim/心跳/取消/终态镜像），10 个接线测试 + 重启恢复测试通过 |
 | DATA-001 | 内容哈希数据快照 | 数据工程 | 0-1 | P0 | 无 | ✅ 2026-09-01 完成：`quart/data/snapshot.py` 内容哈希清单，更新后自动构建，历史修订改变 snapshot_id |
