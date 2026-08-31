@@ -15,6 +15,11 @@ STRATEGY_META: dict[str, dict[str, str]] = {
         "status": "禁止实盘",
         "desc": "60日动量排名基线。项目样本中全市场动量 IC 为负且成本后显著亏损，仅保留作反例和研究基线。",
     },
+    "momentum_path": {
+        "label": "路径动量（研报）",
+        "status": "研究",
+        "desc": "RankMom/带方向 Smooth/剔除涨停日动量的独立研究入口，默认 120/20 日、低频调仓；未进入实盘白名单。",
+    },
     "dual_ma": {
         "label": "双均线",
         "status": "研究",

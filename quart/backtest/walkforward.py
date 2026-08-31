@@ -20,9 +20,10 @@ WFA 把时间切成若干折，每折：
 * **embargo**：train 与 test 之间留空 N 个交易日。
   日频因子（如 20 日动量、低波）在 train 末端的持仓会延续到 test 初期，
   不留 embago 会让相邻段信息"蹭"过去。
-* **因子重算**：每个 fold 用 `MarketData.slice_by_pos()` 重切子面板，
-  策略的 `prepare()` 在子面板上重新计算滚动窗口，因此 train 段
-  不可能用到 test 段的数据。
+* **PIT 上下文**：每个 fold 的策略只在 `[test_lo-history, test_hi)`
+  上 prepare，滚动窗口能在测试首日使用测试日前历史，但不会看到测试结束日之后的数据。
+* **连续账户**：默认将各 fold 的唯一测试日期调度到同一个引擎，现金、持仓、
+  待执行调仓和策略状态跨 fold 延续；`account_mode="independent"` 保留每折独立诊断口径。
 
 过拟合诊断
 ----------
@@ -36,9 +37,10 @@ WFA 把时间切成若干折，每折：
 """
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import product
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
 import pandas as pd
 
@@ -73,6 +75,8 @@ class FoldResult:
     is_metrics: dict
     oos_metrics: dict
     n_candidates: int
+    warmup_days: int = 0
+    account_mode: str = "continuous"
 
 
 @dataclass
@@ -82,6 +86,7 @@ class WFAResult:
     oos_summary: dict = field(default_factory=dict)
     param_grid: dict = field(default_factory=dict)
     selection_metric: str = DEFAULT_METRIC
+    account_mode: str = "continuous"
 
     # ---------------- 诊断 ----------------
 
@@ -90,19 +95,20 @@ class WFAResult:
         """OOS/IS 衰减比。≈1 稳健，<0.5 疑似过拟合。
 
         只统计样本外有交易的折：空仓折的指标恒为 0，
-        会把"没交易"污染成"衰减到 0"。
+        会把"没交易"污染成"衰减到 0"。样本内指标均值非正时，
+        比值没有“衰减”含义，返回 ``None``，避免负/负比值被误判为稳健。
         """
         active = [f for f in self.folds if (f.oos_metrics.get("n_trades") or 0) > 0]
         if not active:
             return None
         is_vals = [f.is_metrics.get(self.selection_metric) for f in active]
         oos_vals = [f.oos_metrics.get(self.selection_metric) for f in active]
-        pairs = [(i, o) for i, o in zip(is_vals, oos_vals)
+        pairs = [(i, o) for i, o in zip(is_vals, oos_vals, strict=True)
                  if i is not None and o is not None]
         if not pairs:
             return None
         mean_is = sum(i for i, _ in pairs) / len(pairs)
-        if abs(mean_is) < 1e-9:
+        if mean_is <= 1e-9:
             return None
         return (sum(o for _, o in pairs) / len(pairs)) / mean_is
 
@@ -111,12 +117,12 @@ class WFAResult:
         """未过滤空仓折的衰减比（仅用于对比展示）。"""
         is_vals = [f.is_metrics.get(self.selection_metric) for f in self.folds]
         oos_vals = [f.oos_metrics.get(self.selection_metric) for f in self.folds]
-        pairs = [(i, o) for i, o in zip(is_vals, oos_vals)
+        pairs = [(i, o) for i, o in zip(is_vals, oos_vals, strict=True)
                  if i is not None and o is not None]
         if not pairs:
             return None
         mean_is = sum(i for i, _ in pairs) / len(pairs)
-        if abs(mean_is) < 1e-9:
+        if mean_is <= 1e-9:
             return None
         return (sum(o for _, o in pairs) / len(pairs)) / mean_is
 
@@ -161,8 +167,77 @@ class WFAResult:
                 "oos_cagr": f.oos_metrics.get("cagr"),
                 "oos_mdd": f.oos_metrics.get("max_drawdown"),
                 "n_trades": f.oos_metrics.get("n_trades"),
+                "warmup_days": f.warmup_days,
             })
         return pd.DataFrame(rows)
+
+
+def _required_history_days(strategy: Any) -> int:
+    """读取策略声明的历史需求，兼容属性和无参方法两种写法。"""
+    value = getattr(strategy, "required_history_days", 0)
+    if callable(value):
+        value = value()
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"{type(strategy).__name__}.required_history_days 必须是非负整数"
+        ) from exc
+
+
+class _ScheduledStrategy:
+    """将已在各自历史上下文中准备好的策略拼成一个连续 OOS 策略。
+
+    ``owner`` 为全局交易日位置到 fold 的唯一映射，重叠 test 窗口后写入的
+    fold 覆盖先写入的 fold，因此同一日期只会调用一次策略、只会产生一次收益。
+    """
+
+    name = "walk_forward_continuous"
+    params: dict = {}
+
+    def __init__(self, execution_start: int, owner: dict[int, int], prepared: list[dict]):
+        self.execution_start = int(execution_start)
+        self.owner = owner
+        self.prepared = prepared
+        self._last_owner: int | None = None
+
+    def prepare(self, md: MarketData) -> None:
+        # 子策略已经用各自的 context_md prepare；这里仅满足 BacktestEngine 接口。
+        return None
+
+    def target_weights(self, i: int) -> dict[str, float]:
+        global_i = self.execution_start + int(i)
+        fold_idx = self.owner.get(global_i)
+        if fold_idx is None:
+            return {}
+        item = self.prepared[fold_idx]
+        if self._last_owner != fold_idx:
+            if self._last_owner is not None:
+                previous = self.prepared[self._last_owner]
+                state = previous["strategy"].serialize_state()
+                state = _translate_state_indices(
+                    state,
+                    int(previous["context_lo"]),
+                    int(item["context_lo"]),
+                )
+                item["strategy"].restore_state(state)
+            self._last_owner = fold_idx
+        local_i = global_i - int(item["context_lo"])
+        return item["strategy"].target_weights(local_i)
+
+    def serialize_state(self) -> dict:
+        return {
+            str(i): strategy.serialize_state()
+            for i, strategy in enumerate(item["strategy"] for item in self.prepared)
+        }
+
+
+def _translate_state_indices(state: dict, from_context_lo: int, to_context_lo: int) -> dict:
+    """把内置策略的本地调仓索引转换到新上下文的本地坐标。"""
+    out = dict(state)
+    if "next_rebalance" in out:
+        out["next_rebalance"] = int(out["next_rebalance"]) + from_context_lo - to_context_lo
+    return out
 
 
 def make_splits(
@@ -239,7 +314,7 @@ def _grid(param_grid: dict[str, Sequence[Any]]) -> list[dict]:
     if not param_grid:
         return [{}]
     keys = list(param_grid)
-    return [dict(zip(keys, combo)) for combo in product(*(param_grid[k] for k in keys))]
+    return [dict(zip(keys, combo, strict=True)) for combo in product(*(param_grid[k] for k in keys))]
 
 
 def _metric_value(summary: dict, metric: str) -> float:
@@ -265,6 +340,7 @@ def run_walk_forward(
     build_strategy_fn: Callable | None = None,
     min_trades: int = 0,
     progress: Callable[[str], None] | None = None,
+    account_mode: str = "continuous",
 ) -> WFAResult:
     """执行 walk-forward 验证。
 
@@ -276,6 +352,9 @@ def run_walk_forward(
     min_trades:
         候选参数在 train 段的最少成交笔数。低于此值视为"没在交易"
         （例如流动性门槛把组合清空），不参与最优评选。
+    account_mode:
+        ``"continuous"``（默认）在所有唯一 OOS 日期上运行一个连续账户；
+        ``"independent"`` 每折从初始现金独立运行，适合诊断单折表现。
     progress:
         进度回调（每折调用一次）。
 
@@ -287,6 +366,8 @@ def run_walk_forward(
         raise ValueError(
             f"selection_metric 必须是 {SELECTABLE_METRICS} 之一，收到 {selection_metric!r}"
         )
+    if account_mode not in ("continuous", "independent"):
+        raise ValueError("account_mode 必须是 'continuous' 或 'independent'")
     if build_strategy_fn is None:
         from quart.strategy import build_strategy as build_strategy_fn
 
@@ -302,13 +383,16 @@ def run_walk_forward(
             f"train={train_days}/test={test_days}/embargo={embargo_days} 的折"
         )
 
-    result = WFAResult(param_grid=dict(param_grid), selection_metric=selection_metric)
-    segments: list[pd.Series] = []
+    result = WFAResult(
+        param_grid=dict(param_grid),
+        selection_metric=selection_metric,
+        account_mode=account_mode,
+    )
     candidates = _grid(param_grid)
+    records: list[dict[str, Any]] = []
 
     for sp in splits:
         train_md = md.slice_by_pos(sp.train_lo, sp.train_hi)
-        test_md = md.slice_by_pos(sp.test_lo, sp.test_hi)
 
         # ---- 样本内选参 ----
         best_score, best_params, best_summary = float("-inf"), {}, {}
@@ -334,52 +418,128 @@ def run_walk_forward(
                                     initial_cash=initial_cash, risk_pipeline=risk_pipeline)
             best_summary = summarize(engine.run_result().equity)
 
-        # ---- 样本外验证 ----
-        strat = build_strategy_fn(strategy_name, **{**base_params, **best_params})
-        engine = BacktestEngine(test_md, strat, fees=fees,
-                                initial_cash=initial_cash, risk_pipeline=risk_pipeline)
-        oos = engine.run_result()
-        bench_slice = (
-            benchmark.iloc[sp.test_lo:sp.test_hi] if benchmark is not None else None
-        )
-        oos_summary = summarize(oos.equity, benchmark=bench_slice)
-        oos_summary["n_trades"] = 0 if oos.trades.empty else len(oos.trades)
+        # 每折测试开始前加载策略声明的历史上下文。上下文只用于计算因子，
+        # 执行引擎仍从 test_lo 开始，因此 warmup 收益不会污染 OOS。
+        selected = build_strategy_fn(strategy_name, **{**base_params, **best_params})
+        warmup_days = _required_history_days(selected)
+        context_lo = max(0, sp.test_lo - warmup_days)
+        records.append({
+            "split": sp,
+            "train_md": train_md,
+            "test_md": md.slice_by_pos(sp.test_lo, sp.test_hi),
+            "best_params": dict(best_params),
+            "is_metrics": dict(best_summary),
+            "warmup_days": warmup_days,
+            "context_lo": context_lo,
+            "n_candidates": len(candidates),
+            "account_mode": account_mode,
+        })
 
-        fold = FoldResult(
-            fold=sp.fold,
-            train_range=(
-                str(train_md.dates[0].date()), str(train_md.dates[-1].date()),
-            ),
-            test_range=(
-                str(test_md.dates[0].date()), str(test_md.dates[-1].date()),
-            ),
-            best_params=dict(best_params),
-            is_metrics=dict(best_summary),
-            oos_metrics=oos_summary,
-            n_candidates=len(candidates),
-        )
-        result.folds.append(fold)
-
-        # 各折净值归一化后按复利链接成一条连续曲线
-        eq = oos.equity.dropna()
-        if len(eq) >= 2 and eq.iloc[0] > 0:
-            segments.append(eq / eq.iloc[0])
-
-        if progress:
-            progress(
-                f"fold {sp.fold}: train {fold.train_range[0]}~{fold.train_range[1]} "
-                f"-> test {fold.test_range[0]}~{fold.test_range[1]} | "
-                f"{selection_metric} IS={best_summary.get(selection_metric, 0):.2f} "
-                f"OOS={oos_summary.get(selection_metric, 0):.2f} | {best_params}"
+    if account_mode == "independent":
+        segments: list[pd.Series] = []
+        for rec in records:
+            sp = rec["split"]
+            test_md = rec["test_md"]
+            context_md = md.slice_by_pos(rec["context_lo"], sp.test_hi)
+            strat = build_strategy_fn(
+                strategy_name, **{**base_params, **rec["best_params"]}
             )
+            engine = BacktestEngine(
+                test_md, strat, fees=fees, initial_cash=initial_cash,
+                risk_pipeline=risk_pipeline, signal_md=context_md,
+                signal_offset=sp.test_lo - rec["context_lo"],
+            )
+            oos = engine.run_result()
+            bench_slice = benchmark.iloc[sp.test_lo:sp.test_hi] if benchmark is not None else None
+            oos_summary = summarize(oos.equity, benchmark=bench_slice)
+            oos_summary["n_trades"] = 0 if oos.trades.empty else len(oos.trades)
+            fold = _make_fold_result(rec, oos_summary)
+            result.folds.append(fold)
+            eq = oos.equity.dropna()
+            if len(eq) >= 2 and eq.iloc[0] > 0:
+                segments.append(eq / eq.iloc[0])
+            if progress:
+                _report_fold(progress, fold, selection_metric)
+        result.oos_equity = _link_segments(segments)
+    else:
+        # 连续账户：每个策略只在自己的 PIT 上下文中 prepare，
+        # 然后按唯一 OOS 日期调度到同一个 BacktestEngine，现金/持仓不重置。
+        owner: dict[int, int] = {}
+        prepared: list[dict[str, Any]] = []
+        for j, rec in enumerate(records):
+            sp = rec["split"]
+            context_md = md.slice_by_pos(rec["context_lo"], sp.test_hi)
+            strat = build_strategy_fn(
+                strategy_name, **{**base_params, **rec["best_params"]}
+            )
+            strat.prepare(context_md)
+            prepared.append({"strategy": strat, "context_lo": rec["context_lo"]})
+            # 后出现的 fold 覆盖重叠日期，保证每个 OOS 日期只有一个归属。
+            for global_i in range(sp.test_lo, sp.test_hi):
+                owner[global_i] = j
 
-    result.oos_equity = _link_segments(segments)
+        if owner:
+            oos_lo, oos_hi = min(owner), max(owner) + 1
+            exec_md = md.slice_by_pos(oos_lo, oos_hi)
+            scheduled = _ScheduledStrategy(oos_lo, owner, prepared)
+            engine = BacktestEngine(
+                exec_md, scheduled, fees=fees,
+                initial_cash=initial_cash, risk_pipeline=risk_pipeline,
+            )
+            continuous = engine.run_result()
+            oos_dates = md.dates[sorted(owner)]
+            result.oos_equity = continuous.equity.reindex(oos_dates).dropna()
+        else:
+            continuous = None
+            result.oos_equity = pd.Series(dtype=float, name="equity")
+
+        for j, rec in enumerate(records):
+            sp = rec["split"]
+            owned_idx = sorted(i for i, owner_j in owner.items() if owner_j == j)
+            dates = md.dates[owned_idx]
+            fold_eq = result.oos_equity.reindex(dates).dropna()
+            bench_slice = benchmark.iloc[owned_idx] if benchmark is not None else None
+            oos_summary = summarize(fold_eq, benchmark=bench_slice)
+            if continuous is None or continuous.trades.empty:
+                n_trades = 0
+            else:
+                n_trades = int(continuous.trades["date"].isin(set(dates)).sum())
+            oos_summary["n_trades"] = n_trades
+            fold = _make_fold_result(rec, oos_summary)
+            result.folds.append(fold)
+            if progress:
+                _report_fold(progress, fold, selection_metric)
+
     if len(result.oos_equity) >= 2:
-        bench_all = (
-            benchmark.iloc[: len(result.oos_equity)] if benchmark is not None else None
-        )
+        bench_all = benchmark.reindex(result.oos_equity.index) if benchmark is not None else None
         result.oos_summary = summarize(result.oos_equity, benchmark=bench_all)
     return result
+
+
+def _make_fold_result(rec: dict[str, Any], oos_summary: dict) -> FoldResult:
+    sp = rec["split"]
+    train_md = rec["train_md"]
+    test_md = rec["test_md"]
+    return FoldResult(
+        fold=sp.fold,
+        train_range=(str(train_md.dates[0].date()), str(train_md.dates[-1].date())),
+        test_range=(str(test_md.dates[0].date()), str(test_md.dates[-1].date())),
+        best_params=dict(rec["best_params"]),
+        is_metrics=dict(rec["is_metrics"]),
+        oos_metrics=oos_summary,
+        n_candidates=int(rec.get("n_candidates", 0)),
+        warmup_days=int(rec["warmup_days"]),
+        account_mode=rec.get("account_mode", "continuous"),
+    )
+
+
+def _report_fold(progress: Callable[[str], None], fold: FoldResult, metric: str) -> None:
+    progress(
+        f"fold {fold.fold}: train {fold.train_range[0]}~{fold.train_range[1]} "
+        f"-> test {fold.test_range[0]}~{fold.test_range[1]} | "
+        f"{metric} IS={fold.is_metrics.get(metric, 0):.2f} "
+        f"OOS={fold.oos_metrics.get(metric, 0):.2f} | {fold.best_params}"
+    )
 
 
 def _link_segments(segments: Iterable[pd.Series]) -> pd.Series:

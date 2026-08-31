@@ -34,6 +34,7 @@ class RandomTopKStrategy(BaseStrategy):
     """
 
     name = "random_topk"
+    required_history_days = 21
 
     PARAMS_SCHEMA = {
         "top_k": (int, 10, "随机持仓数量"),
@@ -45,6 +46,10 @@ class RandomTopKStrategy(BaseStrategy):
         "seed": (int, 0, "随机种子"),
     }
 
+    def __init__(self, **params):
+        super().__init__(**params)
+        self.required_history_days = int(self.params.get("liquidity_days", 20)) + 1
+
     def prepare(self, md: MarketData) -> None:
         super().prepare(md)
         p = self.params
@@ -55,6 +60,7 @@ class RandomTopKStrategy(BaseStrategy):
         self.liquidity_days = int(p.get("liquidity_days", 20))
         self.min_price = p.get("min_price")
         self.warmup = self.liquidity_days + 1
+        self.required_history_days = self.warmup
         self._rng = np.random.default_rng(int(p.get("seed", 0)))
         self._next_rebalance = self.warmup
 
@@ -77,6 +83,21 @@ class RandomTopKStrategy(BaseStrategy):
         pick = self._rng.choice(pool.index.to_numpy(), size=self.top_k, replace=False)
         weight = min(1.0 / len(pick), self.max_weight)
         return {sym: weight for sym in pick}
+
+    def state_dict(self):
+        return {
+            "next_rebalance": int(self._next_rebalance),
+            "rng_state": self._rng.bit_generator.state,
+        }
+
+    def load_state_dict(self, state):
+        super().load_state_dict(state)
+        if not state:
+            return
+        if "next_rebalance" in state:
+            self._next_rebalance = int(state["next_rebalance"])
+        if "rng_state" in state:
+            self._rng.bit_generator.state = state["rng_state"]
 
 
 def k_day_rebal(rets: pd.DataFrame, k: int) -> pd.Series:

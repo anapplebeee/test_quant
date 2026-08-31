@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any, ClassVar
 
 import pandas as pd
@@ -39,6 +41,10 @@ class BaseStrategy(ABC):
     """
 
     name: str = "base"
+
+    #: 因子计算所需的最少历史交易日数。WFA 会加载这些历史，
+    #: 但只把测试起始日之后的收益计入 OOS。
+    required_history_days: ClassVar[int] = 0
 
     #: 参数契约。子类覆盖以启用严格校验。
     PARAMS_SCHEMA: ClassVar[dict[str, ParamSpec]] = {}
@@ -96,6 +102,25 @@ class BaseStrategy(ABC):
     def prepare(self, md: MarketData) -> None:
         """预计算钩子。子类必须调用 `super().prepare(md)` 以保存 md。"""
         self._md = md
+
+    # ---------------- 可恢复状态 ----------------
+
+    def state_dict(self) -> dict[str, Any]:
+        """返回策略运行态；有跨日状态的子类应覆盖此方法。"""
+        return {}
+
+    def load_state_dict(self, state: Mapping[str, Any] | None) -> None:
+        """恢复 ``state_dict`` 返回的状态。默认策略没有运行态。"""
+        if state is not None and not isinstance(state, Mapping):
+            raise TypeError(f"{type(self).__name__}.load_state_dict 需要 mapping")
+
+    def serialize_state(self) -> dict[str, Any]:
+        """返回与策略内部对象解耦的状态副本。"""
+        return deepcopy(self.state_dict())
+
+    def restore_state(self, state: Mapping[str, Any] | None) -> None:
+        """``load_state_dict`` 的语义化别名。"""
+        self.load_state_dict(deepcopy(state) if state is not None else None)
 
     def _require_md(self) -> MarketData:
         if self._md is None:

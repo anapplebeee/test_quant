@@ -41,26 +41,42 @@ strategy:
   # 换手频率扫描（累计/最大回撤/笔数）：5日 -31.7%/-42.2%/1779 → 20日 +2.1%/-18.5%/721
   #   → 30日 +31.2%/-19.5%/509 → 40日 +40.4%/-16.7%/379 → 60日 +38.2%/-23.7%/234。
   # 40 日为最优（收益最高、回撤最小）；60 日起信号衰减、回撤放大。
-  # 2026-08-31 更新（GLM，本地 195 只池实验 + 市场环境）：
-  #   lowvol_indz → top50/60d/rev0.3（B2 组合，全样本 CAGR +11.2% vs 基线 +5.4%，
-  #   Sharpe 0.74 vs 0.42）。市场 PE 分位 87-97%（高估）+ 高低切换，防御分散适配。
-  #   注意：小池口径 + WFA 衰减比 0.62，预期收益打折；全市场数据补齐后复验。
+  # 2026-08-31 全市场复验后回退：top30/45d/rev0。
+  #   完整 5409 只股票数据（模拟过滤后口径）下 CAGR 7.53% / Sharpe 0.69，
+  #   2 倍成本压力仍为 CAGR 6.09% / Sharpe 0.57；优于 top50/60/rev0.3
+  #   的 3.08% / 0.32。详见 reports/full_market_validation_2026-08-31.md。
   overrides:
+    # 2026-08-31 研报移植验证（momentum_rotation, 2024-01~2026-08）：
+    # R4 多因子打分分级择时 vs 原均线择时 → 超额年化 +5.61% vs -2.26%，卡玛 0.40 vs 0.21。
+    # 详细见 quart/strategy/timing.py 模块注释（广发 125 技术指标择时，因子打分法）。
+    momentum_rotation:
+      regime_mode: score
+      timing_levels: 3
+      # 动量策略对换手不敏感（零成本也亏，属因子失效），保持原频率
+      rebalance_days: 5
+    # 研报路径动量研究入口：不在 live_allowlist，仅用于回测/WFA。
+    # smooth 为带方向路径平滑度；正式入场前仍需与 RankMom/RemoveUpLimit 做 OOS 对比。
+    momentum_path:
+      momentum_mode: smooth
+      lookback_days: 240
+      momentum_skip_days: 0
+      rebalance_days: 20
+      top_k: 20
+      max_weight_pct: 0.10
+      regime_mode: score
+      timing_levels: 3
     lowvol_composite:
       rebalance_days: 40
       top_k: 20
       rank_buffer: 0.5
     lowvol_indz:
-      rebalance_days: 60
-      top_k: 50
+      rebalance_days: 45
+      top_k: 30
       rank_buffer: 0.5
       industry_z: true
-      rev_weight: 0.3
+      rev_weight: 0.0
     # 双均线策略每日换仓为成本杀手，默认降频到 5 日
     dual_ma:
-      rebalance_days: 5
-    # 动量策略对换手不敏感（零成本也亏，属因子失效），保持原频率
-    momentum_rotation:
       rebalance_days: 5
   min_price: 2.0
 

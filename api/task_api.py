@@ -36,7 +36,7 @@ TASKS = {
 "args": [],
 "icon": "🔄",
 "resource": "data",
-"timeout": 1800,
+"timeout": 14400,
         "outputs": {
             "日线数据": "data/daily/year=*/（分区布局）",
             "股票池快照": "data/universe/*.parquet",
@@ -210,8 +210,19 @@ ALLOWED_ARGS: dict[str, dict[str, str]] = {
         "--strategy": r"^[A-Za-z0-9_]+$",
         "--start": r"^\d{4}-\d{2}-\d{2}$",
         "--end": r"^\d{4}-\d{2}-\d{2}$",
+        "--research-mode": r"^(formal|exploratory)$",
+        "--universe-index": r"^\d{6}$",
+        "--index": r"^\d{6}$",
         "--rebalance-days": r"^\d{1,3}$",
         "--top-k": r"^\d{1,3}$",
+        "--rev-weight": r"^(0(\.\d+)?|1(\.0+)?)$",
+        "--regime-mode": r"^(ma|score)$",
+        "--timing-levels": r"^\d{1,2}$",
+        "--momentum-mode": r"^(simple|rank|smooth|remove_limit_up)$",
+        "--lookback-days": r"^\d{1,4}$",
+        "--momentum-skip-days": r"^\d{1,3}$",
+        "--limit-up-threshold": r"^(0\.\d+|1\.0+)$",
+        "--cost-multiplier": r"^(0(\.\d+)?|[1-9](\.\d+)?|10(\.0+)?)$",
         "--no-regime": None,   # 开关型，不带值
         "--no-risk": None,
     },
@@ -232,6 +243,7 @@ ALLOWED_ARGS: dict[str, dict[str, str]] = {
         "--metric": r"^(sharpe|cagr|calmar|total_return|bench_excess_cagr)$",
         "--min-trades": r"^\d{1,6}$",
         "--grid": r"^[A-Za-z0-9_=.,\-]+$",
+        "--account-mode": r"^(continuous|independent)$",
         "--anchored": None,
         "--no-risk": None,
     },
@@ -247,6 +259,7 @@ ALLOWED_ARGS: dict[str, dict[str, str]] = {
         "--start": r"^\d{8}$",
         "--max": r"^\d{1,5}$",
         "--keep-st": None,
+        "--full-refresh": None,
     },
     "ml_train": {"--start": r"^\d{8}$"},
     "factor_research": {
@@ -269,6 +282,7 @@ _FLAG_ONLY = {
     "--dry-run",
     "--no-push",
     "--keep-st",
+    "--full-refresh",
     "--describe-only",
     "--refresh",
 }
@@ -499,14 +513,19 @@ class TaskQueue:
     # ---------- 内部方法 ----------
 
     def _build_command(self, task: Task) -> list[str]:
-        """构建安全命令"""
-        if shutil.which("uv"):
-            return ["uv", "run", "python", "-u", task.script, *task.args]
+        """构建安全命令，并与当前应用保持同一 Python 运行时。"""
+        import sys
+
+        # 服务已成功启动说明当前解释器具备应用依赖。优先复用它可避免 PATH
+        # 上的 uv/system Python 生成不同版本的子进程，也不依赖全局 uv 缓存。
+        if sys.executable and os.path.exists(sys.executable):
+            return [sys.executable, "-u", task.script, *task.args]
         venv_python = os.path.join(".venv", "Scripts", "python.exe")
         if os.path.exists(venv_python):
             return [venv_python, "-u", task.script, *task.args]
-        import sys
-        return [sys.executable, "-u", task.script, *task.args]
+        if shutil.which("uv"):
+            return ["uv", "run", "python", "-u", task.script, *task.args]
+        return ["python", "-u", task.script, *task.args]
 
     def _ensure_dispatcher(self):
         """确保调度线程运行（带锁单例，回调从任务实例读取）"""
@@ -613,6 +632,14 @@ class TaskQueue:
                         task.status = TaskStatus.COMPLETED if returncode == 0 else TaskStatus.FAILED
                 task.process = None
 
+                # 数据版本总线：任务成功完成后通知前端各页面刷新（数据刷新/信号/回测等
+                # 会改写 reports/、data/ 下的产出，页面静态数据需要更新）
+                if task.status == TaskStatus.COMPLETED:
+                    with suppress(Exception):
+                        import data_bus
+
+                        data_bus.bump(task.family)
+
                 if task.on_complete:
                     with suppress(Exception):
                         task.on_complete(task.task_id, returncode)
@@ -636,7 +663,7 @@ task_queue = TaskQueue()
 
 
 def _kill_process_tree(process: subprocess.Popen) -> None:
-    """杀掉整个进程树：Windows 下 terminate() 只杀 uv 不杀孙进程 python"""
+    """杀掉整个进程树：Windows 下 terminate() 可能只杀启动器而遗留子进程。"""
     if process is None or process.poll() is not None:
         return
     try:
@@ -645,6 +672,13 @@ def _kill_process_tree(process: subprocess.Popen) -> None:
                 ["taskkill", "/F", "/T", "/PID", str(process.pid)],
                 capture_output=True, timeout=10,
             )
+            # taskkill 失败时可能只返回非零码而不抛异常；等待确认，仍存活就
+            # 直接终止当前 Python 进程，避免取消/超时任务永久卡在 RUNNING。
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
         else:
             import signal
             process.send_signal(signal.SIGTERM)

@@ -29,7 +29,8 @@ def _latest_wfa() -> pd.DataFrame | None:
 
 def _decay_ratio(row: pd.Series) -> float | None:
     is_s = float(row.get("is_sharpe") or 0.0)
-    if abs(is_s) < 1e-9:
+    # IS 夏普非正时，OOS/IS 的负/负比值会伪装成“稳健”；此时衰减比无定义。
+    if is_s <= 1e-9:
         return None
     return float(row.get("oos_sharpe") or 0.0) / is_s
 
@@ -101,5 +102,11 @@ def render():
             fig2 = px.histogram(ratios, nbins=10, labels={"value": "衰减比"},
                                 title="衰减比分布")
             fig2.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0),
-                              template="plotly_white")
+                                template="plotly_white")
             gr.Plot(value=fig2)
+        else:
+            gr.Markdown(
+                "### 📊 过拟合诊断\n"
+                "> 衰减比无法计算：样本内夏普均值非正或没有有效折；"
+                "请直接查看逐折 OOS 夏普和累计净值。"
+            )

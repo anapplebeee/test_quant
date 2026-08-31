@@ -179,6 +179,56 @@ def filter_for_simulation(
     return out.copy()
 
 
+def filter_for_pit_universe(
+    bars: pd.DataFrame,
+    index_code: str = "000300",
+    require_complete: bool = True,
+) -> pd.DataFrame:
+    """按交易日应用 Point-in-Time 成分股历史。
+
+    ``get_constituents()`` 的当前快照回退适合探索，但不能用于正式回测。
+    本函数只读取 ``universe_history`` 的生效区间，并在历史缺失或覆盖不完整
+    时阻断，避免把当前成分股静默套到过去日期。
+    """
+    if bars.empty:
+        return bars.copy()
+    from quart.data.universe_history import load_history
+
+    hist = load_history(index_code)
+    if hist is None or hist.empty:
+        raise RuntimeError(
+            f"{index_code} 缺少 PIT 成分股历史；正式回测被阻断。"
+            "请先运行 scripts/build_universe_history.py，或显式使用 exploratory 模式。"
+        )
+    hist = hist.copy()
+    hist["symbol"] = hist["symbol"].astype(str).str.zfill(6)
+    hist["in_date"] = pd.to_datetime(hist["in_date"])
+    hist["out_date"] = pd.to_datetime(hist["out_date"]).fillna(pd.Timestamp("2262-01-01"))
+    bars_dates = pd.to_datetime(bars["date"])
+    unique_dates = pd.DatetimeIndex(bars_dates.drop_duplicates().sort_values())
+    active_by_date: dict[pd.Timestamp, set[str]] = {}
+    missing: list[pd.Timestamp] = []
+    for date in unique_dates:
+        active = hist.loc[
+            (hist["in_date"] <= date) & (hist["out_date"] >= date), "symbol"
+        ]
+        if active.empty:
+            missing.append(date)
+        else:
+            active_by_date[date] = set(active.tolist())
+    if missing and require_complete:
+        raise RuntimeError(
+            f"{index_code} PIT 成分股历史未覆盖 {len(missing)} 个交易日，"
+            f"范围 {missing[0].date()}~{missing[-1].date()}；正式回测被阻断。"
+        )
+    keep = pd.Series(
+        [str(sym).zfill(6) in active_by_date.get(date, set())
+         for sym, date in zip(bars["symbol"], bars_dates, strict=True)],
+        index=bars.index,
+    )
+    return bars.loc[keep].copy()
+
+
 def _fetch_from_csindex(index_code: str) -> list[str]:
     try:
         import akshare as ak

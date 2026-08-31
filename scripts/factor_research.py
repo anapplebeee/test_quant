@@ -9,6 +9,7 @@ from rich.table import Table
 from quart.backtest.engine import MarketData
 from quart.config import load_config
 from quart.data.store import BarStore
+from quart.research.momentum import rank_momentum, remove_limit_up_momentum, signed_smooth
 
 console = Console()
 
@@ -23,7 +24,12 @@ def build_factors(md: MarketData) -> dict[str, pd.DataFrame]:
     v = md.volumes
     a = md.amounts.ffill()
     ret1 = c.pct_change(fill_method=None)
-    vwap = (a / v.replace(0, np.nan)).ffill()
+    # 滚动 VWAP 使用窗口内总成交额/总成交量，避免每日 VWAP 简单均值
+    # 让低成交量交易日获得不合理的等权重。
+    vwap = (
+        a.rolling(20, min_periods=20).sum()
+        / v.rolling(20, min_periods=20).sum().replace(0, np.nan)
+    )
 
     mom60 = c.pct_change(60, fill_method=None)
     factors = {
@@ -37,9 +43,14 @@ def build_factors(md: MarketData) -> dict[str, pd.DataFrame]:
         "amp20_neg": -(((h - l) / c.shift(1).replace(0, np.nan)).rolling(20).mean()),
         "amp_expand20": a.rolling(20).mean() / a.rolling(120).mean(),
         "net_flow20": (np.sign(ret1) * v).rolling(20).sum() / v.rolling(20).sum(),
-        "vwap_dev20": c / vwap.rolling(20).mean() - 1.0,
+        "vwap_dev20": c / v - 1.0,
         "pv_corr20_neg": -ret1.rolling(20).corr(np.log(a.where(a > 0))),
         "trend_eff_dir": mom60.abs() / ret1.abs().rolling(60).sum().replace(0, np.nan) * np.sign(mom60),
+        # 研报路径动量候选：与 strategy.momentum_path 使用同一实现，
+        # 避免研究脚本和回测策略出现公式漂移。
+        "rank_mom120_20": rank_momentum(c, window=120, skip_days=20),
+        "smooth240": signed_smooth(c, window=240, skip_days=0),
+        "ret240_20_remove_uplimit": remove_limit_up_momentum(c, window=240, skip_days=20),
         "lottery20_neg": -ret1.rolling(20).max(),
         "gap_avg": (o / c.shift(1) - 1.0).rolling(20).mean(),
     }

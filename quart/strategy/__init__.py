@@ -5,10 +5,11 @@ from quart.strategy.base import BaseStrategy
 from quart.strategy.dual_ma import DualMAStrategy
 from quart.strategy.lowvol_composite import LowVolCompositeStrategy
 from quart.strategy.ml_rank import MLRankStrategy
-from quart.strategy.momentum import MomentumRotationStrategy
+from quart.strategy.momentum import MomentumRotationStrategy, PathMomentumStrategy
 
 REGISTRY: dict[str, type[BaseStrategy]] = {
     "momentum_rotation": MomentumRotationStrategy,
+    "momentum_path": PathMomentumStrategy,
     "dual_ma": DualMAStrategy,
     "ml_rank": MLRankStrategy,
     "lowvol_composite": LowVolCompositeStrategy,

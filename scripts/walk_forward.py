@@ -30,23 +30,23 @@ uv run python scripts/walk_forward.py --strategy lowvol_indz `
 """
 from __future__ import annotations
 
-import common
-
 import argparse
 import datetime as dt
 from pathlib import Path
 
+import pandas as pd
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+import common
 from quart.backtest.metrics import format_summary
 from quart.backtest.walkforward import make_splits, run_walk_forward
 from quart.config import load_config
 from quart.data.artifacts import ArtifactStore
 from quart.data.market import MarketData
 from quart.data.store import BarStore
-from quart.data.universe import filter_for_simulation
+from quart.data.universe import filter_for_pit_universe, filter_for_simulation
 from quart.risk.rules import make_weight_validator
 from quart.strategy import build_strategy
 
@@ -87,6 +87,15 @@ def main() -> None:
     parser.add_argument("--strategy", default=cfg["strategy"]["name"])
     parser.add_argument("--start", default="2020-01-01")
     parser.add_argument("--end", default=None)
+    parser.add_argument(
+        "--research-mode", choices=("exploratory", "formal"), default="exploratory",
+        help="formal 强制按交易日 PIT 股票池；exploratory 标记为 NON_PIT",
+    )
+    parser.add_argument(
+        "--universe-index", "--index", dest="universe_index",
+        default=cfg["universe"]["default_index"],
+        help="PIT 股票池指数代码（默认 config.universe.default_index）",
+    )
     parser.add_argument("--train", type=int, default=504, help="训练窗口（交易日，默认 504≈2年）")
     parser.add_argument("--test", type=int, default=126, help="测试窗口（交易日，默认 126≈半年）")
     parser.add_argument("--step", type=int, default=None, help="滚动步长（默认=test）")
@@ -96,6 +105,10 @@ def main() -> None:
     parser.add_argument("--grid", action="append", default=[], metavar="key=v1,v2")
     parser.add_argument("--min-trades", type=int, default=0, help="train 段最少成交笔数")
     parser.add_argument("--no-risk", action="store_true", help="关闭回测内风控")
+    parser.add_argument(
+        "--account-mode", choices=("continuous", "independent"), default="continuous",
+        help="连续 OOS 账户（默认）或每折独立账户",
+    )
     parser.add_argument("--save-dir", default=str(common.reports_dir()))
     args = parser.parse_args()
 
@@ -105,6 +118,22 @@ def main() -> None:
     bench = bench[(bench["date"] >= args.start) & (args.end is None or bench["date"] <= args.end)]
     if bars.empty:
         raise SystemExit("本地数据为空，请先运行 scripts/update_data.py")
+
+    universe_meta = {
+        "mode": args.research_mode,
+        "index": args.universe_index,
+        "quality": "PIT" if args.research_mode == "formal" else "NON_PIT",
+        "source": "universe_history" if args.research_mode == "formal" else "all_local_bars",
+        "rules_version": "ashare_v1",
+        "rule_version": "ashare_v1",
+    }
+    if args.research_mode == "formal":
+        try:
+            bars = filter_for_pit_universe(bars, args.universe_index)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc)) from exc
+        if bars.empty:
+            raise SystemExit("PIT 股票池在回测区间内为空")
 
     dc = cfg.get("data", {})
     bars = filter_for_simulation(
@@ -116,6 +145,8 @@ def main() -> None:
     )
     if bars.empty:
         raise SystemExit("过滤板块/ST 后无可用标的")
+    universe_meta["coverage_start"] = str(pd.Timestamp(bars["date"].min()).date())
+    universe_meta["coverage_end"] = str(pd.Timestamp(bars["date"].max()).date())
 
     md = MarketData.from_bars(bars, benchmark=bench)
     bench_close = bench.set_index("date")["close"].reindex(md.dates).ffill()
@@ -158,6 +189,9 @@ def main() -> None:
             "embargo_days": args.embargo, "anchored": args.anchored,
             "metric": args.metric, "start": args.start, "end": args.end,
             "risk_enabled": not args.no_risk,
+            "account_mode": args.account_mode,
+            "research_mode": args.research_mode,
+            "universe": universe_meta,
         },
     )
 
@@ -171,6 +205,7 @@ def main() -> None:
             initial_cash=float(cfg["backtest"]["initial_cash"]),
             risk_pipeline=risk_pipeline,
             min_trades=args.min_trades,
+            account_mode=args.account_mode,
             progress=lambda s: console.print(f"  {s}"),
         )
     except Exception as exc:
@@ -212,7 +247,7 @@ def main() -> None:
         )
 
     if decay is None:
-        lines.append("衰减比: 无法计算（无有效折或指标缺失）")
+        lines.append("衰减比: 无法计算（无有效折、指标缺失或样本内指标均值非正）")
     else:
         verdict = (
             "参数稳健，样本外未明显衰减" if decay >= 0.8

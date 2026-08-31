@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import common
-
 import argparse
 import datetime as dt
 import json
 from pathlib import Path
 
+import pandas as pd
 from rich.console import Console
 from rich.panel import Panel
 
+import common
 from quart.backtest.engine import BacktestEngine
 from quart.backtest.metrics import format_summary, summarize
 from quart.config import load_config
@@ -17,7 +17,8 @@ from quart.data.artifacts import ArtifactStore
 from quart.data.benchmark import equal_weight_benchmark
 from quart.data.market import MarketData
 from quart.data.store import BarStore
-from quart.data.universe import filter_for_simulation
+from quart.data.universe import filter_for_pit_universe, filter_for_simulation
+from quart.execution.fees import Fees
 from quart.risk.rules import make_weight_validator
 from quart.strategy import build_strategy
 
@@ -29,15 +30,61 @@ def main() -> None:
     parser.add_argument("--strategy", default=load_config()["strategy"]["name"])
     parser.add_argument("--start", default="2020-01-01")
     parser.add_argument("--end", default=None)
+    parser.add_argument(
+        "--research-mode", choices=("exploratory", "formal"), default="exploratory",
+        help="formal 强制按交易日 PIT 股票池；exploratory 标记为 NON_PIT",
+    )
+    parser.add_argument(
+        "--universe-index", "--index", dest="universe_index",
+        default=load_config()["universe"]["default_index"],
+        help="PIT 股票池指数代码（默认 config.universe.default_index）",
+    )
     parser.add_argument("--no-regime", action="store_true")
+    parser.add_argument(
+        "--regime-mode", choices=("ma", "score"), default=None,
+        help="择时模式：ma=均线（默认），score=R4 多因子打分分级仓位",
+    )
+    parser.add_argument(
+        "--timing-levels", type=int, default=None,
+        help="score 模式档位数（2=全仓/空仓，3=加半仓档），仅 --regime-mode score 有效",
+    )
+    parser.add_argument(
+        "--momentum-mode",
+        choices=("simple", "rank", "smooth", "remove_limit_up"),
+        default=None,
+        help="动量口径：simple/rank/smooth/remove_limit_up",
+    )
+    parser.add_argument(
+        "--lookback-days", type=int, default=None,
+        help="动量回看窗口（交易日），覆盖策略配置",
+    )
+    parser.add_argument(
+        "--momentum-skip-days", type=int, default=None,
+        help="动量跳过最近交易日数量（例如 20）",
+    )
+    parser.add_argument(
+        "--limit-up-threshold", type=float, default=None,
+        help="剔除涨停日动量的收益阈值（默认 0.095）",
+    )
     parser.add_argument("--save-dir", default=str(common.reports_dir()))
     # 前端可调参数：显式传入时覆盖 config（含 config.strategy.overrides 按策略覆盖）
     parser.add_argument("--rebalance-days", type=int, default=None,
                         help="换手频率（交易日），覆盖 config")
     parser.add_argument("--top-k", type=int, default=None, help="持仓数量，覆盖 config")
+    parser.add_argument("--rev-weight", type=float, default=None, help="短期反转因子权重，覆盖 config")
     parser.add_argument("--no-risk", action="store_true",
                         help="关闭回测内风控（默认启用，与实盘同一约束）")
+    parser.add_argument(
+        "--cost-multiplier",
+        type=float,
+        default=1.0,
+        help="交易成本压力倍数，0=零成本、1=配置成本、2=双倍成本",
+    )
     args = parser.parse_args()
+    if not 0 <= args.cost_multiplier <= 10:
+        parser.error("--cost-multiplier 必须在 0 到 10 之间")
+    if args.rev_weight is not None and not 0 <= args.rev_weight <= 1:
+        parser.error("--rev-weight 必须在 0 到 1 之间")
 
     cfg = load_config()
     store = BarStore()
@@ -46,6 +93,22 @@ def main() -> None:
     bench = bench[(bench["date"] >= args.start) & (args.end is None or bench["date"] <= args.end)]
     if bars.empty:
         raise SystemExit("本地数据为空，请先运行 scripts/update_data.py")
+
+    universe_meta = {
+        "mode": args.research_mode,
+        "index": args.universe_index,
+        "quality": "PIT" if args.research_mode == "formal" else "NON_PIT",
+        "source": "universe_history" if args.research_mode == "formal" else "all_local_bars",
+        "rules_version": "ashare_v1",
+        "rule_version": "ashare_v1",
+    }
+    if args.research_mode == "formal":
+        try:
+            bars = filter_for_pit_universe(bars, args.universe_index)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc)) from exc
+        if bars.empty:
+            raise SystemExit("PIT 股票池在回测区间内为空")
 
     data_cfg = cfg.get("data", {})
     bars = filter_for_simulation(
@@ -57,14 +120,36 @@ def main() -> None:
     )
     if bars.empty:
         raise SystemExit("过滤板块/ST 后无可用标的，请检查 data 配置或本地数据")
+    universe_meta["coverage_start"] = str(pd.Timestamp(bars["date"].min()).date())
+    universe_meta["coverage_end"] = str(pd.Timestamp(bars["date"].max()).date())
 
     explicit_params = {}
     if args.no_regime:
         explicit_params["use_regime_filter"] = False
+    if args.regime_mode is not None:
+        explicit_params["regime_mode"] = args.regime_mode
+    if args.timing_levels is not None:
+        explicit_params["timing_levels"] = args.timing_levels
+    if args.momentum_mode is not None:
+        explicit_params["momentum_mode"] = args.momentum_mode
+    if args.lookback_days is not None:
+        if args.lookback_days < 1:
+            parser.error("--lookback-days 必须为正整数")
+        explicit_params["lookback_days"] = args.lookback_days
+    if args.momentum_skip_days is not None:
+        if args.momentum_skip_days < 0:
+            parser.error("--momentum-skip-days 不能为负数")
+        explicit_params["momentum_skip_days"] = args.momentum_skip_days
+    if args.limit_up_threshold is not None:
+        if not 0 < args.limit_up_threshold < 1:
+            parser.error("--limit-up-threshold 必须在 0 到 1 之间")
+        explicit_params["limit_up_threshold"] = args.limit_up_threshold
     if args.rebalance_days is not None:
         explicit_params["rebalance_days"] = args.rebalance_days
     if args.top_k is not None:
         explicit_params["top_k"] = args.top_k
+    if args.rev_weight is not None:
+        explicit_params["rev_weight"] = args.rev_weight
     strategy = build_strategy(args.strategy, **explicit_params)
     effective_params = dict(strategy.params)
 
@@ -85,12 +170,17 @@ def main() -> None:
             "strategy": args.strategy,
             **effective_params,
             "start": args.start, "end": args.end,
-            "no_regime": args.no_regime, "risk_enabled": not args.no_risk,
+            "no_regime": args.no_regime,
+            "risk_enabled": not args.no_risk,
+            "cost_multiplier": args.cost_multiplier,
+            "research_mode": args.research_mode,
+            "universe": universe_meta,
         },
     )
 
     try:
-        result = BacktestEngine(md, strategy, risk_pipeline=risk_pipeline).run_result()
+        fees = Fees.from_config().scaled(args.cost_multiplier)
+        result = BacktestEngine(md, strategy, fees=fees, risk_pipeline=risk_pipeline).run_result()
     except Exception as exc:
         run.finish(status="failed", error=str(exc))
         raise
@@ -103,7 +193,11 @@ def main() -> None:
     ew_bench = equal_weight_benchmark(equity, bars)
     summary = summarize(equity, benchmark=bench_close, benchmark2=ew_bench, benchmark2_name="bench2")
 
-    console.print(Panel(f"策略: {args.strategy}  |  交易笔数: {len(trades_df)}", title="Quart Backtest"))
+    console.print(Panel(
+        f"策略: {args.strategy}  | 交易笔数: {len(trades_df)} | "
+        f"成本压力: {args.cost_multiplier:g}x | 股票池: {universe_meta['quality']}",
+        title="Quart Backtest",
+    ))
     console.print(format_summary(summary))
     if violations:
         console.print(f"[yellow]风控干预 {len(violations)} 次（单票上限 "

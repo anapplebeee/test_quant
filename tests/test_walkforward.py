@@ -129,6 +129,26 @@ class _Declining(BaseStrategy):
         return {mom.idxmin(): 1.0}
 
 
+class _HistorySignal(BaseStrategy):
+    """只有观察到足够历史后才在每折首个测试日发出信号。"""
+
+    name = "history_signal"
+    required_history_days = 5
+
+    def prepare(self, md):
+        super().prepare(md)
+        self.seen = 0
+
+    def target_weights(self, i):
+        self.seen = max(self.seen, i)
+        if i < self.required_history_days:
+            return {}
+        # 单次信号足以验证测试首日的上下文确实被加载；引擎在下一交易日执行。
+        if i == self.required_history_days:
+            return {"S00": 1.0}
+        return {}
+
+
 def _md(n: int = 400, n_syms: int = 8, seed: int = 3) -> MarketData:
     rng = np.random.default_rng(seed)
     dates = pd.date_range("2022-01-03", periods=n, freq="B")
@@ -204,6 +224,35 @@ def test_folds_cover_disjoint_test_windows():
         assert a[1] < b[0] or a[1] == b[0], "test 窗口不应乱序"
 
 
+def test_wfa_loads_history_before_oos_without_counting_warmup_returns():
+    md = _md(n=160, n_syms=3)
+    result = run_walk_forward(
+        md, None, "history_signal", train_days=80, test_days=20,
+        embargo_days=0, fees=Fees.zero(),
+        build_strategy_fn=lambda name, **kw: _HistorySignal(**kw),
+        account_mode="independent",
+    )
+    assert result.folds
+    assert all(f.warmup_days == 5 for f in result.folds)
+    # 每折的测试区间仍从 test_lo 开始，而不是从 warmup context 开始。
+    assert result.folds[0].test_range[0] == str(md.dates[80].date())
+    assert result.folds[0].oos_metrics["n_trades"] == 1
+
+
+def test_continuous_wfa_dedupes_overlapping_oos_dates_and_keeps_one_account():
+    md = _md(n=180, n_syms=3)
+    result = run_walk_forward(
+        md, None, "history_signal", train_days=80, test_days=30,
+        step_days=10, embargo_days=0, fees=Fees.zero(),
+        build_strategy_fn=lambda name, **kw: _HistorySignal(**kw),
+    )
+    assert result.account_mode == "continuous"
+    assert not result.oos_equity.index.has_duplicates
+    expected = len({i for sp in make_splits(180, 80, 30, step_days=10)
+                     for i in range(sp.test_lo, sp.test_hi)})
+    assert len(result.oos_equity) == expected
+
+
 # ---------------------------------------------------------------- 诊断
 
 
@@ -232,6 +281,18 @@ def test_decay_and_stability_on_synthetic_result():
 
 def test_decay_none_when_no_folds():
     assert WFAResult().decay is None
+
+
+def test_decay_none_when_in_sample_metric_is_nonpositive():
+    """IS 指标均值非正时，负/负比值不应伪装成稳健。"""
+    from quart.backtest.walkforward import FoldResult
+
+    r = WFAResult(selection_metric="sharpe")
+    r.folds = [
+        FoldResult(0, ("a", "b"), ("c", "d"), {}, {"sharpe": -0.5},
+                   {"sharpe": -1.0, "n_trades": 10}, 2),
+    ]
+    assert r.decay is None
 
 
 def test_decay_ignores_folds_without_trades():

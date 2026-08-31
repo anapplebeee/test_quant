@@ -25,19 +25,13 @@ import numpy as np
 import pandas as pd
 
 from quart.config import load_config
-from quart.data.market import MarketData  # noqa: F401  (re-export)
-from quart.execution.constraints import (  # noqa: F401  (re-export)
-    A_SHARE_LOT as LOT,
-)
-from quart.execution.constraints import FLAT  # noqa: F401  (re-export)
-from quart.execution.constraints import (
-    limit_prices,  # noqa: F401  (re-export)
-    price_limit_pct,  # noqa: F401  (re-export)
-)
-from quart.execution.fees import Fees  # noqa: F401  (re-export)
+from quart.data.market import MarketData
+from quart.execution.constraints import A_SHARE_LOT as LOT
+from quart.execution.constraints import FLAT, limit_prices, price_limit_pct
+from quart.execution.fees import Fees
 from quart.execution.models import BUY, ExecutionContext
 from quart.execution.order_generator import generate_orders
-from quart.strategy.base import BaseStrategy  # noqa: F401  (re-export)
+from quart.strategy.base import BaseStrategy
 
 MIN_ORDER_VALUE = 1000.0
 
@@ -93,9 +87,15 @@ class BacktestResult:
     strategy: str
     params: dict
     initial_cash: float
+    ending_cash: float | None = None
+    ending_positions: dict[str, int] = field(default_factory=dict)
+    pending_targets: dict[str, float] | None = None
+    strategy_state: dict = field(default_factory=dict)
 
     @property
     def final_positions(self) -> dict[str, int]:
+        if self.ending_positions:
+            return dict(self.ending_positions)
         if self.trades.empty:
             return {}
         pos: dict[str, int] = {}
@@ -124,9 +124,18 @@ class BacktestEngine:
         fees: Fees | None = None,
         initial_cash: float | None = None,
         risk_pipeline=None,
+        signal_md: MarketData | None = None,
+        signal_offset: int = 0,
     ):
         cfg = load_config()["backtest"]
         self.md = md
+        self.signal_md = md if signal_md is None else signal_md
+        self.signal_offset = int(signal_offset)
+        if self.signal_offset < 0 or self.signal_offset + len(md) > len(self.signal_md):
+            raise ValueError("signal_offset 与 signal_md 长度不匹配")
+        signal_dates = self.signal_md.dates[self.signal_offset : self.signal_offset + len(md)]
+        if not signal_dates.equals(md.dates):
+            raise ValueError("signal_md 的执行区间日期必须与 md 对齐")
         self.strategy = strategy
         self.fees = fees or Fees.from_config()
         self.initial_cash = initial_cash if initial_cash is not None else cfg["initial_cash"]
@@ -147,36 +156,47 @@ class BacktestEngine:
         """执行回测，返回净值曲线。"""
         return self.run_result().equity
 
-    def run_result(self) -> BacktestResult:
+    def run_result(
+        self,
+        initial_cash: float | None = None,
+        initial_positions: dict[str, int] | None = None,
+        pending_targets: dict[str, float] | None = None,
+    ) -> BacktestResult:
         """执行回测，返回完整结果对象。"""
         self.reset()
         md = self.md
-        self.strategy.prepare(md)
+        signal_md = self.signal_md
+        self.strategy.prepare(signal_md)
         dates = md.dates
-        portfolio = Portfolio(cash=float(self.initial_cash))
+        starting_cash = self.initial_cash if initial_cash is None else initial_cash
+        portfolio = Portfolio(
+            cash=float(starting_cash),
+            positions={str(k): int(v) for k, v in (initial_positions or {}).items() if int(v) > 0},
+        )
         equity_values: list[float] = []
-        pending_targets: dict[str, float] | None = None
+        carried_targets = dict(pending_targets) if pending_targets else None
 
         for i in range(len(dates)):
-            if pending_targets is not None and i > 0:
-                was_flat = bool(pending_targets.get(FLAT))
-                portfolio.cash = self._rebalance(portfolio, pending_targets, i)
+            signal_i = self.signal_offset + i
+            if carried_targets is not None and (i > 0 or signal_i > 0):
+                was_flat = bool(carried_targets.get(FLAT))
+                portfolio.cash = self._rebalance(portfolio, carried_targets, i, signal_i)
                 if was_flat and portfolio.positions:
                     # 清仓未完成时（跌停/停牌），保持 FLAT 意图隔日继续挂单，
                     # 且不调用 target_weights——策略在空仓态不应再产出选股
-                    pending_targets = {FLAT: 1.0}
+                    carried_targets = {FLAT: 1.0}
                     equity_values.append(portfolio.equity(md.close_val.iloc[i]))
                     continue
-                pending_targets = None
+                carried_targets = None
 
             equity_values.append(portfolio.equity(md.close_val.iloc[i]))
-            raw = self.strategy.target_weights(i)
+            raw = self.strategy.target_weights(signal_i)
             if raw and FLAT in raw:
-                pending_targets = {FLAT: 1.0}
+                carried_targets = {FLAT: 1.0}
             elif raw:
-                pending_targets = raw
+                carried_targets = dict(raw)
             else:
-                pending_targets = None
+                carried_targets = None
 
         equity = pd.Series(equity_values, index=dates, name="equity")
         trades_df = pd.DataFrame([t.__dict__ for t in self.trades])
@@ -185,17 +205,28 @@ class BacktestEngine:
             trades=trades_df,
             strategy=getattr(self.strategy, "name", "unknown"),
             params=dict(getattr(self.strategy, "params", {})),
-            initial_cash=float(self.initial_cash),
+            initial_cash=float(starting_cash),
+            ending_cash=float(portfolio.cash),
+            ending_positions=dict(portfolio.positions),
+            pending_targets=carried_targets,
+            strategy_state=self.strategy.serialize_state(),
         )
 
     # ---------------- 内部实现 ----------------
 
-    def _rebalance(self, portfolio: Portfolio, targets: dict[str, float], i: int) -> float:
+    def _rebalance(
+        self,
+        portfolio: Portfolio,
+        targets: dict[str, float],
+        i: int,
+        signal_i: int | None = None,
+    ) -> float:
         """在 T+1 开盘执行 target weights，返回执行后的现金。"""
         md = self.md
-        prev_closes = md.close_val.iloc[i - 1]
+        signal_i = self.signal_offset + i if signal_i is None else int(signal_i)
+        prev_closes = self._previous_closes(i, signal_i)
         open_row = md.opens.iloc[i]
-        adv = self._adv_row(i)
+        adv = self._adv_row(i, signal_i)
 
         equity_mark = portfolio.cash + portfolio.market_value(prev_closes)
 
@@ -243,23 +274,32 @@ class BacktestEngine:
             return targets
         return self.risk_pipeline(targets, prices, equity)
 
-    def _adv_row(self, i: int) -> pd.Series | None:
+    def _previous_closes(self, i: int, signal_i: int) -> pd.Series:
+        """获取执行日前一收盘；测试段首日从信号上下文取历史收盘。"""
+        if signal_i > 0:
+            return self.signal_md.close_val.iloc[signal_i - 1]
+        if i > 0:
+            return self.md.close_val.iloc[i - 1]
+        return self.md.close_val.iloc[0]
+
+    def _adv_row(self, i: int, signal_i: int | None = None) -> pd.Series | None:
         """近 ADV_WINDOW 日平均成交额（不含当日，避免前视）。"""
-        md = self.md
+        md = self.signal_md
         if md.amounts is None:
             return None
-        lo = max(0, i - ADV_WINDOW)
-        return md.amounts.iloc[lo:i].mean()
+        signal_i = self.signal_offset + i if signal_i is None else int(signal_i)
+        lo = max(0, signal_i - ADV_WINDOW)
+        return md.amounts.iloc[lo:signal_i].mean()
 
 
 __all__ = [
+    "FLAT",
+    "LOT",
+    "MIN_ORDER_VALUE",
     "BacktestEngine",
     "BacktestResult",
     "BaseStrategy",
-    "FLAT",
     "Fees",
-    "LOT",
-    "MIN_ORDER_VALUE",
     "MarketData",
     "Portfolio",
     "Trade",

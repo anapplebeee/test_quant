@@ -5,6 +5,8 @@ task_api 用 `subprocess` 把 UI 参数拼进命令行。未经校验的输入�
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from api.task_api import ALLOWED_ARGS, TASKS, validate_extra_args
@@ -26,7 +28,35 @@ def test_accepts_whitelisted_args():
 
 
 def test_accepts_top_k_and_rebalance():
-    ok, err = validate_extra_args("backtest", ["--top-k", "20", "--rebalance-days", "45"])
+    ok, err = validate_extra_args(
+        "backtest",
+        [
+            "--top-k",
+            "20",
+            "--rebalance-days",
+            "45",
+            "--rev-weight",
+            "0.3",
+            "--cost-multiplier",
+            "2",
+        ],
+    )
+    assert ok, err
+
+
+def test_accepts_path_momentum_parameters():
+    ok, err = validate_extra_args(
+        "backtest",
+        [
+            "--strategy", "momentum_path",
+            "--momentum-mode", "smooth",
+            "--lookback-days", "120",
+            "--momentum-skip-days", "20",
+            "--limit-up-threshold", "0.095",
+            "--regime-mode", "score",
+            "--timing-levels", "3",
+        ],
+    )
     assert ok, err
 
 
@@ -43,7 +73,7 @@ def test_accepts_frontend_signal_and_refresh_parameters():
     assert ok, err
     ok, err = validate_extra_args(
         "refresh",
-        ["--universe", "index", "--index", "000300", "--start", "20190101"],
+        ["--universe", "index", "--index", "000300", "--start", "20190101", "--full-refresh"],
     )
     assert ok, err
 
@@ -114,3 +144,22 @@ def test_submit_rejects_injected_args():
     assert "白名单" in msg
     # 被拒后不应留下任务记录
     assert not any(t.family == "backtest" for t in q.tasks.values())
+
+
+def test_task_command_prefers_current_python_over_global_uv(monkeypatch):
+    """后台任务必须与前端服务共用解释器，避免依赖和 uv 缓存漂移。"""
+    import api.task_api as task_api
+
+    monkeypatch.setattr(task_api.shutil, "which", lambda name: "C:/tools/uv.exe")
+    task = task_api.Task(
+        task_id="refresh",
+        name="刷新",
+        script="scripts/update_data.py",
+        args=[],
+        resource="data",
+    )
+
+    command = task_api.TaskQueue()._build_command(task)
+
+    assert command[0] == sys.executable
+    assert command[1:3] == ["-u", "scripts/update_data.py"]

@@ -8,12 +8,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import gradio as gr
 
+import data_bus
 from api.backtest_api import (
     get_backtest_list,
     get_backtest_summary,
     get_cost_breakdown,
     get_equity_curve,
     get_trades,
+    scan_summaries,
 )
 from api.research_api import list_research_reports, list_sweeps, load_research_report, load_sweep, sweep_headline
 from api.strategy_api import get_strategy_defaults, strategy_choices
@@ -25,7 +27,10 @@ from frontend.theme import metric_card, page_header
 try:
     STRATEGY_CHOICES = strategy_choices()
 except Exception:
-    STRATEGY_CHOICES = ["momentum_rotation", "lowvol_composite", "dual_ma", "ml_rank", "lowvol_indz"]
+    STRATEGY_CHOICES = [
+        "momentum_rotation", "momentum_path", "lowvol_composite", "dual_ma",
+        "ml_rank", "lowvol_indz",
+    ]
 
 
 def _strategy_defaults(strategy: str) -> dict:
@@ -312,43 +317,148 @@ def render():
         render_wfa_panel()
         render_artifacts_panel()
 
-        backtest_names = get_backtest_list()
-        if not backtest_names:
+        # ---- 回测索引：搜索 + 策略筛选 + 表格选择（替代长下拉）----
+        full_df = scan_summaries()
+        if full_df.empty:
             gr.Info("未找到回测结果，请先运行回测")
             return
 
-        default_name = backtest_names[-1]
+        default_name = full_df["name"].iloc[0]
         init = _load_backtest(default_name)
 
+        # 状态：全量表 + 当前筛选后的名称列表（保证行选 index ↔ name 对齐）
+        df_state = gr.State(full_df)
+
         with gr.Row():
-            selected_bt = gr.Dropdown(
-                label="选择回测", choices=backtest_names, value=default_name,
-                filterable=True,
+            search_box = gr.Textbox(
+                label="搜索（名称 / 区间 / 策略）",
+                placeholder="输入关键字过滤…留空显示全部",
+                scale=3,
+            )
+            strategy_choices = ["全部"] + sorted(full_df["strategy"].unique().tolist())
+            strat_filter = gr.Dropdown(
+                label="策略筛选", choices=strategy_choices, value="全部",
             )
             refresh_btn = gr.Button("🔄 刷新列表", size="sm")
 
-        def _refresh_list():
-            """重建回测列表并加载最新一个（新回测跑完后可刷新发现）"""
-            names = get_backtest_list()
-            if not names:
-                return gr.update(choices=[], value=None), "暂无回测结果", None, None, None
-            latest = names[-1]
-            md, fe, fd, tr = _load_backtest(latest)
-            return gr.update(choices=names, value=latest), md, fe, fd, tr
+        def _fmt(df: pd.DataFrame) -> pd.DataFrame:
+            """数值列 → 可读字符串；保留 label（主列）与 name（行选 key）。
+            顺序：可读标签 | 区间 | 收益/风险指标，文件名 name 隐藏但保留用于行选。"""
+            df = df.copy()
+            for col in ("CAGR", "最大回撤", "波动"):
+                df[col] = df[col].apply(
+                    lambda v: f"{v * 100:.2f}%" if pd.notna(v) else ""
+                )
+            for col in ("夏普", "卡玛"):
+                df[col] = df[col].apply(lambda v: f"{v:.2f}" if pd.notna(v) else "")
+            show = ["label", "run_date", "区间", "CAGR", "夏普", "最大回撤", "波动", "卡玛", "name"]
+            return df[[c for c in show if c in df.columns]]
+
+        def _apply_filter(full: pd.DataFrame, keyword: str, strategy: str) -> pd.DataFrame:
+            f = full.copy()
+            if strategy and strategy != "全部":
+                f = f[f["strategy"] == strategy]
+            if keyword:
+                kw = keyword.lower()
+                mask = (
+                    f["label"].str.lower().str.contains(kw, na=False)
+                    | f["name"].str.lower().str.contains(kw, na=False)
+                    | f["区间"].str.lower().str.contains(kw, na=False)
+                )
+                f = f[mask]
+            return f.reset_index(drop=True)
+
+        filtered_df = _apply_filter(full_df, "", "全部")
+
+        # 筛选后的表格状态：供行选中时查 name（行 index ↔ filtered_df 对齐）
+        filtered_state = gr.State(filtered_df)
+
+        # 表格：行选择加载详情（业界标准——聚宽/米筐/QuantConnect 均采用表格/卡片选回测）
+        table = gr.Dataframe(
+            value=_fmt(filtered_df),
+            interactive=False,
+            max_height=380,
+            datatype=["str"] * len(_fmt(filtered_df).columns),
+            wrap=True,
+            label="点击行查看详情（按策略 / 按搜索词过滤；列按日期倒序）",
+        )
+
+        def _on_select(evt: gr.SelectData, fdf: pd.DataFrame) -> tuple:
+            """行选中 → 从该行的 name 列取唯一标识加载详情。"""
+            if evt.index is None:
+                return (gr.update(),) * 4
+            idx = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+            try:
+                name = str(fdf["name"].iloc[idx])
+            except Exception:
+                return "❌ 未找到匹配的回测", None, None, None
+            return _load_backtest(name)
+
+        def _on_filter(keyword: str, strategy: str, full: pd.DataFrame):
+            """搜索 / 策略筛选 → 返回格式化表 + 新过滤状态。"""
+            fdf = _apply_filter(full, keyword, strategy)
+            return _fmt(fdf), fdf
+
+        def _on_refresh():
+            """刷新列表：重新扫描报告目录，重建筛选项 + 加载最新一个。"""
+            new_full = scan_summaries()
+            if new_full.empty:
+                return (
+                    gr.update(choices=["全部"], value="全部"),
+                    _fmt(new_full), new_full,
+                    "暂无回测结果", None, None, None,
+                )
+            fdf = _apply_filter(new_full, "", "全部")
+            new_choices = ["全部"] + sorted(new_full["strategy"].unique().tolist())
+            latest = fdf["name"].iloc[0] if not fdf.empty else None
+            md, fe, fd, tr = _load_backtest(latest) if latest else ("暂无", None, None, None)
+            return (
+                gr.update(choices=new_choices, value="全部"),
+                _fmt(fdf), new_full, fdf,
+                md, fe, fd, tr,
+            )
 
         summary_md = gr.Markdown(value=init[0])
         equity_plot = gr.Plot(value=init[1])
         dd_plot = gr.Plot(value=init[2])
         trades_table = gr.Dataframe(value=init[3], interactive=False, max_height=420)
 
-        selected_bt.change(
-            _load_backtest,
-            inputs=[selected_bt],
+        # 行选择 → 加载详情
+        table.select(
+            _on_select,
+            inputs=[filtered_state],
             outputs=[summary_md, equity_plot, dd_plot, trades_table],
         )
+        # 搜索 / 策略筛选 → 刷新表格
+        search_box.change(
+            _on_filter, inputs=[search_box, strat_filter, df_state],
+            outputs=[table, filtered_state],
+        )
+        strat_filter.change(
+            _on_filter, inputs=[search_box, strat_filter, df_state],
+            outputs=[table, filtered_state],
+        )
+        # 刷新按钮 → 重建全量 + 筛选 + 详情
         refresh_btn.click(
-            _refresh_list,
-            outputs=[selected_bt, summary_md, equity_plot, dd_plot, trades_table],
+            _on_refresh,
+            outputs=[strat_filter, table, df_state, filtered_state,
+                     summary_md, equity_plot, dd_plot, trades_table],
+        )
+
+        # ===== 跨页联动：任务完成（回测/扫描/数据刷新）→ 自动重建列表与详情（版本门控） =====
+        seen_state = gr.State(data_bus.current())
+
+        def _poll_data_version(seen_val: int):
+            changed, cur = data_bus.poll(seen_val)
+            if not changed:
+                return (*[gr.skip()] * 8, seen_val)
+            return (*_on_refresh(), cur)
+
+        gr.Timer(5).tick(
+            _poll_data_version,
+            inputs=[seen_state],
+            outputs=[strat_filter, table, df_state, filtered_state,
+                     summary_md, equity_plot, dd_plot, trades_table, seen_state],
         )
 
         # ---- 参数扫描结果浏览器 ----
