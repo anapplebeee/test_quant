@@ -402,4 +402,11 @@ def collect_pit_metadata(base: Path | None = None) -> dict[str, Any]:
         except Exception as exc:  # pragma: no cover
             logger.warning("pit: security_master unreadable: {}", exc)
 
+    try:
+        from quart.market_rules.rule_book import RULE_BOOK_PATH, load_rule_book_version
+
+        meta["rule_book_version"] = load_rule_book_version(RULE_BOOK_PATH)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("pit: rule_book unreadable: {}", exc)
+
     return meta
