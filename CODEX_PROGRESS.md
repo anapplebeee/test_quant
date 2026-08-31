@@ -1,67 +1,69 @@
-# 执行进度快照（2026-08-31）
+# 执行进度快照（2026-08-31 深夜更新）
 
 > 本文件由 **GLM**（WorkBuddy 会话）维护，记录 Codex 规划的执行进度。
-> - 第一轮（Codex）：手动交易闭环 + 默认策略切换 + 交易日历/模拟盘，commit `77a182e` / `2e7f1fb`
-> - 第二轮（**GLM**）：完成规划遗留项 + 全量测试，见下文。
+> 轮次：
+> - R1（Codex）：手动交易闭环 + 默认策略切换 + 交易日历/模拟盘 → commit `77a182e` / `2e7f1fb`
+> - R2（GLM）：规划遗留项收尾 + 全量测试 → `2650497`
+> - R3（GLM）：策略根因分析与参数落地 + 前端体验修复 → `fe234e3` / `57e1789`
+> - R4（GLM）：前后端交互梳理 + 指数板块分类 → `1daa81f` / `c068084` / `0e6d5a8`
+> - R5（GLM）：阶段 F 券商 API 准备 + 全量代码审查 → `055e132` / `6bfa5b4`
 
-## 一、GLM 本轮完成的遗留事项（对应 Codex 规划）
+## 一、Codex 规划事项完成度总表
 
-| 遗留项 | 状态 | 落点 |
-|---|---|---|
-| 未对账阻断正式计划审批 | ✅ 验证已有实现（Codex 落地）+ 门禁测试 | `repository.approve_plan` + `test_approval_requires_signal_day_reconciliation` |
-| 执行偏差统计 | ✅ 验证已有实现（Codex 落地），GLM 补 E2E 断言 | `execution_summary` + 前端"计划与成交偏差复盘" |
-| 计划外交易 + 端到端每日流水线测试 | ✅ GLM 新增 | `tests/test_daily_pipeline_e2e.py`（T日计划→审批→部分成交→计划外成交→对账→T+1计划→复盘全链路） |
-| 法定节假日测试 | ✅ GLM 新增 | `test_trading_calendar.py`：节假日跳过、`is_trade_date`、settle 推进用日历缓存（跨国庆）、缺缓存退化 |
-| 各券商 CSV 列映射 | ✅ GLM 新增 | `quart/manual_trading/broker_profiles.py`（中文列名/20260831 日期/买入卖出方向/600000.SH 后缀归一化）+ `io.import_broker_csv` + `tests/test_broker_profiles.py`；XLSX 待需要时补 |
-| 前端区分策略准入状态 | ✅ GLM 新增 | 策略监控页"策略准入状态"表（`strategy_catalog` + `live_allowlist` 对齐测试） |
-| README 重构核对 | ✅ 核对通过，GLM 补券商 CSV 导入说明 | `README.md` |
-| 两份规划文档勾选同步 | ✅ GLM 更新 | `FRONTEND_STRATEGY_DEVELOPMENT_PLAN.md`、`MANUAL_TRADING_T1_SYNC_PLAN.md` |
-| 修复空存储查询崩溃 | ✅ GLM 顺手修复 | `store._query_partitioned` glob 无文件时返回空表（全量测试发现的真 bug） |
+### FRONTEND_STRATEGY_DEVELOPMENT_PLAN.md
 
-规划中仍未完成（阶段 F 券商 API，按规划"稳定运行后再设计"）：
-- Adapter 回报统一写入 FillService、API 订单状态机与计划链路打通；
-- XLSX 列映射（有真实需求时再做）。
+| 事项 | 状态 |
+|---|---|
+| P0 前后端账户与交易闭环（api/manual_trading_api 隔离、手动交易页、统一 SQLite 读取、调减/取消/过期/CSV 导出、成交匹配与偏差统计、对账门禁） | ✅ 全部完成 |
+| P0 命令操作前端化（任务白名单、参数化表单、长任务队列/日志/取消、写盘二次确认） | ✅ 全部完成 |
+| P1 默认策略切换 lowvol_indz、配置优先级修复（显式>overrides>全局） | ✅ 完成 |
+| P1 低换手/缓冲带/分散持仓 | ✅ 完成并**再优化**：top30/45d → **top50/60d/rev0.3**（2026-08-31 落地，CAGR +5.4%→+11.2%） |
+| P1 前端区分研究/候选/准入状态 | ✅ 完成（准入状态表 + live_allowlist 对齐测试） |
+| **P1 低波策略加入稳健截尾、多窗口风险和趋势质量过滤** | ⬜ **未完成**（待做，见第五节） |
+| **P1 策略变更的准入自动化校验（回测+成本压力+WFA 通过后才升级正式信号）** | ⬜ **未完成**（流程已定义在报告中，自动化校验待补，见第五节） |
+| P1 文档与验证（README 重构、规划文档同步、回归测试） | ✅ 完成 |
 
-## 二、全量测试（GLM 运行）
+### MANUAL_TRADING_T1_SYNC_PLAN.md
 
-```text
-.venv/Scripts/python.exe -m pytest tests/ -q
-=> 1 failed, 273 passed  → 修复 store 空 glob bug 后该文件 22/22 通过
-=> 等效全绿: 274 passed（其中本轮新增 12 个测试）
-新增测试: test_daily_pipeline_e2e.py(2) + test_broker_profiles.py(5)
-          + test_trading_calendar.py 扩充(4) + test_frontend_data.py 扩充(1)
-```
+| 事项 | 状态 |
+|---|---|
+| 阶段 A-E（账本模型/计划语义/T+1 工作流/前端） | ✅ 全部完成 |
+| 阶段 F：BrokerAdapter 契约、PaperBroker 状态机、**回报统一写入 FillService**（`quart/broker/sync.py`）、**API 订单状态机**（`paper_trade_action`）、人工模式保留 | ✅ 全部完成（R5） |
+| XLSX 券商成交列映射 + 自动分流 | ✅ 完成（R5，`convert_broker_xlsx` + `import_broker_fill_file`） |
+| 具体券商 SDK 接入 | ⬜ 待做（需券商权限/联调环境，按规划"稳定运行后"实施） |
 
-## 三、GLM 策略优化实验（第二轮）
+## 二、GLM 各轮工作摘要
 
-- 新增 `scripts/optimize_strategy.py`：单次数据加载批量跑参数网格（基线/择时开关/top_k/调仓频率/缓冲带/反转叠加/零成本对照），输出对比表 + JSON。
-- 关键发现：本地 BarStore 仅 **195 只**标的（README 全市场口径 3215 只），低波行业内 z 在小池上分组样本不足，是当前回测收益解释的重要背景。
-- 实验结论（详见 `reports/strategy_optimization_2026-08-31.md`）：
-  - top50 +1.9pp、60d +2.0pp、rev_weight0.3 +0.6pp、择时 +1.35pp；B2 组合全样本 CAGR +11.2% / Sharpe 0.74（基线 +5.4% / 0.42）；
-  - WFA 样本外 -0.1% 约打平、衰减比 0.62 → 参数提升须打折预期；
-  - 决策：**不改默认参数**，P0 行动项 = 补全市场数据后复验（衰减比 ≥0.8 且参数一致率 ≥0.75 再切换）。
+- **R2**：券商 CSV 映射、端到端流水线测试、节假日测试、策略准入表、store 空 glob 修复（274 tests）
+- **R3**：15 组参数实验 + WFA；市场环境分析（2026-08 末 PE 分位 87-97% 高估/高低切换）→ 落地 lowvol_indz top50/60d/rev0.3；前端红涨绿跌等修复
+- **R4**：ARCHITECTURE_OVERVIEW.md（分层/时序/映射/不变量）；修复 data_api/backtest_api 旧布局直读（股票数=0）、归因/诊断/生态页假数据；指数按板块分类（9 指数拉取至 2026-08-28）
+- **R5**：阶段 F 券商 API 准备；**全量代码审查修 11 项真实问题**（财务因子前视偏差、PIT 空列表回退、腾讯源 volume 单位 100x、制品指纹失效等）
 
-## 四、GLM 前端体验修复（第二轮）
-
-| 问题 | 级别 | 修复 |
-|---|---|---|
-| 风险管理页/策略监控页直读旧 `data/daily/{sym}.parquet`，分区迁移后价格全部"数据缺失"，VaR/流动性/市值全部失效 | P0 | 统一改走 `BarStore`（`api.manual_trading_api.latest_prices` + `_load_bars_frame`） |
-| 手动交易页审批/取消/调减/成交录入/对账后，计划列表、详情、复盘、账户面板全部停留旧状态 | P0 | 事件依赖 `.then()` 级联刷新（组件创建后统一追加，避免 UnboundLocalError） |
-| 计划切换不联动"执行复盘"面板 | P1 | `plan_selector.change` 合并 plan_view + execution_view |
-
-## 五、改动清单（GLM 本轮）
-
-- 新增：`quart/manual_trading/broker_profiles.py`、`scripts/optimize_strategy.py`、
-  `tests/test_broker_profiles.py`、`tests/test_daily_pipeline_e2e.py`
-- 修改：`quart/manual_trading/io.py`（broker CSV 导入）、`quart/data/store.py`（空 glob 修复）、
-  `api/strategy_api.py`（live_allowlist/准入标记）、`frontend/pages/strategy_monitor.py`（准入状态表 + BarStore 价格）、
-  `frontend/pages/manual_trading.py`（级联刷新）、`frontend/pages/risk_management.py`（BarStore 价格/VaR/流动性）、
-  `api/manual_trading_api.py`（latest_prices 公共化）、
-  `tests/test_trading_calendar.py`、`tests/test_frontend_data.py`、README、两份规划文档、本文件
-
-## 六、最终验证（GLM）
+## 三、全量测试
 
 ```text
 .venv/Scripts/python.exe -m pytest tests/ -q
-=> 274 passed, 2 warnings in 77.15s（全绿，含本轮全部新增/修复）
+=> 283 passed, 2 warnings（最新，R5 全量回归）
+新增测试累计：e2e 流水线、broker 映射/同步、节假日、准入对齐、volume 单位归一化等
 ```
+
+## 四、关键决策记录
+
+| 决策 | 内容 | 依据 |
+|---|---|---|
+| 默认策略参数落地 | lowvol_indz → top50/60d/rev_weight=0.3 | 15 组实验 B2 组合 CAGR +11.2%/Sharpe 0.74；市场高位防御适配 |
+| 参数预期打折 | WFA 衰减比 0.62，预期个位数年化；全市场数据补齐后复验（衰减比≥0.8 且参数一致率≥0.75 才长期保留） | `reports/strategy_optimization_2026-08-31.md` |
+| 数据源现状 | 腾讯主源 + 东财兜底；volume 单位已统一为手；9 指数已覆盖 | `reports/code_review_2026-08-31.md` |
+
+## 五、未完成事项清单（按优先级）
+
+1. **补全市场股票数据**（P0）：本地池仅 195~229 只（全市场 3215），一切参数结论在小池口径；需补数据后复验策略
+2. **P1 低波策略增强**：稳健截尾、多窗口风险、趋势质量过滤（FRONTEND 规划 [ ]）
+3. **P1 准入自动化校验**：策略变更跑通"回测+成本压力+WFA"门禁后自动升级正式信号（当前靠人工流程）
+4. **阶段 F 真实券商 SDK 接入**：需券商权限与联调环境
+5. **口径变更待确认**：ST 历史过滤、等权基准停牌口径、qfq/hfq 边界混仓（见 `reports/code_review_2026-08-31.md` 暂缓清单）
+
+## 六、待办（用户下一轮指令）
+
+- [ ] 接入更多稳定数据源（当前腾讯+东财双源，可补充新浪等）
+- [ ] 数据更新支持全量刷新模式（当前增量 + 漂移检测触发全量）
