@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from quart.broker.models import BrokerFill, BrokerOrder, BrokerOrderRequest
+from quart.domain import ExecutionReport
 
 
 @runtime_checkable
@@ -23,6 +24,10 @@ class BrokerAdapter(Protocol):
         ...
 
     def list_fills(self) -> list[BrokerFill]:
+        ...
+
+    def list_execution_reports(self) -> list[ExecutionReport]:
+        """返回归一化状态回报；订单状态只能由这些回报推进。"""
         ...
 
 

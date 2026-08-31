@@ -411,6 +411,9 @@ def paper_trade_action(
                 quantity=quantity,
                 client_order_id=f"{plan_id}:{order['planned_order_id']}",
                 planned_order_id=int(order["planned_order_id"]),
+                account_id=str(account_id),
+                environment="paper",
+                reason=f"trade_plan:{plan_id}",
             )
             submitted = adapter.submit_order(request)
             # 模拟 T+1 成交：参考价 ± 不利方向滑点（与回测口径一致）

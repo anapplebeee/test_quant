@@ -299,7 +299,7 @@ git diff --check
 
 | ID | 工作项 | 主责 | 批次 | 优先级 | 依赖 | 完成标准 |
 |---|---|---|---|---|---|---|
-| ARCH-001 | 统一领域 ID、OrderIntent、RiskDecision、ExecutionReport | 架构师 + 后端交易 | 0 | P0 | 无 | 回测/手动/Broker 可转换到统一合同 |
+| ARCH-001 | 统一领域 ID、OrderIntent、RiskDecision、ExecutionReport | 架构师 + 后端交易 | 0 | P0 | 无 | ✅ 2026-09-01 完成：回测/手动/Broker 可转换到统一合同，PaperBroker 全程记录标准化状态回报 |
 | UI-AUDIT-001 | 页面直读与命令入口盘点 | 前端 | 0 | P0 | 无 | 页面/API/状态源矩阵完整，形成 UI-001 清单 |
 | DB-001 | SQLite migration、WAL、busy timeout | 后端平台 | 1 | P0 | ARCH-001 | 并发、升级和回滚测试通过 |
 | JOB-001 | 持久化 Job/Command | 后端平台 | 1 | P0 | DB-001 | 重启恢复、claim、取消、幂等测试通过 |

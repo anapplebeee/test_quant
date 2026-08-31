@@ -210,6 +210,18 @@ stateDiagram-v2
 
 状态只能通过 `ExecutionReport` 推进。网络超时不是失败结论；必须先按 `client_order_id` 查询券商，再决定重试。
 
+### 5.3 ARCH-001 实施状态（已完成，2026-09-01）
+
+`quart/domain/` 已成为订单领域的无基础设施依赖合同源，提供：
+
+- 全局 ID、环境 `research|paper|live`、带时区的创建/业务时间与幂等键；
+- 不可变 `OrderIntent`、`RiskDecision`、`RiskRuleResult`、`BrokerOrder`、`ExecutionReport` 和 `Fill`；
+- 只接受合法转换的状态机，订单状态只能由 `apply_execution_report()` 推进；
+- `OrderPlan`、`PlannedOrderInput`、`FillInput`、`BrokerOrderRequest` 和 `BrokerFill` 到领域合同的显式转换；
+- PaperBroker 对风险、提交、成交、撤单均生成标准化 `ExecutionReport`，并按 `client_order_id` / `broker_fill_id` 幂等处理重试。
+
+该阶段不新增订单表或多进程恢复。持久化状态、事件去重索引、账本事务和故障恢复仍由 `OMS-001`、`DB-001` 与 `BROKER-001` 完成。
+
 ## 6. 持久化任务与并发模型
 
 现有 `TaskQueue` 作为前端兼容层保留一段时间，底层改为持久化任务：

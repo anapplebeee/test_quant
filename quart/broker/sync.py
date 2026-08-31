@@ -15,22 +15,10 @@ from quart.broker.models import BrokerFill
 from quart.manual_trading import FillInput, TradingRepository
 
 
-def _to_fill_input(fill: BrokerFill, source: str) -> FillInput:
-    return FillInput(
-        symbol=fill.symbol,
-        side=fill.side.upper(),
-        quantity=fill.quantity,
-        price=fill.price,
-        trade_date=fill.trade_date,
-        trade_time=fill.trade_time,
-        planned_order_id=fill.planned_order_id,
-        broker_fill_id=fill.broker_fill_id,
-        commission=0.0,
-        stamp_tax=0.0,
-        transfer_fee=0.0,
-        other_fee=0.0,
-        source=source,
-    )
+def _to_fill_input(fill: BrokerFill, account_id: int, source: str) -> FillInput:
+    """Broker 回报必须先归一化为领域 Fill，再进入既有账本输入。"""
+    domain_fill = fill.to_domain_fill(account_id=str(account_id), source=source)
+    return FillInput.from_domain_fill(domain_fill)
 
 
 def sync_broker_fills(
@@ -50,7 +38,7 @@ def sync_broker_fills(
         return []
     fill_ids: list[int] = []
     for fill in fills:
-        payload = _to_fill_input(fill, source)
+        payload = _to_fill_input(fill, account_id, source)
         if estimate_fees and not any(
             (payload.commission, payload.stamp_tax, payload.transfer_fee, payload.other_fee)
         ):

@@ -9,10 +9,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 import pandas as pd
 
+from quart.domain import OrderIntent, TradingEnvironment, stable_id, utc_now
 from quart.execution.constraints import A_SHARE_LOT
 from quart.execution.fees import Fees
 
@@ -113,6 +115,47 @@ class OrderPlan:
     @property
     def notional(self) -> float:
         return self.amount or (self.shares * self.exec_price)
+
+    def to_order_intent(
+        self,
+        *,
+        account_id: int | str,
+        environment: TradingEnvironment | str = TradingEnvironment.RESEARCH,
+        business_time: datetime | None = None,
+        source: str = "EXECUTION_PLAN",
+        reason: str = "",
+        planned_order_id: int | str | None = None,
+        intent_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> OrderIntent:
+        """把回测/信号共用的委托计划转换为风控前统一合同。"""
+        account_key = str(account_id)
+        planned_key = str(planned_order_id) if planned_order_id is not None else None
+        event_time = business_time or utc_now()
+        fallback_key = (
+            f"execution-plan:{account_key}:{planned_key}"
+            if planned_key is not None
+            else stable_id(
+                "execution_plan",
+                f"{account_key}:{self.symbol}:{self.side}:{self.shares}:{event_time.isoformat()}",
+            )
+        )
+        final_key = idempotency_key or fallback_key
+        price = self.exec_price or self.ref_price
+        return OrderIntent.create(
+            account_id=account_key,
+            environment=environment,
+            symbol=self.symbol,
+            side=self.side,
+            quantity=self.shares,
+            business_time=event_time,
+            source=source,
+            reason=reason or self.blocked_reason or "rebalance",
+            limit_price=price if price > 0 else None,
+            planned_order_id=planned_key,
+            intent_id=intent_id or stable_id("intent", final_key),
+            idempotency_key=final_key,
+        )
 
 
 @dataclass(frozen=True)
