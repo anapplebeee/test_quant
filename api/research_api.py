@@ -9,10 +9,12 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 import pandas as pd
 
 from common import degraded, reports_dir, safe_path, valid_name
+from quart.data.artifacts import STATUS_OK, ArtifactStore
 
 
 def _warn(where: str, exc: BaseException) -> None:
@@ -175,3 +177,151 @@ def load_research_report_result(fname: str) -> ReportResult:
     if len(content) > limit:
         content = content[:limit] + "\n\n*（内容过长已截断，请直接查看 reports/ 下原文件）*"
     return ReportResult(content=content)
+
+
+# ---------------- 因子审计 ----------------
+
+
+@dataclass
+class FactorAuditBundle:
+    run_id: str
+    summary: pd.DataFrame
+    ic_history: pd.DataFrame
+    correlation: pd.DataFrame
+    metadata: dict
+
+
+def load_latest_factor_audit() -> FactorAuditBundle | None:
+    """读取最新可追溯因子审计，旧环境回退到 reports/。"""
+    try:
+        store = ArtifactStore()
+        manifest = store.latest(task="factor_audit", status=STATUS_OK)
+        if manifest is not None:
+            summary = store.read(manifest.run_id, "summary")
+            history = store.read(manifest.run_id, "ic_history")
+            correlation = store.read(manifest.run_id, "correlation")
+            metadata_path = store.path_of(manifest.run_id, "metadata")
+            if summary is not None and history is not None and correlation is not None:
+                import json
+
+                metadata = {}
+                if metadata_path is not None and metadata_path.exists():
+                    with open(metadata_path, encoding="utf-8") as file:
+                        metadata = json.load(file)
+                if "factor" in correlation.columns:
+                    correlation = correlation.set_index("factor")
+                return FactorAuditBundle(
+                    manifest.run_id,
+                    summary,
+                    history,
+                    correlation,
+                    metadata,
+                )
+    except Exception as exc:
+        _warn("load_latest_factor_audit.artifacts", exc)
+
+    summary_path = reports_dir() / "factor_audit_summary.csv"
+    history_path = reports_dir() / "factor_audit_ic_history.csv"
+    correlation_path = reports_dir() / "factor_audit_correlation.csv"
+    metadata_path = reports_dir() / "factor_audit_metadata.json"
+    if not all(path.exists() for path in (summary_path, history_path, correlation_path, metadata_path)):
+        return None
+    try:
+        import json
+
+        with open(metadata_path, encoding="utf-8") as file:
+            metadata = json.load(file)
+        return FactorAuditBundle(
+            "reports-fallback",
+            pd.read_csv(summary_path),
+            pd.read_csv(history_path, parse_dates=["date"]),
+            pd.read_csv(correlation_path, index_col=0),
+            metadata,
+        )
+    except Exception as exc:
+        _warn("load_latest_factor_audit.reports", exc)
+        return None
+
+
+def factor_audit_summary() -> pd.DataFrame:
+    bundle = load_latest_factor_audit()
+    if bundle is None or bundle.summary.empty:
+        return pd.DataFrame()
+    columns = [
+        "factor",
+        "status",
+        "category",
+        "is_new",
+        "in_strategy",
+        "ic",
+        "icir",
+        "positive_rate",
+        "early_ic",
+        "late_ic",
+        "recent_ic",
+        "ic_pvalue",
+        "fdr_qvalue",
+        "top_abs_bp",
+        "long_only_bp",
+        "long_short_bp",
+        "top_turnover",
+        "top_median_amount_m",
+        "coverage",
+        "avg_stocks",
+        "max_abs_corr",
+        "corr_peer",
+    ]
+    output = bundle.summary[[column for column in columns if column in bundle.summary.columns]].copy()
+    numeric = [
+        "ic",
+        "icir",
+        "positive_rate",
+        "early_ic",
+        "late_ic",
+        "recent_ic",
+        "ic_pvalue",
+        "fdr_qvalue",
+        "top_abs_bp",
+        "long_only_bp",
+        "long_short_bp",
+        "top_turnover",
+        "top_median_amount_m",
+        "coverage",
+        "avg_stocks",
+        "max_abs_corr",
+    ]
+    for column in numeric:
+        if column in output.columns:
+            output[column] = pd.to_numeric(output[column], errors="coerce").round(4)
+    return output
+
+
+def factor_audit_status_md() -> str:
+    bundle = load_latest_factor_audit()
+    if bundle is None:
+        return "> ⚠️ 暂无统一因子审计结果。请在“🧰 操作中心 → 因子审计”运行任务。"
+    metadata = bundle.metadata
+    return (
+        f"> ✅ **运行** `{bundle.run_id}`  · **数据** {metadata.get('data_first_date', '?')} → "
+        f"{metadata.get('data_last_date', '?')}  · **评估** {metadata.get('evaluation_first_date', '?')} → "
+        f"{metadata.get('evaluation_last_date', '?')}  · **标的** {metadata.get('symbols', '?')} 只  · "
+        f"**标签** {metadata.get('label', '?')}  · **样本点** {metadata.get('sample_points', '?')}"
+    )
+
+
+def factor_ic_history(factor: str | None = None) -> pd.DataFrame:
+    bundle = load_latest_factor_audit()
+    if bundle is None or bundle.ic_history.empty:
+        return pd.DataFrame()
+    output = bundle.ic_history.copy()
+    output["date"] = pd.to_datetime(output["date"], errors="coerce")
+    if factor:
+        output = output[output["factor"] == factor]
+    return output.sort_values(["factor", "date"]).reset_index(drop=True)
+
+
+def factor_correlation() -> pd.DataFrame:
+    bundle = load_latest_factor_audit()
+    if bundle is None:
+        return pd.DataFrame()
+    return bundle.correlation.copy()

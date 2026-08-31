@@ -36,6 +36,45 @@ uv run python run_gradio.py
 
 浏览器打开 `http://127.0.0.1:7860`。首次启动后按下面顺序操作：
 
+### 并发数据刷新（拉取所有主板股票）
+
+数据刷新支持**并发**与**主板全量**两种能力，由 `scripts/update_data.py` 提供：
+
+```powershell
+# 拉取所有主板股票（沪深主板 ~3000 只，默认 8 并发，约 3 分钟）
+uv run python scripts/update_data.py --universe mainboard
+
+# 主板全量重拉（--full 整史重拉 + replace，保证复权口径一致）
+uv run python scripts/update_data.py --universe mainboard --workers 8 --full
+
+# 只拉指数成分股（默认）
+uv run python scripts/update_data.py --universe index
+
+# 并发数 1-32（默认 8）
+uv run python scripts/update_data.py --universe mainboard --workers 16
+```
+
+| 选项 | 说明 |
+|---|---|
+| `--universe` | `index` 指数成分股 / `mainboard` 沪深主板全部 / `all` 全市场 |
+| `--workers` | 并发线程数（1-32，默认 8）。主板全量串行约 18 分钟，8 并发约 3 分钟 |
+| `--full` | 整史重拉并 replace，消除增量 append 的历史混仓/修正遗漏风险 |
+
+主板过滤口径（`quart/data/universe.filter_mainboard`）：
+- **沪主板** 600/601/603/605；**深主板** 000/001/002/003（含原中小板）
+- **排除** 创业板(300/301)、科创板(688/689)、北交所(43/8x/92)
+
+并发实现要点（`quart/data/updater.py`）：
+- `_Throttle` 限速器：**每只股票独立限速**（同股保证最小间隔，异股互不阻塞），
+  避免共享 sleep 把并发串行化。总吞吐 = workers × (1/限速间隔)
+- 计数器加锁，并发下不丢数
+- 有测试断言**并发与串行产出逐位一致**（`tests/test_updater_parallel.py`）
+
+前端「🗃️ 数据总览」页也提供并发刷新入口（选股票池 + 并发数 + 全量重拉），
+后台任务执行，进度见「📡 策略监控」。
+
+浏览器打开 `http://127.0.0.1:7860`。首次启动后按下面顺序操作：
+
 1. **🧰 操作中心 → 更新交易日历**；
 2. **🧰 操作中心 → 更新常用指数**（上证/深证/创业板/中证/科创等 9 个，数据总览页可看覆盖）；
 2. **🧰 操作中心 → 数据刷新**，股票池选 `index`、指数填 `000300`；

@@ -67,6 +67,35 @@ def get_constituents(
 # 科创板（含 CDR：688/689）与创业板（300/301）代码前缀
 STAR_PREFIXES = ("688", "689")
 CHINEXT_PREFIXES = ("300", "301")
+# 北交所代码前缀
+BSE_PREFIXES = ("43", "82", "83", "87", "88", "92")
+
+#: 沪深主板代码前缀
+#:   沪主板：600/601/603/605
+#:   深主板：000/001/002/003（002/003 为中小板并入后仍在主板交易规则下，
+#:   涨跌停 10% 与主板一致；300/301 才是创业板）
+MAINBOARD_PREFIXES = ("000", "001", "002", "003", "600", "601", "603", "605")
+
+
+def filter_mainboard(codes: list[str]) -> list[str]:
+    """只保留沪深主板股票，排除创业板(300/301)、科创板(688/689)、北交所(43/8x/92)。
+
+    主板过滤用于"拉全市场但只关注主板"的场景（用户需求）：
+    主板是 A 股流动性最好、交易规则最统一（涨跌停 10%）的板块，
+    因子研究与策略回测通常以此为基准池。
+    """
+    out = []
+    dropped = 0
+    for c in codes:
+        code = str(c)
+        if code.startswith(MAINBOARD_PREFIXES):
+            out.append(code)
+        else:
+            dropped += 1
+    if dropped:
+        logger.info("mainboard filter dropped {} non-mainboard codes", dropped)
+    # 排序保证确定性输出（akshare 返回顺序不保证）
+    return sorted(out)
 
 
 def filter_boards(

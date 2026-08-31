@@ -23,8 +23,9 @@ from rich.table import Table
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from quart.backtest.engine import MarketData
-from quart.config import PROJECT_ROOT, load_config
+from quart.config import data_root, reports_dir
 from quart.data.store import BarStore
+from quart.research.factor_audit import rank_correlation
 from scripts.factor_research import every_nth, monthly_ends
 
 console = Console()
@@ -34,11 +35,10 @@ DISCLOSE_LAG_DAYS = 120  # 财报披露时滞：报告期 + 120 交易日视为�
 
 def build_price_factors(md: MarketData) -> dict[str, pd.DataFrame]:
     c = md.close_val
-    o = md.opens
     h = md.highs
-    l = md.lows
+    lows = md.lows
     v = md.volumes
-    a = md.amounts.ffill()
+    a = md.amounts
     ret1 = c.pct_change(fill_method=None)
 
     # RSI(14)
@@ -46,7 +46,7 @@ def build_price_factors(md: MarketData) -> dict[str, pd.DataFrame]:
     dn = (-ret1.clip(upper=0)).rolling(14).mean()
     rsi = 100 - 100 / (1 + up / dn.replace(0, np.nan))
     # ATR(20) 归一化（注意：pd.concat(axis=1) 对相同列名是堆叠不合并，TR 用 np.maximum）
-    tr = np.maximum(h - l, np.maximum((h - c.shift()).abs(), (l - c.shift()).abs()))
+    tr = np.maximum(h - lows, np.maximum((h - c.shift()).abs(), (lows - c.shift()).abs()))
     atr20 = tr.rolling(20).mean() / c.shift(1).replace(0, np.nan)
     # 布林带位置
     ma20 = c.rolling(20).mean()
@@ -76,7 +76,7 @@ def build_fundamental_factors(md: MarketData) -> dict[str, pd.DataFrame]:
     120 自然日 ≈ 84 个交易日，财报被视为提前约 36 个交易日披露 → ep/bp/roe 因子
     产生前视偏差、IC 虚高。现改为在交易日序列中向后偏移 120 个交易日。
     """
-    path = PROJECT_ROOT / "data" / "factors" / "financials.parquet"
+    path = data_root() / "factors" / "financials.parquet"
     if not path.exists():
         console.print("[yellow]financials.parquet 不存在，跳过财务因子[/yellow]")
         return {}
@@ -117,7 +117,6 @@ def main() -> None:
     parser.add_argument("--sample", default="monthly", choices=["monthly", "weekly"])
     args = parser.parse_args()
 
-    cfg = load_config()
     store = BarStore()
     bars = store.load(include_index=False)
     md = MarketData.from_bars(bars)
@@ -126,12 +125,9 @@ def main() -> None:
     factors.update(build_price_factors(md))
     factors.update(build_fundamental_factors(md))
 
-    label = md.close_val.shift(-(HORIZON + 1)) / md.close_val.shift(-1) - 1.0
+    label = md.opens.shift(-(HORIZON + 1)) / md.opens.shift(-1).replace(0, np.nan) - 1.0
     amed = md.amounts.ffill().rolling(20).mean()
     eligible_base = amed > 20_000_000
-
-    bench_close = store.load_benchmark(cfg["benchmark"]).set_index("date")["close"].reindex(md.dates).ffill()
-    bench_fwd = bench_close.shift(-(HORIZON + 1)) / bench_close.shift(-1) - 1.0
 
     sampler = monthly_ends if args.sample == "monthly" else every_nth(5)
     ends = sampler(md.dates)
@@ -146,13 +142,12 @@ def main() -> None:
             if len(joined) < 100:
                 continue
             fx, fy = joined["f"], joined["y"]
-            ics.append(float(fx.corr(fy, method="spearman")))
+            ics.append(rank_correlation(fx, fy))
             q_hi, q_lo = fx.quantile(0.9), fx.quantile(0.1)
             hi_y = fy[fx >= q_hi].clip(-0.5, 2.0).mean()
             lo_y = fy[fx <= q_lo].clip(-0.5, 2.0).mean()
             spread = hi_y - lo_y
-            br = bench_fwd.iloc[i]
-            spreads.append(float(spread - br) if not np.isnan(br) else float(spread))
+            spreads.append(float(spread))
         s = pd.Series(ics)
         half = max(len(s) // 2, 1)
         rows[name] = {
@@ -174,7 +169,7 @@ def main() -> None:
         )
     console.print(table)
     # 落盘研究结果
-    out = PROJECT_ROOT / "reports" / "factor_research_ext.csv"
+    out = reports_dir() / "factor_research_ext.csv"
     summary.to_csv(out)
     console.print(f"saved: {out}")
 

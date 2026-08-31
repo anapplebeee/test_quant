@@ -103,7 +103,7 @@ class BaseStrategy(ABC):
         """预计算钩子。子类必须调用 `super().prepare(md)` 以保存 md。"""
         self._md = md
 
-    # ---------------- 可恢复状态 ----------------
+    # ---------------- 可恢复状态（WFA 连续账户用） ----------------
 
     def state_dict(self) -> dict[str, Any]:
         """返回策略运行态；有跨日状态的子类应覆盖此方法。"""
@@ -121,6 +121,16 @@ class BaseStrategy(ABC):
     def restore_state(self, state: Mapping[str, Any] | None) -> None:
         """``load_state_dict`` 的语义化别名。"""
         self.load_state_dict(deepcopy(state) if state is not None else None)
+
+    def sync_positions(self, positions: dict[str, int]) -> None:
+        """同步真实持仓状态；无持仓记忆的策略默认无需处理。
+
+        回测在每次撮合后调用，实盘信号在计算目标权重前调用。依赖排名缓冲、
+        持仓惯性的策略应覆盖此方法，不能只记住“计划买入”的标的。
+        """
+        self._synced_positions = {
+            symbol: int(shares) for symbol, shares in positions.items() if int(shares) > 0
+        }
 
     def _require_md(self) -> MarketData:
         if self._md is None:

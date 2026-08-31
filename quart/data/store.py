@@ -440,6 +440,54 @@ class BarStore:
         found |= {p.stem for p in self.daily_dir.glob("*.parquet")}
         return sorted(found)
 
+    def coverage_summary(self) -> dict:
+        """Fast latest-cross-section coverage metadata for UI and audit gates."""
+        symbols = self.symbols()
+        result = {
+            "symbols": len(symbols),
+            "latest_date": None,
+            "latest_symbols": 0,
+            "latest_coverage": 0.0,
+            "freshness_days": self.freshness_days(),
+        }
+        if not symbols:
+            return result
+
+        if self._partitioned:
+            years = self._partition_years(self.daily_dir)
+            if not years:
+                return result
+            pattern = (self.daily_dir / f"{PARTITION_PREFIX}{years[-1]}" / "*.parquet").as_posix()
+            try:
+                import duckdb
+
+                query = (
+                    "WITH bars AS ("
+                    f"SELECT date, symbol FROM read_parquet('{pattern}') WHERE date IS NOT NULL"
+                    "), latest AS (SELECT max(date) AS value FROM bars) "
+                    "SELECT latest.value AS latest_date, "
+                    "count(DISTINCT bars.symbol) FILTER (WHERE bars.date = latest.value) AS latest_symbols "
+                    "FROM bars CROSS JOIN latest GROUP BY latest.value"
+                )
+                row = duckdb.sql(query).fetchone()
+                if row:
+                    result["latest_date"] = str(pd.Timestamp(row[0]).date()) if row[0] else None
+                    result["latest_symbols"] = int(row[1] or 0)
+            except Exception as exc:
+                logger.debug("coverage summary duckdb fallback: {}", exc)
+
+        if result["latest_date"] is None:
+            latest_by_symbol = [self.last_date(symbol) for symbol in symbols]
+            latest_by_symbol = [date for date in latest_by_symbol if date is not None]
+            if latest_by_symbol:
+                latest = max(latest_by_symbol)
+                result["latest_date"] = str(latest.date())
+                result["latest_symbols"] = sum(date == latest for date in latest_by_symbol)
+
+        if result["symbols"]:
+            result["latest_coverage"] = result["latest_symbols"] / result["symbols"]
+        return result
+
     def freshness_days(self, reference: str | None = None) -> int | None:
         """Newest bar age in calendar days vs CN-now (or given YYYYMMDD)."""
         import datetime as _dt

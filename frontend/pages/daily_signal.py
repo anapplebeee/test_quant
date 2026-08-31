@@ -34,8 +34,6 @@ def _load_signal(date: str) -> str:
 
 def _snapshot():
     """扫描信号文件，返回 (日期选项, 最新日期, 最新内容)"""
-    # 注意：glob 返回 Path，Path.replace() 是「重命名文件」而非字符串替换。
-    # 必须先取 .stem（已去掉 .md 后缀）再做字符串处理。
     signal_files = sorted([
         f.stem.replace("signal_", "")
         for f in reports_dir().glob("signal_*.md")
@@ -94,7 +92,6 @@ def render():
             > - 切入计划后会在下方展示具体买卖订单
             """)
 
-            # 计划详情切换
             plan_selector.change(
                 _plan_detail,
                 inputs=[plan_selector],
@@ -148,20 +145,17 @@ def render():
                 gr.Markdown("*暂无 ML 预测数据。运行 🤖 ML 训练 生成 `data/scores/preds.csv`*")
             preds_table = gr.Dataframe(value=scores_df, interactive=False, max_height=400)
 
-        # ===== 跨页联动：任务完成 → 自动刷新计划/信号/预测（版本门控） =====
+        # ===== 跨页联动：任务完成 → 自动刷新计划/信号/预测 =====
         seen_state = gr.State(data_bus.current())
 
         def _poll_data_version(seen_val: int, plan_date_val: str, sig_sel: str | None):
             changed, cur = data_bus.poll(seen_val)
             if not changed:
                 return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), seen_val
-            # 计划面板（保留当前选择）
             f, sel_update, sel_val = _plan_snapshot(plan_date_val)
             md, ords = plan_view(sel_val)
-            # 信号报告（保留当前选择）
             c, v, txt = _snapshot()
             sig_update = gr.update(choices=c, value=v if v in c else (sig_sel if sig_sel in c else v))
-            # ML 预测分数
             preds = None
             if os.path.exists(scores_path):
                 try:

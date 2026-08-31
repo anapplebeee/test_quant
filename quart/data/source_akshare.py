@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import random
 import socket
 import threading
@@ -56,7 +57,7 @@ def _retry(fn, retries: int = 3, base_delay: float = 1.0):
     for attempt in range(1, retries + 1):
         try:
             return fn()
-        except Exception as exc:  # noqa: BLE001 - 统一在下方判定是否可重试
+        except Exception as exc:
             if not isinstance(exc, _RETRYABLE_EXC) or attempt == retries:
                 raise
             last_exc = exc
@@ -201,8 +202,8 @@ def _fetch_daily_eastmoney(symbol: str, start_date: str, end_date: str, adjust: 
         return _EMPTY.copy()
     df = raw.rename(columns=OHLC_MAP)
     df["symbol"] = symbol
-    keep = [c for c in list(OHLC_MAP.values()) + ["symbol"] if c in df.columns]
-    return df[keep]
+    keep = [c for c in [*list(OHLC_MAP.values()), "symbol"] if c in df.columns]
+    return _align_schema(df[keep], symbol)
 
 
 def _align_schema(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -241,24 +242,90 @@ def _normalize_volume_unit(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _fetch_daily_tencent(symbol: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
-    import akshare as ak
+def _tencent_date_chunks(start_date: str, end_date: str) -> list[tuple[str, str]]:
+    """Split a date range into non-overlapping two-year Tencent requests.
 
+    Tencent accepts at most 640 daily bars per response. Two calendar years stay
+    below that limit, while AkShare's implementation requests an overlapping
+    two-year window once *per year*, doubling full-history network traffic.
+    """
+    start = pd.Timestamp(start_date)
+    end = min(pd.Timestamp(end_date), pd.Timestamp(dt.date.today()))
+    if start > end:
+        return []
+
+    chunks: list[tuple[str, str]] = []
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(pd.Timestamp(cursor.year + 1, 12, 31), end)
+        chunks.append((cursor.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")))
+        cursor = chunk_end + pd.offsets.Day(1)
+    return chunks
+
+
+def _request_tencent_daily_chunk(
+    tx_symbol: str,
+    start_date: str,
+    end_date: str,
+    adjust: str,
+) -> list[list]:
+    import requests
+    from akshare.utils import demjson
+
+    url = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
+    year = start_date[:4]
+    params = {
+        "_var": f"kline_day{adjust}{year}",
+        "param": f"{tx_symbol},day,{start_date},{end_date},640,{adjust}",
+        "r": "0.8205512681390605",
+    }
+
+    response = _retry(lambda: requests.get(url, params=params, timeout=20))
+    response.raise_for_status()
+    marker = response.text.find("={")
+    if marker < 0:
+        raise ValueError("unexpected Tencent kline response")
+    payload = demjson.decode(response.text[marker + 1 :])
+    data = payload.get("data") if isinstance(payload, dict) else None
+    node = data.get(tx_symbol) if isinstance(data, dict) else None
+    if not isinstance(node, dict):
+        return []
+    key = "day" if not adjust else f"{adjust}day"
+    return node.get(key) or node.get("day") or []
+
+
+def _fetch_daily_tencent(symbol: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
+    tx_symbol = to_tx_symbol(symbol)
     try:
-        raw = _retry(
-            lambda: ak.stock_zh_a_hist_tx(
-                symbol=to_tx_symbol(symbol),
-                start_date=start_date,
-                end_date=end_date,
-                adjust=adjust,
+        rows: list[list] = []
+        for chunk_start, chunk_end in _tencent_date_chunks(start_date, end_date):
+            rows.extend(
+                _request_tencent_daily_chunk(
+                    tx_symbol,
+                    chunk_start,
+                    chunk_end,
+                    adjust,
+                )
             )
-        )
     except Exception as exc:
         logger.debug("tencent daily {} failed: {}", symbol, str(exc)[:80])
         return _EMPTY.copy()
-    if raw is None or raw.empty:
+    if not rows:
         return _EMPTY.copy()
-    return _normalize_volume_unit(_align_schema(raw[TX_BAR_COLUMNS].copy(), symbol))
+
+    try:
+        raw = pd.DataFrame(rows).iloc[:, [0, 1, 2, 3, 4, 5, 7, 8]]
+    except (IndexError, ValueError):
+        logger.debug("tencent daily {} returned an unexpected row schema", symbol)
+        return _EMPTY.copy()
+    raw.columns = TX_BAR_COLUMNS
+    raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
+    for column in TX_BAR_COLUMNS[1:]:
+        raw[column] = pd.to_numeric(raw[column], errors="coerce")
+    raw["amount"] = raw["amount"] * 10_000
+    raw = raw.drop_duplicates("date", keep="last")
+    raw = raw[(raw["date"] >= pd.Timestamp(start_date)) & (raw["date"] <= pd.Timestamp(end_date))]
+    return _normalize_volume_unit(_align_schema(raw, symbol))
 
 
 def _fetch_index_eastmoney(code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -279,8 +346,8 @@ def _fetch_index_eastmoney(code: str, start_date: str, end_date: str) -> pd.Data
         return _EMPTY.copy()
     df = raw.rename(columns=OHLC_MAP)
     df["symbol"] = f"IDX{code}"
-    keep = [c for c in list(OHLC_MAP.values()) + ["symbol"] if c in df.columns]
-    return df[keep]
+    keep = [c for c in [*list(OHLC_MAP.values()), "symbol"] if c in df.columns]
+    return _align_schema(df[keep], f"IDX{code}")
 
 
 def _fetch_index_tencent(code: str) -> pd.DataFrame:

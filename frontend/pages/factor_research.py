@@ -1,109 +1,211 @@
-"""因子研究页面"""
+"""Unified factor research dashboard backed by traceable audit artifacts."""
+
 from __future__ import annotations
 
+import gradio as gr
 import pandas as pd
 import plotly.graph_objects as go
-import gradio as gr
 
-from frontend.theme import DEMO_BANNER, page_header
+from api.research_api import (
+    factor_audit_status_md,
+    factor_audit_summary,
+    factor_correlation,
+    factor_ic_history,
+)
+from frontend.theme import page_header
+from quart.research.factor_audit import FACTOR_SPECS
+
+FACTOR_DEFINITIONS = pd.DataFrame(
+    [
+        {
+            "因子": spec.name,
+            "类别": spec.category,
+            "定义": spec.description,
+            "新候选": "是" if spec.is_new else "否",
+            "当前策略": "是" if spec.in_strategy else "否",
+        }
+        for spec in FACTOR_SPECS
+    ]
+)
+
+SUMMARY_LABELS = {
+    "factor": "因子",
+    "status": "结论",
+    "category": "类别",
+    "is_new": "新候选",
+    "in_strategy": "当前策略",
+    "ic": "IC",
+    "icir": "ICIR",
+    "positive_rate": "IC正率",
+    "early_ic": "前半段IC",
+    "late_ic": "后半段IC",
+    "recent_ic": "近12期IC",
+    "ic_pvalue": "IC p值",
+    "fdr_qvalue": "FDR q值",
+    "top_abs_bp": "多头绝对bp",
+    "long_only_bp": "多头超额bp",
+    "long_short_bp": "多空bp",
+    "top_turnover": "Top组换手",
+    "top_median_amount_m": "Top组成交额中位数(百万元)",
+    "coverage": "覆盖率",
+    "avg_stocks": "平均股票数",
+    "max_abs_corr": "最大相关",
+    "corr_peer": "最高相关因子",
+}
 
 
-FACTOR_DEFS = pd.DataFrame({
-    "因子名": ["mom60", "mom120", "sharpe_mom60", "rev5", "high_lag250",
-              "vol20_neg", "downvol_ratio_neg", "amp20_neg", "amp_expand20",
-              "net_flow20", "vwap_dev20", "pv_corr20_neg", "trend_eff_dir",
-              "lottery20_neg", "gap_avg"],
-    "类别": ["动量", "动量", "动量(风险调整)", "短期反转", "52周高点距离",
-            "波动率", "下行波动", "振幅", "振幅异动",
-            "量价确认", "量价确认", "量价确认", "趋势效率",
-            "彩票效应", "隔夜跳空"],
-    "逻辑": ["60日收益率", "120日收益率", "60日收益/波动",
-            "5日反转(负收益)", "距52周高点距离",
-            "20日波动率(负向)", "下行波动占比(负向)",
-            "20日平均振幅(负向)", "20日/120日均额比",
-            "20日净流入占比", "20日VWAP偏离",
-            "20日量价相关(负向)", "60日趋势效率",
-            "20日最大涨幅(负向)", "20日平均跳空"],
-})
+def _display_summary(summary: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty:
+        return summary
+    output = summary.rename(columns=SUMMARY_LABELS).copy()
+    for column in ("新候选", "当前策略"):
+        if column in output.columns:
+            output[column] = output[column].map({True: "是", False: "否"}).fillna(output[column])
+    return output
 
-# 因子研究结果：优先读真实研究输出（reports/factor_research*.csv），无则回退演示数据
 
-def _load_real_results() -> pd.DataFrame | None:
-    """合并 factor_research_ext.csv / ext2.csv 的真实 RankIC 结果"""
-    import glob
-    frames = []
-    for path in sorted(glob.glob("reports/factor_research_ext*.csv")):
-        try:
-            df = pd.read_csv(path)
-            first_col = df.columns[0]
-            df = df.rename(columns={
-                first_col: "因子", "ic": "IC", "icir": "ICIR",
-                "pos%": "正率%", "ls_bp": "多空bp",
-            })
-            keep = [c for c in ["因子", "IC", "ICIR", "正率%", "多空bp"] if c in df.columns]
-            if "因子" in keep and len(keep) >= 3:
-                frames.append(df[keep])
-        except Exception:
-            continue
-    if not frames:
+def _summary_figure(summary: pd.DataFrame) -> go.Figure | None:
+    if summary.empty or "ic" not in summary.columns:
         return None
-    merged = pd.concat(frames, ignore_index=True)
-    # 同名因子取最新（ext2 覆盖 ext）
-    merged = merged.drop_duplicates(subset="因子", keep="last")
-    return merged.sort_values("ICIR", key=lambda s: s.abs(), ascending=False)
-
-
-REAL_RESULTS = _load_real_results()
-
-# 演示数据（仅在无真实输出时展示）
-FACTOR_RESULTS = pd.DataFrame({
-    "因子": ["vol20_neg", "amp20_neg", "lottery20_neg", "rev5", "mom60",
-             "sharpe_mom60", "pv_corr20_neg", "net_flow20", "downvol_ratio_neg",
-             "high_lag250", "trend_eff_dir", "vwap_dev20", "gap_avg",
-             "amp_expand20", "mom120"],
-    "IC": [-0.068, -0.065, -0.064, 0.042, 0.031, 0.028, -0.025, 0.022,
-           -0.020, 0.018, 0.015, -0.012, 0.010, 0.008, 0.005],
-    "ICIR": [-2.8, -2.6, -2.5, 1.8, 1.5, 1.3, -1.1, 1.0,
-             -0.9, 0.8, 0.7, -0.5, 0.4, 0.3, 0.2],
-    "正率%": [72, 70, 69, 62, 58, 56, 45, 55, 44, 54, 52, 46, 51, 50, 49],
-    "多空bp": [85, 78, 75, 42, 35, 30, -22, 25, -18, 20, 15, -12, 10, 8, 5],
-}).sort_values("ICIR", key=abs, ascending=False)
-
-
-def render():
-    """渲染因子研究 Tab"""
-    with gr.Tab("🔬 因子研究"):
-        gr.HTML(page_header("🔬 因子研究", "因子IC/ICIR分析 / 选股能力评估"))
-        if REAL_RESULTS is not None:
-            gr.Markdown("> ✅ **真实数据**：以下为本项目因子研究脚本的全市场 RankIC 输出"
-                        "（reports/factor_research_ext*.csv，2020-02~2026-07 月度截面，fwd5d）")
-        else:
-            gr.HTML(DEMO_BANNER)
-
-        with gr.Accordion("📖 当前因子列表（15个价量因子）", open=False):
-            gr.Dataframe(value=FACTOR_DEFS, interactive=False)
-
-        gr.Markdown("### 📊 因子 ICIR")
-        results = REAL_RESULTS if REAL_RESULTS is not None else FACTOR_RESULTS
-        colors = ["#e74c3c" if x < 0 else "#2ecc71" for x in results["ICIR"]]
-        fig = go.Figure(go.Bar(
-            x=results["因子"], y=results["ICIR"],
-            marker_color=colors, text=results["ICIR"].round(2),
+    figure = go.Figure(
+        go.Bar(
+            x=summary["factor"],
+            y=summary["ic"],
+            marker_color=["#E53935" if value >= 0 else "#43A047" for value in summary["ic"]],
+            text=summary["ic"].round(3),
             textposition="outside",
-        ))
-        fig.add_hline(y=0, line_dash="dash", line_color="gray")
-        fig.add_hline(y=0.5, line_dash="dot", line_color="green", annotation_text="有效阈值")
-        fig.update_layout(title="因子 ICIR（按绝对值排序）", height=400,
-                          margin=dict(l=0, r=0, t=40, b=0),
-                          template="plotly_white")
-        gr.Plot(value=fig)
+            customdata=summary[["status", "icir", "recent_ic"]],
+            hovertemplate=(
+                "%{x}<br>IC=%{y:.4f}<br>状态=%{customdata[0]}"
+                "<br>ICIR=%{customdata[1]:.2f}<br>近期IC=%{customdata[2]:.4f}<extra></extra>"
+            ),
+        )
+    )
+    figure.add_hline(y=0, line_dash="dash", line_color="gray")
+    figure.update_layout(
+        title="统一方向后的 RankIC（越高越优）",
+        height=410,
+        xaxis_tickangle=-45,
+        margin=dict(l=0, r=0, t=45, b=0),
+        template="plotly_white",
+    )
+    return figure
 
-        gr.Markdown("### 详细指标")
-        gr.Dataframe(value=results, interactive=False)
 
-        gr.Markdown("### 💡 因子方向说明")
-        gr.Markdown("""
-        - **负向因子**（如 vol20_neg）：因子值越大越好 → 实际选股时取负值排序
-        - **正向因子**（如 mom60）：因子值越大越好
-        - **ICIR > 0.5** 表示因子稳定有效；**|IC| > 0.03** 为最低有效标准
-        """)
+def _history_figure(factor: str | None) -> go.Figure | None:
+    history = factor_ic_history(factor)
+    if history.empty:
+        return None
+    history = history.sort_values("date")
+    history["rolling_ic"] = history["ic"].rolling(min(6, len(history)), min_periods=2).mean()
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            x=history["date"],
+            y=history["ic"],
+            name="单期 IC",
+            marker_color=["#E53935" if value >= 0 else "#43A047" for value in history["ic"]],
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=history["date"],
+            y=history["rolling_ic"],
+            mode="lines+markers",
+            name="滚动 IC",
+            line=dict(color="#1E88E5", width=2),
+        )
+    )
+    figure.add_hline(y=0, line_dash="dash", line_color="gray")
+    figure.update_layout(
+        title=f"{factor or '因子'} IC 时序与失效监控",
+        height=360,
+        margin=dict(l=0, r=0, t=45, b=0),
+        template="plotly_white",
+    )
+    return figure
+
+
+def _correlation_table() -> pd.DataFrame:
+    correlation = factor_correlation()
+    if correlation.empty:
+        return correlation
+    output = correlation.round(3).reset_index()
+    return output.rename(columns={output.columns[0]: "因子"})
+
+
+def _refresh_view():
+    summary = factor_audit_summary()
+    factors = summary["factor"].tolist() if not summary.empty and "factor" in summary else []
+    selected = factors[0] if factors else None
+    return (
+        factor_audit_status_md(),
+        _display_summary(summary),
+        _summary_figure(summary),
+        gr.update(choices=factors, value=selected),
+        _history_figure(selected),
+        _correlation_table(),
+    )
+
+
+def render() -> None:
+    """Render the factor audit tab."""
+    summary = factor_audit_summary()
+    factors = summary["factor"].tolist() if not summary.empty and "factor" in summary else []
+    selected = factors[0] if factors else None
+
+    with gr.Tab("🔬 因子研究"):
+        gr.HTML(page_header("🔬 因子研究", "T+1 可执行标签 / 滚动 IC / 冗余与失效监控"))
+        status = gr.Markdown(value=factor_audit_status_md())
+        gr.Markdown(
+            "*口径：T 日收盘形成因子，T+1 开盘进入，过滤入场/退出停牌与开盘涨跌停；"
+            "多头超额相对同日可交易股票等权收益，候选还需通过 FDR 多重检验。"
+            "结论是研究门槛，不构成收益承诺。*"
+        )
+        refresh = gr.Button("🔄 刷新最新审计", size="sm")
+
+        with gr.Accordion(f"📖 因子定义（{len(FACTOR_DEFINITIONS)} 个）", open=False):
+            gr.Dataframe(value=FACTOR_DEFINITIONS, interactive=False, max_height=420)
+
+        summary_plot = gr.Plot(value=_summary_figure(summary))
+        summary_table = gr.Dataframe(
+            value=_display_summary(summary),
+            interactive=False,
+            max_height=480,
+            wrap=True,
+        )
+
+        gr.Markdown("### 滚动 IC 与失效预警")
+        factor_selector = gr.Dropdown(
+            label="因子",
+            choices=factors,
+            value=selected,
+            filterable=True,
+        )
+        history_plot = gr.Plot(value=_history_figure(selected))
+        factor_selector.change(_history_figure, inputs=[factor_selector], outputs=[history_plot])
+
+        with gr.Accordion("🧬 因子相关性（识别重复押注）", open=False):
+            correlation_table = gr.Dataframe(
+                value=_correlation_table(),
+                interactive=False,
+                max_height=460,
+                wrap=False,
+            )
+
+        refresh.click(
+            _refresh_view,
+            outputs=[
+                status,
+                summary_table,
+                summary_plot,
+                factor_selector,
+                history_plot,
+                correlation_table,
+            ],
+        )
+
+        gr.Markdown(
+            "**准入规则**：IC、ICIR、FDR q≤0.10、正率、前后半段、近期 IC、覆盖率同时通过才列为候选；"
+            "与已有因子相关性 ≥0.85 的标为“冗余候选”，不能直接叠加权重。"
+        )

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import common
-
 import argparse
 import datetime as dt
 from pathlib import Path
@@ -10,6 +8,7 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
+import common
 from quart.backtest.engine import BacktestEngine
 from quart.backtest.metrics import max_drawdown, summarize
 from quart.config import load_config
@@ -199,7 +198,10 @@ def main() -> None:
         },
     )
     run.put_table("results", flat)
-    run.put_table("equity_curves", pd.DataFrame(curves))
+    run.put_table(
+        "equity_curves",
+        pd.DataFrame(curves).rename_axis("date").reset_index(),
+    )
     best = flat.sort_values("cagr", ascending=False).iloc[0] if not flat.empty else None
     if best is not None:
         run.add_metrics(

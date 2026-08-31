@@ -210,9 +210,6 @@ def run_daily(
     strategy = build_strategy(strategy_name)
     strategy.prepare(md)
     i = len(md.dates) - 1
-    raw_weights = strategy.target_weights(i)
-    force_flat = FLAT in raw_weights
-    raw_weights = {} if force_flat else dict(raw_weights)
 
     risk_cfg = cfg["risk"]
     manual_cfg = cfg.get("manual_trading", {})
@@ -244,6 +241,10 @@ def run_daily(
     else:
         cash, positions = load_holdings()
         sellable_positions = positions
+    strategy.sync_positions(positions)
+    raw_weights = strategy.target_weights(i)
+    force_flat = FLAT in raw_weights
+    raw_weights = {} if force_flat else dict(raw_weights)
     last_close = md.closes.iloc[i]
     equity = cash + sum(
         sh * last_close[sym]

@@ -17,6 +17,7 @@ dependencies = [
     "streamlit>=1.62.0",
     "plotly>=7.0.0",
     "gradio>=5.0",
+    "baostock>=0.9.3",
 ]
 
 [dependency-groups]

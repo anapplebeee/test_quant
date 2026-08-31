@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 from quart.data.market import MarketData
 from quart.execution.constraints import FLAT
@@ -10,7 +11,7 @@ from quart.strategy.filters import apply_liquidity, regime_flat_series
 
 
 class LowVolCompositeStrategy(BaseStrategy):
-    """A-share low-anomaly composite: z(-vol20) + z(-amp20) + z(-lottery20).
+    """A 股低风险复合：z(-vol20) + z(-amp20) + z(-lottery20)。
 
     Research basis (scripts/factor_research.py, 2019-2026 full market):
     these three sibling factors hold |IC|~0.065 with stable halves both monthly and weekly.
@@ -30,6 +31,10 @@ class LowVolCompositeStrategy(BaseStrategy):
     组合构造（weight_mode）：equal=等权（历史行为）；inv_vol=波动率倒数加权
     （单票风险预算均等）；zscore=因子分数加权（保留因子强度横截面信息）。
     非等权模式迭代 cap 至 max_weight_pct 并归一化。
+
+    可选因子（长窗口风险、下行风险、尾损、成交额稳定性、规模、换手、价值）默认关闭，
+    只有通过样本外审计后才应进入实盘配置。`industry_z=True` 时在行业内标准化；映射缺失
+    或组内样本不足 5 只时回退全市场复合分，而不是静默剔除股票。
     """
 
     name = "lowvol_composite"
@@ -54,6 +59,15 @@ class LowVolCompositeStrategy(BaseStrategy):
         "industry_z": (bool, False, "是否行业内 z-score 中性化"),
         "weight_mode": (str, "equal", "权重模式: equal=等权, inv_vol=波动率倒数, zscore=因子分数"),
         "vg_weight": (float, 0.0, "价值成长因子合成权重（0=关闭，0~1）"),
+        "winsor_z": (float, 0.0, "截面 z-score 截尾阈值（0=关闭）"),
+        "risk_window_long": (int, 60, "长窗口风险因子窗口"),
+        "long_vol_weight": (float, 0.0, "长窗口低波因子权重"),
+        "downside_weight": (float, 0.0, "下行半方差因子权重"),
+        "tail_weight": (float, 0.0, "尾部损失因子权重"),
+        "amount_stability_weight": (float, 0.0, "成交额稳定性因子权重"),
+        "size_weight": (float, 0.0, "小市值因子权重（z(-ln 流通市值)）"),
+        "turnover_weight": (float, 0.0, "低换手率因子权重（z(-20 日换手)）"),
+        "value_weight": (float, 0.0, "价值因子权重（z(1/PE_TTM)，仅盈利为正）"),
     }
 
     def __init__(self, **params):
@@ -77,7 +91,7 @@ class LowVolCompositeStrategy(BaseStrategy):
         buffer=0 时等价于纯 top_k（因持有者若在 top_k 内本就入选，补入者按名次取）。
         ranked_syms 必须已按分数降序排列且仅含当日可交易+流动性合格者。
         """
-        keep_n = int(round(top_k * (1 + buffer)))
+        keep_n = round(top_k * (1 + buffer))
         # 关键：按原序列的排名位置判断（先过滤再切片会打乱位置导致出区持仓被误留）
         keep = [s for pos, s in enumerate(ranked_syms) if s in held and pos < keep_n]
         new = [s for s in ranked_syms if s not in held][: top_k - len(keep)]
@@ -87,13 +101,13 @@ class LowVolCompositeStrategy(BaseStrategy):
     def _z(self, df: pd.DataFrame) -> pd.DataFrame:
         mu = df.mean(axis=1)
         sd = df.std(axis=1).replace(0, np.nan)
-        return df.sub(mu, axis=0).div(sd, axis=0).astype("float32")
+        values = df.sub(mu, axis=0).div(sd, axis=0)
+        if self.winsor_z > 0:
+            values = values.clip(lower=-self.winsor_z, upper=self.winsor_z)
+        return values.astype("float32")
 
     def _group_z(self, df: pd.DataFrame, min_group_size: int = 5) -> pd.DataFrame:
-        """逐日行业内 z-score：z = (x - 行业均值) / 行业标准差。
-
-        组内样本 < min_group_size 或标准差为 0 时回退为 NaN（当日剔除）。
-        """
+        """逐日行业内 z-score；小样本或零方差行业回退全市场分。"""
         from quart.strategy.industries import load_industry_series
 
         try:
@@ -114,7 +128,54 @@ class LowVolCompositeStrategy(BaseStrategy):
         mu_b.columns = df.columns
         sd_b = sd.reindex(columns=g.values)
         sd_b.columns = df.columns
-        return df.div(sd_b, axis=0).sub(mu_b.div(sd_b, axis=0), axis=0).astype("float32")
+        grouped = df.sub(mu_b, axis=0).div(sd_b, axis=0)
+        return grouped.where(sd_b.notna(), df).astype("float32")
+
+    def _blend_fundamental(
+        self,
+        close: pd.DataFrame,
+        weighted: pd.DataFrame,
+        complete: pd.DataFrame,
+        total_weight: float,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, float]:
+        """混入基本面风格因子（小市值/低换手/价值）。
+
+        数据为 baostock 回填的 PIT 口径（scripts/backfill_factor_data.py），
+        缺失时告警并跳过——不能静默改变合成分的量纲。
+        """
+        try:
+            from quart.data.fundamental import fundamental_wide
+        except ImportError:
+            logger.warning("fundamental 模块不可用，跳过风格因子混入")
+            return weighted, complete, total_weight
+        try:
+            frames = {
+                column: fundamental_wide(column).reindex(index=close.index, columns=close.columns)
+                for column in ("float_mcap", "turn", "pe_ttm")
+            }
+        except (FileNotFoundError, ValueError) as exc:
+            logger.warning("基本面因子数据缺失，跳过风格因子混入: {}", exc)
+            return weighted, complete, total_weight
+
+        blends: list[tuple[float, pd.DataFrame]] = []
+        if self.size_weight > 0:
+            blends.append((self.size_weight, -np.log(frames["float_mcap"])))
+        if self.turnover_weight > 0:
+            blends.append((self.turnover_weight, -frames["turn"].rolling(20).mean()))
+        if self.value_weight > 0:
+            pe = frames["pe_ttm"]
+            blends.append((self.value_weight, (1.0 / pe).where(pe > 0)))
+        for weight, raw in blends:
+            extra = self._z(raw.astype("float32"))
+            weighted = weighted.add(extra * weight, fill_value=np.nan)
+            complete &= extra.notna()
+            total_weight += weight
+            del extra
+        return weighted, complete, total_weight
+
+    def sync_positions(self, positions: dict[str, int]) -> None:
+        """排名缓冲必须基于实际持仓，而不是上一期目标名单。"""
+        self._held = {symbol for symbol, shares in positions.items() if int(shares) > 0}
 
     VG_FACTORS = ("roe_improve", "profit_yoy", "ep", "bp")
 
@@ -163,6 +224,15 @@ class LowVolCompositeStrategy(BaseStrategy):
         self.weight_mode = str(p.get("weight_mode", "equal"))
         if self.weight_mode not in ("equal", "inv_vol", "zscore"):
             self.weight_mode = "equal"
+        self.winsor_z = max(0.0, float(p.get("winsor_z", 0.0)))
+        self.risk_window_long = max(20, int(p.get("risk_window_long", 60)))
+        self.long_vol_weight = max(0.0, float(p.get("long_vol_weight", 0.0)))
+        self.downside_weight = max(0.0, float(p.get("downside_weight", 0.0)))
+        self.tail_weight = max(0.0, float(p.get("tail_weight", 0.0)))
+        self.amount_stability_weight = max(0.0, float(p.get("amount_stability_weight", 0.0)))
+        self.size_weight = max(0.0, float(p.get("size_weight", 0.0)))
+        self.turnover_weight = max(0.0, float(p.get("turnover_weight", 0.0)))
+        self.value_weight = max(0.0, float(p.get("value_weight", 0.0)))
 
         c = md.close_val.astype("float32")
         ret1 = c.pct_change(fill_method=None)
@@ -177,7 +247,50 @@ class LowVolCompositeStrategy(BaseStrategy):
 
         # fillna(0) 是死代码：随后的 where(complete) 会把任一因子缺失的行整行置 NaN
         complete = z_vol.notna() & z_amp.notna() & z_lot.notna()
-        comp = ((z_vol + z_amp + z_lot) / 3.0).where(complete).astype("float32")
+        weighted = z_vol + z_amp + z_lot
+        total_weight = 3.0
+
+        # 可选因子（默认关闭，仅样本外审计通过后启用）：
+        # 长窗口低波 / 下行半方差 / 尾损 / 成交额稳定性
+        optional_factors = (
+            (
+                self.long_vol_weight,
+                lambda: -ret1.rolling(self.risk_window_long).std(),
+            ),
+            (
+                self.downside_weight,
+                lambda: -np.sqrt(
+                    ret1.clip(upper=0).pow(2).rolling(self.risk_window_long).mean()
+                ),
+            ),
+            (
+                self.tail_weight,
+                lambda: ret1.rolling(self.risk_window_long).quantile(0.10),
+            ),
+            (
+                self.amount_stability_weight,
+                lambda: -(
+                    md.amounts.rolling(self.risk_window_long).std()
+                    / md.amounts.rolling(self.risk_window_long).mean().replace(0, np.nan)
+                ),
+            ),
+        )
+        for weight, factory in optional_factors:
+            if weight <= 0:
+                continue
+            extra = self._z(factory().astype("float32"))
+            weighted = weighted.add(extra * weight, fill_value=np.nan)
+            complete &= extra.notna()
+            total_weight += weight
+            del extra
+
+        # 基本面风格因子（小市值/低换手/价值），PIT 口径
+        if self.size_weight > 0 or self.turnover_weight > 0 or self.value_weight > 0:
+            weighted, complete, total_weight = self._blend_fundamental(
+                c, weighted, complete, total_weight
+            )
+
+        comp = (weighted / total_weight).where(complete).astype("float32")
 
         # 多因子合成：叠加 PIT 价值成长（正交来源），缺失财务数据 = 中性 0
         self.vg_weight = float(p.get("vg_weight", 0.0))
@@ -194,7 +307,7 @@ class LowVolCompositeStrategy(BaseStrategy):
         if self.industry_z:
             comp = self._group_z(comp)
         self.composite = comp
-        del vol20, amp20, lotto, z_vol, z_amp, z_lot
+        del vol20, amp20, lotto, z_vol, z_amp, z_lot, weighted
 
         self.reversal = (-ret1.rolling(5).mean()).astype("float32")
         # inv_vol 加权所需的逐票波动率

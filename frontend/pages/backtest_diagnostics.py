@@ -1,30 +1,27 @@
 """回测诊断页面：Walk-Forward 样本外检验（真实数据优先）。
 
 2026-08-31 架构检视：原页面硬编码"演示 WFA 数据"且与回测中心的真实
-`render_wfa_panel()` 并存，容易误导。改为读取 `reports/wfa_*.csv`
-真实逐折结果；无数据时明确提示运行 WFA，不再展示假数字。
+`render_wfa_panel()` 并存，容易误导。现统一读取 ArtifactStore 的最新 WFA
+制品，按 run_id 追溯参数、数据版本与逐折结果。
 """
 from __future__ import annotations
 
+import gradio as gr
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import gradio as gr
 
-from common import reports_dir
+from api.artifacts_api import latest_wfa, read_table
 from frontend.theme import page_header
 
 
-def _latest_wfa() -> pd.DataFrame | None:
-    """读取最新一份真实 WFA 逐折结果（reports/wfa_*.csv）。"""
-    files = sorted(reports_dir().glob("wfa_*.csv"))
-    if not files:
-        return None
-    try:
-        df = pd.read_csv(files[-1], dtype={"best_top_k": str})
-        return df
-    except Exception:
-        return None
+def _latest_wfa() -> tuple[pd.DataFrame | None, dict | None]:
+    """读取最新 WFA manifest 与 folds 制品。"""
+    metadata = latest_wfa()
+    if metadata is None:
+        return None, None
+    folds = read_table(metadata["run_id"], "folds")
+    return folds, metadata
 
 
 def _decay_ratio(row: pd.Series) -> float | None:
@@ -37,7 +34,7 @@ def _decay_ratio(row: pd.Series) -> float | None:
 
 def render():
     """渲染回测诊断 Tab"""
-    wfa = _latest_wfa()
+    wfa, metadata = _latest_wfa()
 
     with gr.Tab("🔍 回测诊断"):
         gr.HTML(page_header("🔍 回测诊断", "Walk-Forward / 过拟合检验 / 参数稳健性"))
@@ -54,10 +51,10 @@ def render():
             )
             return
 
-        file_name = sorted(reports_dir().glob("wfa_*.csv"))[-1].name
         gr.Markdown(
             f"### 🚶 Walk-Forward 检验\n"
-            f"> ✅ **真实数据**：`{file_name}`（样本外/样本内夏普比，越接近 1 越稳健）"
+            f"> ✅ **运行制品**：`{metadata['run_id']}` · 数据指纹 `{metadata['fingerprint']}`"
+            "（样本外/样本内夏普比，越接近 1 越稳健）"
         )
 
         table = pd.DataFrame(

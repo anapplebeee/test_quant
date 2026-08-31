@@ -23,6 +23,8 @@ SPEC: dict[str, tuple[type | tuple[type, ...], bool, str]] = {
     "data.exclude_chinext": ((bool,), False, "剔除创业板"),
     "data.min_list_days": ((int,), False, "次新股过滤（上市不满 N 自然日）"),
     "universe.default_index": ((str,), True, "默认股票池指数"),
+    "universe.mode": ((str,), False, "股票池模式 index/all/mainboard"),
+    "universe.workers": ((int,), False, "数据刷新并发数（1-32）"),
     "benchmark": ((str,), True, "业绩基准指数"),
     "backtest.initial_cash": ((int, float), True, "初始资金"),
     "backtest.commission_rate": ((int, float), True, "佣金费率"),

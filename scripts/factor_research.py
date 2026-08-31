@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import argparse
+
 import numpy as np
 import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
 from quart.backtest.engine import MarketData
-from quart.config import load_config
 from quart.data.store import BarStore
+from quart.research.factor_audit import rank_correlation
 from quart.research.momentum import rank_momentum, remove_limit_up_momentum, signed_smooth
 
 console = Console()
@@ -20,9 +21,9 @@ def build_factors(md: MarketData) -> dict[str, pd.DataFrame]:
     c = md.close_val
     o = md.opens
     h = md.highs
-    l = md.lows
+    lows = md.lows
     v = md.volumes
-    a = md.amounts.ffill()
+    a = md.amounts
     ret1 = c.pct_change(fill_method=None)
     # 滚动 VWAP 使用窗口内总成交额/总成交量，避免每日 VWAP 简单均值
     # 让低成交量交易日获得不合理的等权重。
@@ -40,7 +41,7 @@ def build_factors(md: MarketData) -> dict[str, pd.DataFrame]:
         "high_lag250": c / c.rolling(250).max() - 1.0,
         "vol20_neg": -ret1.rolling(20).std(),
         "downvol_ratio_neg": -(ret1.clip(upper=0).rolling(20).std() / ret1.abs().rolling(20).std().replace(0, np.nan)),
-        "amp20_neg": -(((h - l) / c.shift(1).replace(0, np.nan)).rolling(20).mean()),
+        "amp20_neg": -(((h - lows) / c.shift(1).replace(0, np.nan)).rolling(20).mean()),
         "amp_expand20": a.rolling(20).mean() / a.rolling(120).mean(),
         "net_flow20": (np.sign(ret1) * v).rolling(20).sum() / v.rolling(20).sum(),
         "vwap_dev20": c / v - 1.0,
@@ -75,20 +76,14 @@ def main() -> None:
     parser.add_argument("--sample", default="monthly", choices=["monthly", "weekly"])
     args = parser.parse_args()
 
-    cfg = load_config()
     store = BarStore()
     bars = store.load(include_index=False)
     md = MarketData.from_bars(bars)
 
     factors = build_factors(md)
-    label = md.close_val.shift(-(HORIZON + 1)) / md.close_val.shift(-1) - 1.0
-    amed = md.amounts.ffill().rolling(20).mean()
+    label = md.opens.shift(-(HORIZON + 1)) / md.opens.shift(-1).replace(0, np.nan) - 1.0
+    amed = md.amounts.rolling(20).mean()
     eligible_base = amed > 20_000_000
-
-    bench_close = (
-        store.load_benchmark(cfg["benchmark"]).set_index("date")["close"].reindex(md.dates).ffill()
-    )
-    bench_fwd = bench_close.shift(-(HORIZON + 1)) / bench_close.shift(-1) - 1.0
 
     sampler = monthly_ends if args.sample == "monthly" else every_nth(5)
     ends = sampler(md.dates)
@@ -103,13 +98,12 @@ def main() -> None:
             if len(joined) < 300:
                 continue
             fx, fy = joined["f"], joined["y"]
-            ics.append(float(fx.corr(fy, method="spearman")))
+            ics.append(rank_correlation(fx, fy))
             q_hi, q_lo = fx.quantile(0.9), fx.quantile(0.1)
             hi_y = fy[fx >= q_hi].clip(-0.5, 2.0).mean()
             lo_y = fy[fx <= q_lo].clip(-0.5, 2.0).mean()
             spread = hi_y - lo_y
-            br = bench_fwd.iloc[i]
-            spreads.append(float(spread - br) if not np.isnan(br) else float(spread))
+            spreads.append(float(spread))
 
         if not ics:
             # 采样点全部因流动性/数据不足被跳过时，跳过该因子而不是产出 NaN 污染表

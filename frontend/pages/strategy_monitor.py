@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import queue
-from datetime import date, datetime, timedelta
 
 import gradio as gr
 import pandas as pd
@@ -12,6 +11,7 @@ from api.manual_trading_api import latest_prices, manual_settings, repository
 from api.strategy_api import (
     STRATEGY_META,
     live_signal_choices,
+    configured_strategy_schedule,
     strategy_catalog,
 )
 from api.strategy_api import (
@@ -20,7 +20,6 @@ from api.strategy_api import (
 from api.task_api import TASKS, get_task_artifacts, task_queue
 from common import load_stock_names
 from frontend.theme import metric_card, page_header
-
 
 # ---------- 任务执行（流式+队列） ----------
 
@@ -283,38 +282,18 @@ def render():
 
         # ===== 调仓日历 =====
         with gr.Accordion("📅 调仓日历", open=True):
-            try:
-                import yaml
-                with open("config/settings.yaml", encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f)
-                rebalance_days = cfg.get("strategy", {}).get("rebalance_days", 5)
-            except Exception:
-                rebalance_days = 5
-
-            # 优先读取真实交易日历，否则退回工作日估算
-            today = datetime.now().date()
-            try:
-                from quart.data.calendar import next_market_trade_date, DEFAULT_CALENDAR_PATH
-                if DEFAULT_CALENDAR_PATH.exists():
-                    # 找到今日之后第 N 个交易日
-                    cursor = today
-                    for _ in range(rebalance_days):
-                        cursor = date.fromisoformat(next_market_trade_date(cursor))
-                    next_reb = cursor
-                else:
-                    raise FileNotFoundError
-            except Exception:
-                next_reb = today
-                added = 0
-                while added < rebalance_days:
-                    next_reb += timedelta(days=1)
-                    if next_reb.weekday() < 5:
-                        added += 1
+            schedule = configured_strategy_schedule()
 
             with gr.Row():
-                gr.HTML(metric_card("调仓周期", f"{rebalance_days} 交易日", "blue"))
-                gr.HTML(metric_card("下次调仓", next_reb.strftime("%Y-%m-%d"), "green"))
-                gr.HTML(metric_card("倒计时", f"{(next_reb - today).days} 天", "orange"))
+                gr.HTML(metric_card("默认策略", schedule["strategy"], "purple"))
+                gr.HTML(metric_card("调仓周期", f"{schedule['rebalance_days']} 交易日", "blue"))
+                gr.HTML(metric_card("估算下次调仓", schedule["estimated_next_date"], "green"))
+                gr.HTML(metric_card("自然日倒计时", f"{schedule['calendar_days']} 天", "orange"))
+            gr.Markdown(
+                "*该日期按当前策略周期从今天顺延，仅用于计划提示；实际是否调仓以最近计划、"
+                "排名缓冲和正式信号为准。交易日历"
+                + ("已加载。*" if schedule["calendar_cached"] else "缺失，已退化为工作日规则。*")
+            )
 
         gr.Markdown("---")
 

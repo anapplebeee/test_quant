@@ -73,9 +73,24 @@ def test_accepts_frontend_signal_and_refresh_parameters():
     assert ok, err
     ok, err = validate_extra_args(
         "refresh",
-        ["--universe", "index", "--index", "000300", "--start", "20190101", "--full-refresh"],
+        [
+            "--universe", "index",
+            "--index", "000300",
+            "--start", "20190101",
+            "--workers", "4",
+            "--full-refresh",
+        ],
     )
     assert ok, err
+
+
+def test_refresh_workers_are_bounded():
+    ok, _ = validate_extra_args("refresh", ["--workers", "16"])
+    assert ok
+    ok, _ = validate_extra_args("refresh", ["--workers", "32"])
+    assert ok, "32 是并发上限，应允许"
+    ok, _ = validate_extra_args("refresh", ["--workers", "33"])
+    assert not ok, "超过 32 必须拒绝"
 
 
 def test_rejects_unknown_flag():

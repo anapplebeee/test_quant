@@ -6,11 +6,26 @@
 """
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 
 from common import degraded, index_dir, universe_dir
-
 from quart.data.index_catalog import BOARDS
+
+
+def _last_update_status() -> dict:
+    from quart.config import data_root
+
+    path = data_root() / "meta" / "last_data_update.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception as exc:
+        degraded("last_data_update", exc)
+        return {}
 
 
 def _count_parquet(directory) -> int:
@@ -41,7 +56,6 @@ def get_index_coverage() -> pd.DataFrame:
     每个指数检查本地文件是否存在 + 最新交易日。
     """
     from quart.data.index_catalog import BOARDS, INDEX_CATALOG
-    from quart.data.store import BarStore
 
     store = _bar_store()
     codes = [item["code"] for item in INDEX_CATALOG]
@@ -86,15 +100,25 @@ def get_stock_stats() -> dict:
 
     stats = {
         "stock_count": 0,
+        "latest_date": "N/A",
+        "latest_symbols": 0,
+        "latest_coverage": 0.0,
+        "freshness_days": None,
         "universe_count": 0,
         "index_count": 0,
         "index_file_count": 0,
         "index_boards": {},
         "last_score_date": "N/A",
+        "last_update": {},
     }
 
     try:
-        stats["stock_count"] = len(_bar_store().symbols())
+        coverage = _bar_store().coverage_summary()
+        stats["stock_count"] = coverage["symbols"]
+        stats["latest_date"] = coverage["latest_date"] or "N/A"
+        stats["latest_symbols"] = coverage["latest_symbols"]
+        stats["latest_coverage"] = coverage["latest_coverage"]
+        stats["freshness_days"] = coverage["freshness_days"]
     except Exception as e:
         degraded("stock_count", e)
 
@@ -112,7 +136,7 @@ def get_stock_stats() -> dict:
         coverage = get_index_coverage()
         if not coverage.empty:
             covered = coverage[coverage["状态"].str.startswith("✅")]
-            stats["index_count"] = int(len(covered))
+            stats["index_count"] = len(covered)
             stats["index_boards"] = {
                 board: int((covered["板块"] == board).sum())
                 for board in BOARDS
@@ -126,6 +150,8 @@ def get_stock_stats() -> dict:
             stats["last_score_date"] = str(scores_df["datetime"].max())[:10]
     except Exception as e:
         degraded("last_score_date", e)
+
+    stats["last_update"] = _last_update_status()
 
     return stats
 

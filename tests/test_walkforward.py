@@ -6,11 +6,12 @@
 """
 from __future__ import annotations
 
+from itertools import pairwise
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from quart.backtest.metrics import summarize
 from quart.backtest.walkforward import (
     SELECTABLE_METRICS,
     WFAResult,
@@ -29,7 +30,7 @@ from quart.strategy.base import BaseStrategy
 def test_splits_are_contiguous_and_ordered():
     sp = make_splits(n_days=1000, train_days=300, test_days=100)
     assert len(sp) == 7  # (1000-300)/100
-    for a, b in zip(sp, sp[1:]):
+    for a, b in pairwise(sp):
         assert b.train_lo > a.train_lo, "窗口未向前滚动"
         assert a.test_hi == b.test_lo, "test 段应首尾相接"
     assert sp[0].train_lo == 0
@@ -72,6 +73,15 @@ def test_bad_window_sizes_rejected():
         make_splits(1000, train_days=0, test_days=10)
     with pytest.raises(ValueError):
         make_splits(1000, train_days=10, test_days=10, embargo_days=-1)
+    with pytest.raises(ValueError, match="warmup_days"):
+        run_walk_forward(
+            _md(n=100),
+            None,
+            "dummy",
+            train_days=50,
+            test_days=20,
+            warmup_days=-1,
+        )
 
 
 # ---------------------------------------------------------------- 段链接
@@ -149,6 +159,21 @@ class _HistorySignal(BaseStrategy):
         return {}
 
 
+class _NeedsHistory(BaseStrategy):
+    name = "needs_history"
+    required_history_days = 80
+
+    def prepare(self, md):
+        super().prepare(md)
+
+    def target_weights(self, i):
+        # 声明 required_history_days 后，WFA 会为测试段前置该窗口的历史上下文，
+        # 策略在测试首日就能看到足够历史并出信号
+        if i < self.required_history_days:
+            return {}
+        return {self._md.symbols[0]: 1.0}
+
+
 def _md(n: int = 400, n_syms: int = 8, seed: int = 3) -> MarketData:
     rng = np.random.default_rng(seed)
     dates = pd.date_range("2022-01-03", periods=n, freq="B")
@@ -211,6 +236,26 @@ def test_oos_equity_is_continuous_and_monotonic_in_time():
     assert (eq > 0).all(), "净值曲线不应出现非正值"
 
 
+def test_oos_uses_pre_test_history_as_warmup():
+    # 每折独立账户：test 段前会加载 required_history_days 的历史上下文，
+    # 策略在测试首日（local_i == required_history_days）就能出信号。
+    result = run_walk_forward(
+        _md(n=400),
+        None,
+        "needs_history",
+        train_days=120,
+        test_days=60,
+        embargo_days=5,
+        account_mode="independent",
+        fees=Fees.zero(),
+        build_strategy_fn=lambda name, **kwargs: _NeedsHistory(**kwargs),
+    )
+
+    assert result.n_folds_with_trades == len(result.folds), (
+        f"测试段未使用前置历史：{result.n_folds_with_trades}/{len(result.folds)} 折有交易"
+    )
+
+
 def test_folds_cover_disjoint_test_windows():
     md = _md(n=400)
     result = run_walk_forward(
@@ -220,7 +265,7 @@ def test_folds_cover_disjoint_test_windows():
         build_strategy_fn=lambda name, **kw: _Declining(**kw),
     )
     ranges = [f.test_range for f in result.folds]
-    for a, b in zip(ranges, ranges[1:]):
+    for a, b in pairwise(ranges):
         assert a[1] < b[0] or a[1] == b[0], "test 窗口不应乱序"
 
 

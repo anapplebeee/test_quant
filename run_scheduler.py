@@ -45,16 +45,21 @@ def job_update() -> None:
         cfg = load_config()
         universe_mode = cfg.get("universe", {}).get("mode", "index")
         index_code = cfg["universe"]["default_index"]
+        workers = int(cfg.get("universe", {}).get("workers", 1))
         if universe_mode == "all":
             from quart.data.source_akshare import fetch_stock_list
             codes = fetch_stock_list()["symbol"].tolist()
+        elif universe_mode == "mainboard":
+            from quart.data.source_akshare import fetch_stock_list
+            from quart.data.universe import filter_mainboard
+            codes = filter_mainboard(fetch_stock_list()["symbol"].tolist())
         else:
             codes = get_constituents(index_code)
         try:
             codes = filter_st(codes)
         except Exception as exc:
             logger.warning("ST filter skipped: {}", exc)
-        stats = update_universe_data(index_code, codes, start="20190101")
+        stats = update_universe_data(index_code, codes, start="20190101", workers=workers)
         logger.info("update done: {}", stats)
     except Exception:
         logger.exception("update failed")

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quart.backtest.engine import BaseStrategy, BacktestEngine, Fees, MarketData
+from quart.backtest.engine import BacktestEngine, BaseStrategy, Fees, MarketData
 
 
 def make_bars(specs: dict[str, float], dates, step: float = 1.0) -> pd.DataFrame:
@@ -85,6 +85,23 @@ def test_rotation_sells_then_buys_with_lots():
     assert any(t.symbol == "B" and t.shares == 9900 for t in buys)
     b = next(t for t in buys if t.symbol == "B")
     assert b.date == pd.Timestamp("2024-01-04")
+
+
+def test_signal_start_position_preserves_warmup_without_early_trades():
+    dates = pd.date_range("2024-01-01", periods=8)
+    bars = make_bars({"600001": 10.0}, dates, step=0.0)
+    md = MarketData.from_bars(bars)
+    engine = BacktestEngine(
+        md,
+        OnceStrategy("600001"),
+        fees=ZERO_FEES,
+        initial_cash=100_000,
+        signal_start_pos=4,
+    )
+
+    engine.run()
+
+    assert engine.trades[0].date == dates[5]
 
 
 def test_t_plus_one_buy_not_sold_same_day():

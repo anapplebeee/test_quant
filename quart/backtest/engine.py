@@ -26,7 +26,9 @@ import pandas as pd
 
 from quart.config import load_config
 from quart.data.market import MarketData
-from quart.execution.constraints import A_SHARE_LOT as LOT
+from quart.execution.constraints import (
+    A_SHARE_LOT as LOT,
+)
 from quart.execution.constraints import FLAT, limit_prices, price_limit_pct
 from quart.execution.fees import Fees
 from quart.execution.models import BUY, ExecutionContext
@@ -181,6 +183,8 @@ class BacktestEngine:
             if carried_targets is not None and (i > 0 or signal_i > 0):
                 was_flat = bool(carried_targets.get(FLAT))
                 portfolio.cash = self._rebalance(portfolio, carried_targets, i, signal_i)
+                # 每次撮合后同步策略真实持仓（换手缓冲带/持仓惯性策略需要）
+                self.strategy.sync_positions(portfolio.positions)
                 if was_flat and portfolio.positions:
                     # 清仓未完成时（跌停/停牌），保持 FLAT 意图隔日继续挂单，
                     # 且不调用 target_weights——策略在空仓态不应再产出选股

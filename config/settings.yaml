@@ -10,6 +10,11 @@ data:
 
 universe:
   default_index: "000300"
+  # 数据刷新股票池：index（指数成分股）| mainboard（沪深主板全部）| all（全市场）
+  mode: "mainboard"
+  # 并发刷新线程数（1-32）。主板全量 ~3000 只，串行按 0.35s/只需 ~18 分钟，
+  # 并发 8 可压到 3 分钟内。
+  workers: 8
 
 benchmark: "000300"
 

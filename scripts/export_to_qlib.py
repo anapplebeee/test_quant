@@ -47,7 +47,7 @@ def export(store: BarStore, out_dir: Path) -> dict:
         amount = full["amount"].to_numpy(dtype=np.float64)
         close = full["close"].to_numpy(dtype=np.float64)
         with np.errstate(divide="ignore", invalid="ignore"):
-            vwap = np.where(volume > 0, amount / volume, np.nan)
+            vwap = np.where(volume > 0, amount / (volume * 100.0), np.nan)
 
         arrays = {
             "open": full["open"].to_numpy(dtype=np.float64),

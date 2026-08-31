@@ -51,6 +51,7 @@ def _run_refresh(
     index_code: str,
     start: str,
     max_symbols: float | None,
+    workers: float,
     keep_st: bool,
     full_refresh: bool,
     confirm_full_refresh: bool,
@@ -58,13 +59,18 @@ def _run_refresh(
     if full_refresh and not confirm_full_refresh:
         yield "❌ 全量刷新会重拉并覆盖所选股票历史，请先勾选确认。"
         return
-    extra = ["--universe", universe, "--index", index_code, "--start", start]
+    extra = [
+        "--universe", universe,
+        "--index", index_code,
+        "--start", start,
+        "--workers", str(int(workers)),
+    ]
     if max_symbols:
         extra += ["--max", str(int(max_symbols))]
     if keep_st:
         extra.append("--keep-st")
     if full_refresh:
-        extra.append("--full-refresh")
+        extra.append("--full")
     title = "全量数据刷新" if full_refresh else "增量数据刷新"
     yield from _stream_operation("refresh", extra, title)
 
@@ -89,6 +95,29 @@ def _run_sweep(strategy: str, start: str, end: str, combos: str):
         if combo:
             extra += ["--combo", combo]
     yield from _stream_operation("sweep", extra, f"{strategy} 参数扫描")
+
+
+def _run_factor_audit(
+    sample: str,
+    horizon: float,
+    start: str,
+    end: str,
+    min_amount: float,
+    min_cross_section: float,
+):
+    extra = [
+        "--sample", sample,
+        "--horizon", str(int(horizon)),
+        "--min-amount", str(float(min_amount)),
+        "--min-cross-section", str(int(min_cross_section)),
+    ]
+    normalized_start = str(start or "").strip()
+    normalized_end = str(end or "").strip()
+    if normalized_start:
+        extra += ["--start", normalized_start]
+    if normalized_end:
+        extra += ["--end", normalized_end]
+    yield from _stream_operation("factor_research", extra, "统一因子审计")
 
 
 def _run_quality(jump_threshold: float):
@@ -145,13 +174,27 @@ def render() -> None:
         operation_output = gr.Markdown("*选择下方操作开始执行。*")
 
         with gr.Accordion("📥 数据刷新", open=True):
+            gr.Markdown(
+                "> **mainboard** = 沪深主板全量（~3000只，排除创业板/科创板/北交所）。"
+                "并发 8 线程约 3 分钟完成增量刷新。"
+            )
             with gr.Row():
-                refresh_universe = gr.Dropdown(label="股票池", choices=["index", "all"], value="all")
-                refresh_index = gr.Textbox(label="指数代码（仅 index 池生效）", value="000300")
+                refresh_universe = gr.Dropdown(
+                    label="股票池", choices=["mainboard", "index", "all"], value="mainboard",
+                )
+                refresh_index = gr.Textbox(label="指数代码（index 模式用）", value="000300")
                 refresh_start = gr.Textbox(label="历史起点 YYYYMMDD", value="20190101")
                 refresh_max = gr.Number(label="最多股票数（调试可空）", precision=0)
+            with gr.Row():
+                refresh_workers = gr.Slider(
+                    label="并发线程数",
+                    minimum=1,
+                    maximum=32,
+                    step=1,
+                    value=8,
+                )
                 refresh_keep_st = gr.Checkbox(label="保留 ST", value=False)
-                refresh_full = gr.Checkbox(label="全量重拉并覆盖", value=False)
+                refresh_full = gr.Checkbox(label="全量重拉（替换历史，消除漂移）", value=False)
                 refresh_confirm_full = gr.Checkbox(label="确认全量覆盖", value=False)
             gr.Markdown(
                 "默认执行增量更新。全量模式会从历史起点重拉所选股票；远端空响应不会删除本地旧数据。"
@@ -164,6 +207,7 @@ def render() -> None:
                     refresh_index,
                     refresh_start,
                     refresh_max,
+                    refresh_workers,
                     refresh_keep_st,
                     refresh_full,
                     refresh_confirm_full,
@@ -201,6 +245,36 @@ def render() -> None:
             sweep_button.click(
                 _run_sweep,
                 inputs=[sweep_strategy, sweep_start, sweep_end, sweep_combos],
+                outputs=[operation_output],
+            )
+
+        with gr.Accordion("🔬 因子审计", open=False):
+            gr.Markdown(
+                "统一输出滚动 RankIC、前后半段稳定性、覆盖率、T+1 多空收益和因子相关性。"
+            )
+            with gr.Row():
+                factor_sample = gr.Dropdown(
+                    label="截面频率",
+                    choices=["monthly", "weekly"],
+                    value="monthly",
+                )
+                factor_horizon = gr.Number(label="持有交易日", value=5, precision=0)
+                factor_start = gr.Textbox(label="起始日期（可空）", placeholder="2024-01-01")
+                factor_end = gr.Textbox(label="结束日期（可空）")
+            with gr.Row():
+                factor_min_amount = gr.Number(label="20日平均成交额下限", value=20_000_000)
+                factor_min_cross = gr.Number(label="最小截面股票数", value=100, precision=0)
+                factor_button = gr.Button("运行统一因子审计", variant="primary")
+            factor_button.click(
+                _run_factor_audit,
+                inputs=[
+                    factor_sample,
+                    factor_horizon,
+                    factor_start,
+                    factor_end,
+                    factor_min_amount,
+                    factor_min_cross,
+                ],
                 outputs=[operation_output],
             )
 

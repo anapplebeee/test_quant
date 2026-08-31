@@ -4,13 +4,12 @@
 """
 from __future__ import annotations
 
-
 import gradio as gr
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from api.manual_trading_api import manual_settings, repository
+from api.portfolio_api import current_holdings, holding_bars, holding_price_frame
 from common import load_stock_names
 from frontend.theme import page_header
 
@@ -85,15 +84,9 @@ def _metric_row_html(items: list[tuple[str, str, str, str]]) -> str:
 
 
 def _get_holdings():
-    """从统一 SQLite 账本读取持仓与现金。"""
-    try:
-        _, account_name = manual_settings()
-        state = repository().account_state(account_name)
-    except Exception:
-        state = None
-    if state is None:
-        return None, None
-    return state.total_positions, state.cash_total
+    """通过组合 API 读取持仓与现金。"""
+    positions, cash = current_holdings()
+    return (positions or None), cash
 
 
 def _load_prices(positions: dict) -> pd.DataFrame:
@@ -102,25 +95,12 @@ def _load_prices(positions: dict) -> pd.DataFrame:
     2026-08-31 修复：存储已迁移为 year=YYYY 分区布局，旧 per-symbol
     parquet 路径不存在导致本页全部显示"数据缺失"；统一改走 BarStore。
     """
-    from api.manual_trading_api import latest_prices
-
-    prices = latest_prices(list(positions))
-    rows = []
-    for sym, shares in positions.items():
-        price = float(prices.get(sym, 0.0))
-        rows.append({"code": sym, "shares": shares, "price": price,
-                     "value": shares * price})
-    return pd.DataFrame(rows)
+    return holding_price_frame(positions)
 
 
 def _load_bars_frame(symbols: list) -> pd.DataFrame:
     """统一 BarStore 分区查询（兼容新旧布局），返回长表 date/symbol/close/amount。"""
-    from quart.data.store import BarStore
-
-    try:
-        return BarStore().load(symbols=[str(s) for s in symbols])
-    except Exception:
-        return pd.DataFrame()
+    return holding_bars([str(symbol) for symbol in symbols])
 
 
 def _build_var_chart(returns: pd.Series) -> go.Figure:

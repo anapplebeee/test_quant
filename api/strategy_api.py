@@ -6,6 +6,11 @@ REGISTRY（5 个）漂移——新策略 lowvol_indz 上线后前端不可见。
 """
 from __future__ import annotations
 
+from datetime import date
+
+from common import reports_dir, safe_path, valid_date8
+from quart.data.artifacts import STATUS_OK, ArtifactStore
+from quart.data.calendar import TradingCalendar
 from quart.strategy import REGISTRY, build_strategy
 
 # 展示元数据：label 用于下拉/表格，desc 用于详情。新增策略只改这里 + REGISTRY。
@@ -98,3 +103,78 @@ def live_allowlist() -> list[str]:
     from quart.config import load_config
 
     return list((load_config().get("strategy") or {}).get("live_allowlist") or [])
+
+
+def list_signal_reports() -> list[str]:
+    """可用信号日期，优先来自带 run_id 的制品仓库。"""
+    dates: set[str] = set()
+    try:
+        for manifest in ArtifactStore().list_runs(status=STATUS_OK):
+            if not manifest.task.startswith("signal_") or manifest.artifact("report") is None:
+                continue
+            signal_date = str((manifest.params or {}).get("signal_date") or "").replace("-", "")
+            if valid_date8(signal_date):
+                dates.add(signal_date)
+    except Exception:
+        pass
+    for path in reports_dir().glob("signal_*.md"):
+        signal_date = path.stem.removeprefix("signal_")
+        if valid_date8(signal_date):
+            dates.add(signal_date)
+    return sorted(dates)
+
+
+def load_signal_report(signal_date: str) -> str:
+    """按信号日读取报告；前端不接触 artifacts/reports 文件系统。"""
+    normalized = str(signal_date or "").replace("-", "")
+    if not valid_date8(normalized):
+        return "非法日期格式"
+    try:
+        store = ArtifactStore()
+        for manifest in store.list_runs(status=STATUS_OK):
+            if not manifest.task.startswith("signal_"):
+                continue
+            run_date = str((manifest.params or {}).get("signal_date") or "").replace("-", "")
+            if run_date == normalized:
+                content = store.read_text(manifest.run_id, "report")
+                if content:
+                    return content
+    except Exception:
+        pass
+    path = safe_path(reports_dir(), f"signal_{normalized}.md")
+    if path is not None and path.exists():
+        try:
+            with open(path, encoding="utf-8") as file:
+                return file.read()
+        except Exception as exc:
+            return f"读取信号报告失败：{exc}"
+    return "未找到信号报告"
+
+
+def signal_snapshot() -> tuple[list[str], str | None, str]:
+    dates = list_signal_reports()
+    if not dates:
+        return [], None, "暂无信号报告，请在操作中心生成 T+1 信号。"
+    latest = dates[-1]
+    return dates, latest, load_signal_report(latest)
+
+
+def configured_strategy_schedule(as_of: date | None = None) -> dict:
+    """当前默认策略的配置周期与交易日日历估算。"""
+    from quart.config import load_config
+
+    strategy_config = load_config().get("strategy") or {}
+    name = str(strategy_config.get("name") or strategy_choices()[0])
+    rebalance_days = get_strategy_defaults(name)["rebalance_days"]
+    current = as_of or date.today()
+    calendar = TradingCalendar.from_csv()
+    next_date = current
+    for _ in range(rebalance_days):
+        next_date = calendar.next_after(next_date)
+    return {
+        "strategy": name,
+        "rebalance_days": rebalance_days,
+        "estimated_next_date": next_date.isoformat(),
+        "calendar_cached": calendar.has_cache,
+        "calendar_days": (next_date - current).days,
+    }

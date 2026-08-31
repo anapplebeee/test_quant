@@ -29,8 +29,9 @@ from rich.table import Table
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from quart.backtest.engine import MarketData
-from quart.config import PROJECT_ROOT, load_config
+from quart.config import data_root, reports_dir
 from quart.data.store import BarStore
+from quart.research.factor_audit import rank_correlation
 from scripts.factor_research import every_nth, monthly_ends
 
 console = Console()
@@ -51,7 +52,7 @@ def build_r2_factors(md: MarketData) -> dict[str, pd.DataFrame]:
     c = md.close_val
     o = md.opens
     v = md.volumes
-    a = md.amounts.ffill()
+    a = md.amounts
     ret1 = c.pct_change(fill_method=None)
 
     mkt = ret1.mean(axis=1)  # 等权市场代理
@@ -81,11 +82,10 @@ def build_r2_factors(md: MarketData) -> dict[str, pd.DataFrame]:
     # 行业簇因子
     ind_mom20 = None
     rel_ind_mom20 = None
-    ind_path = PROJECT_ROOT / "data" / "universe" / "stat_industry.parquet"
+    ind_path = data_root() / "universe" / "stat_industry.parquet"
     if ind_path.exists():
         imap = pd.read_parquet(ind_path).set_index("symbol")["cluster"]
         ret20 = c / c.shift(20) - 1.0
-        cols_in_map = [s for s in ret20.columns if s in imap.index]
         groups = pd.Series([imap.get(s, "NA") for s in ret20.columns], index=ret20.columns)
         ind_ret = ret20.T.groupby(groups).mean().T  # dates × industries
         # 按每个股票所属行业广播行业收益：dates × symbols
@@ -94,7 +94,7 @@ def build_r2_factors(md: MarketData) -> dict[str, pd.DataFrame]:
         ind_mom20 = ind_mom20.astype("float64")
         rel_ind_mom20 = (ret20 - ind_mom20).astype("float64")
 
-    vwap20 = a.rolling(20).sum() / v.replace(0, np.nan).rolling(20).sum()
+    vwap20 = a.rolling(20).sum() / (v * 100.0).replace(0, np.nan).rolling(20).sum()
     vwap_pos20 = (c - vwap20) / vwap20.replace(0, np.nan)
 
     factors = {
@@ -121,19 +121,15 @@ def main() -> None:
     args = parser.parse_args()
     HORIZON = args.horizon
 
-    cfg = load_config()
     store = BarStore()
     bars = store.load(include_index=False)
     md = MarketData.from_bars(bars)
 
     factors = build_r2_factors(md)
 
-    label = md.close_val.shift(-(HORIZON + 1)) / md.close_val.shift(-1) - 1.0
+    label = md.opens.shift(-(HORIZON + 1)) / md.opens.shift(-1).replace(0, np.nan) - 1.0
     amed = md.amounts.ffill().rolling(20).mean()
     eligible_base = amed > 20_000_000
-
-    bench_close = store.load_benchmark(cfg["benchmark"]).set_index("date")["close"].reindex(md.dates).ffill()
-    bench_fwd = bench_close.shift(-(HORIZON + 1)) / bench_close.shift(-1) - 1.0
 
     sampler = monthly_ends if args.sample == "monthly" else every_nth(5)
     ends = sampler(md.dates)
@@ -148,13 +144,12 @@ def main() -> None:
             if len(joined) < 100:
                 continue
             fx, fy = joined["f"], joined["y"]
-            ics.append(float(fx.corr(fy, method="spearman")))
+            ics.append(rank_correlation(fx, fy))
             q_hi, q_lo = fx.quantile(0.9), fx.quantile(0.1)
             hi_y = fy[fx >= q_hi].clip(-0.5, 2.0).mean()
             lo_y = fy[fx <= q_lo].clip(-0.5, 2.0).mean()
             spread = hi_y - lo_y
-            br = bench_fwd.iloc[i]
-            spreads.append(float(spread - br) if not np.isnan(br) else float(spread))
+            spreads.append(float(spread))
         if not ics:
             continue
         s = pd.Series(ics)
@@ -177,7 +172,7 @@ def main() -> None:
             f"{r['ls_bp']:+.0f}", str(int(r['n'])),
         )
     console.print(table)
-    out = PROJECT_ROOT / "reports" / "factor_research_ext2.csv"
+    out = reports_dir() / "factor_research_ext2.csv"
     summary.to_csv(out)
     console.print(f"saved: {out}")
 

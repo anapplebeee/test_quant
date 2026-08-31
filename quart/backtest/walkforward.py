@@ -225,6 +225,14 @@ class _ScheduledStrategy:
         local_i = global_i - int(item["context_lo"])
         return item["strategy"].target_weights(local_i)
 
+    def sync_positions(self, positions: dict[str, int]) -> None:
+        """把撮合后的真实持仓同步给当前活动的子策略（持仓记忆/缓冲带策略需要）。"""
+        if self._last_owner is not None:
+            item = self.prepared[self._last_owner]
+            strategy = item["strategy"]
+            if hasattr(strategy, "sync_positions"):
+                strategy.sync_positions(positions)
+
     def serialize_state(self) -> dict:
         return {
             str(i): strategy.serialize_state()
@@ -314,7 +322,10 @@ def _grid(param_grid: dict[str, Sequence[Any]]) -> list[dict]:
     if not param_grid:
         return [{}]
     keys = list(param_grid)
-    return [dict(zip(keys, combo, strict=True)) for combo in product(*(param_grid[k] for k in keys))]
+    return [
+        dict(zip(keys, combo, strict=True))
+        for combo in product(*(param_grid[key] for key in keys))
+    ]
 
 
 def _metric_value(summary: dict, metric: str) -> float:
@@ -339,6 +350,7 @@ def run_walk_forward(
     risk_pipeline: Callable | None = None,
     build_strategy_fn: Callable | None = None,
     min_trades: int = 0,
+    warmup_days: int = 260,
     progress: Callable[[str], None] | None = None,
     account_mode: str = "continuous",
 ) -> WFAResult:
@@ -368,6 +380,8 @@ def run_walk_forward(
         )
     if account_mode not in ("continuous", "independent"):
         raise ValueError("account_mode 必须是 'continuous' 或 'independent'")
+    if warmup_days < 0:
+        raise ValueError("warmup_days 不能为负")
     if build_strategy_fn is None:
         from quart.strategy import build_strategy as build_strategy_fn
 
@@ -393,19 +407,21 @@ def run_walk_forward(
 
     for sp in splits:
         train_md = md.slice_by_pos(sp.train_lo, sp.train_hi)
-
         # ---- 样本内选参 ----
         best_score, best_params, best_summary = float("-inf"), {}, {}
         for combo in candidates:
             params = {**base_params, **combo}
             strat = build_strategy_fn(strategy_name, **params)
-            engine = BacktestEngine(train_md, strat, fees=fees,
-                                    initial_cash=initial_cash, risk_pipeline=risk_pipeline)
+            engine = BacktestEngine(
+                train_md, strat, fees=fees,
+                initial_cash=initial_cash, risk_pipeline=risk_pipeline,
+            )
             res = engine.run_result()
             n_trades = 0 if res.trades.empty else len(res.trades)
             if n_trades < min_trades:
                 continue
             summary = summarize(res.equity)
+            summary["n_trades"] = n_trades
             score = _metric_value(summary, selection_metric)
             if score > best_score:
                 best_score, best_params, best_summary = score, combo, summary
@@ -414,9 +430,12 @@ def run_walk_forward(
             # 所有候选都因 min_trades 被淘汰：退回第一组，避免整折丢失
             best_params = candidates[0] if candidates else {}
             strat = build_strategy_fn(strategy_name, **{**base_params, **best_params})
-            engine = BacktestEngine(train_md, strat, fees=fees,
-                                    initial_cash=initial_cash, risk_pipeline=risk_pipeline)
+            engine = BacktestEngine(
+                train_md, strat, fees=fees,
+                initial_cash=initial_cash, risk_pipeline=risk_pipeline,
+            )
             best_summary = summarize(engine.run_result().equity)
+            best_summary["n_trades"] = 0
 
         # 每折测试开始前加载策略声明的历史上下文。上下文只用于计算因子，
         # 执行引擎仍从 test_lo 开始，因此 warmup 收益不会污染 OOS。

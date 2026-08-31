@@ -104,6 +104,7 @@ def main() -> None:
     parser.add_argument("--metric", default="sharpe", help="参数选择指标 sharpe/cagr/calmar")
     parser.add_argument("--grid", action="append", default=[], metavar="key=v1,v2")
     parser.add_argument("--min-trades", type=int, default=0, help="train 段最少成交笔数")
+    parser.add_argument("--warmup", type=int, default=260, help="每折训练/测试前置历史窗口")
     parser.add_argument("--no-risk", action="store_true", help="关闭回测内风控")
     parser.add_argument(
         "--account-mode", choices=("continuous", "independent"), default="continuous",
@@ -188,6 +189,7 @@ def main() -> None:
             "test_days": args.test, "step_days": args.step,
             "embargo_days": args.embargo, "anchored": args.anchored,
             "metric": args.metric, "start": args.start, "end": args.end,
+            "warmup_days": args.warmup,
             "risk_enabled": not args.no_risk,
             "account_mode": args.account_mode,
             "research_mode": args.research_mode,
@@ -206,6 +208,7 @@ def main() -> None:
             risk_pipeline=risk_pipeline,
             min_trades=args.min_trades,
             account_mode=args.account_mode,
+            warmup_days=args.warmup,
             progress=lambda s: console.print(f"  {s}"),
         )
     except Exception as exc:
@@ -272,7 +275,10 @@ def main() -> None:
     detail.to_csv(out_dir / f"wfa_{args.strategy}_{stamp}.csv", index=False, encoding="utf-8-sig")
 
     run.put_table("folds", detail)
-    run.put_table("oos_equity", result.oos_equity.to_frame("equity"))
+    run.put_table(
+        "oos_equity",
+        result.oos_equity.rename_axis("date").to_frame("equity").reset_index(),
+    )
     run.put_json("oos_summary", result.oos_summary)
     run.add_metrics(
         decay=decay,

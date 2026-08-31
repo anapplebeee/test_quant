@@ -38,7 +38,8 @@ TASKS = {
 "resource": "data",
 "timeout": 14400,
         "outputs": {
-            "日线数据": "data/daily/year=*/（分区布局）",
+            "更新状态": "data/meta/last_data_update.json",
+            "日线数据": "data/daily/year=*/*.parquet",
             "股票池快照": "data/universe/*.parquet",
         },
         "result_tab": "🗃️ 数据总览",
@@ -99,13 +100,16 @@ TASKS = {
     },
     "factor_research": {
         "name": "因子研究",
-        "script": "scripts/factor_research.py",
+        "script": "scripts/factor_audit.py",
         "args": ["--sample", "monthly"],
         "icon": "🔬",
         "resource": "data",
-        "timeout": 3600,
+        "timeout": 7200,
         "outputs": {
-            "因子分析输出": "reports/factor_*.csv",
+            "因子审计汇总": "reports/factor_audit_summary.csv",
+            "滚动 IC": "reports/factor_audit_ic_history.csv",
+            "因子相关性": "reports/factor_audit_correlation.csv",
+            "制品目录": "artifacts/factor_audit_*/manifest.json",
         },
         "result_tab": "🔬 因子研究",
     },
@@ -140,7 +144,10 @@ TASKS = {
         "icon": "🧪",
         "resource": "data",
         "timeout": 1800,
-        "outputs": {},
+        "outputs": {
+            "问题明细": "reports/data_quality_scan.csv",
+            "制品目录": "artifacts/data_quality_*/manifest.json",
+        },
         "result_tab": "🗃️ 数据总览",
     },
     "universe_history": {
@@ -242,6 +249,7 @@ ALLOWED_ARGS: dict[str, dict[str, str]] = {
         "--embargo": r"^\d{1,3}$",
         "--metric": r"^(sharpe|cagr|calmar|total_return|bench_excess_cagr)$",
         "--min-trades": r"^\d{1,6}$",
+        "--warmup": r"^\d{1,4}$",
         "--grid": r"^[A-Za-z0-9_=.,\-]+$",
         "--account-mode": r"^(continuous|independent)$",
         "--anchored": None,
@@ -254,17 +262,24 @@ ALLOWED_ARGS: dict[str, dict[str, str]] = {
         "--no-push": None,
     },
     "refresh": {
-        "--universe": r"^(index|all)$",
+        "--universe": r"^(index|mainboard|all)$",
         "--index": r"^\d{6}$",
         "--start": r"^\d{8}$",
         "--max": r"^\d{1,5}$",
+        "--workers": r"^(?:[1-9]|1\d|2\d|3[0-2])$",
         "--keep-st": None,
+        # --full 是 --full-refresh 的兼容别名（update_data 里 dest 相同）
         "--full-refresh": None,
+        "--full": None,
     },
     "ml_train": {"--start": r"^\d{8}$"},
     "factor_research": {
-        "--sample": r"^(daily|weekly|monthly)$",
+        "--sample": r"^(weekly|monthly)$",
+        "--horizon": r"^\d{1,2}$",
         "--start": r"^\d{4}-\d{2}-\d{2}$",
+        "--end": r"^\d{4}-\d{2}-\d{2}$",
+        "--min-amount": r"^\d+(?:\.\d+)?$",
+        "--min-cross-section": r"^\d{1,5}$",
     },
     "data_quality": {"--jumps": r"^(0(\.\d+)?|1(\.0+)?)$"},
     "universe_history": {"--index": r"^\d{6}$", "--describe-only": None},
@@ -285,6 +300,7 @@ _FLAG_ONLY = {
     "--full-refresh",
     "--describe-only",
     "--refresh",
+    "--full",
 }
 
 

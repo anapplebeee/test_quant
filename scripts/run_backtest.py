@@ -230,7 +230,7 @@ def main() -> None:
     console.print(f"[green]结果已保存到 {out_dir}/[/green]")
 
     # 制品：供回溯与可复现性校验
-    run.put_table("equity", equity.to_frame("equity"))
+    run.put_table("equity", equity.rename_axis("date").to_frame("equity").reset_index())
     if not trades_df.empty:
         run.put_table("trades", trades_df)
     run.put_json("summary", summary)

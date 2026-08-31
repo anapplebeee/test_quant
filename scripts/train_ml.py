@@ -74,7 +74,8 @@ def rank_ic(pred: pd.Series, realized: pd.Series) -> float:
     joined = pd.concat([pred, realized], axis=1, join="inner").dropna()
     if len(joined) < 10:
         return float("nan")
-    return float(joined.corr(method="spearman").iloc[0, 1])
+    ranked = joined.rank(method="average")
+    return float(ranked.iloc[:, 0].corr(ranked.iloc[:, 1]))
 
 
 def sanitize(X: pd.DataFrame, y: pd.Series | None = None) -> tuple[pd.DataFrame, pd.Series | None]:
@@ -194,7 +195,7 @@ def main() -> None:
 
         pred = pd.Series(model.predict(X_te), index=X_te.index, name="score")
         ic = rank_ic(pred, y_te)
-        ic_rows.append({"month": str(m_start.date()), "ic": ic, "n_test": int(len(pred)), "best_iter": model.best_iteration_ or DEFAULT_PARAMS["n_estimators"]})
+        ic_rows.append({"month": str(m_start.date()), "ic": ic, "n_test": len(pred), "best_iter": model.best_iteration_ or DEFAULT_PARAMS["n_estimators"]})
         preds_frames.append(pred.reset_index().rename(columns={"level_0": "datetime", "instrument": "instrument"}))
         console.print(f"  {m_start.date()}  IC={ic:+.3f}  n={len(pred)}")
 

@@ -44,7 +44,7 @@ def test_prefers_calm_stock():
 
 
 def test_group_z_industry_standardization(monkeypatch):
-    """行业内 z-score：组内 (x-mean)/std，小样本组回退 NaN。"""
+    """行业内 z-score：组内 (x-mean)/std，小样本组回退全市场分。"""
     import quart.strategy.industries as ind_mod
 
     monkeypatch.setattr(
@@ -61,9 +61,18 @@ def test_group_z_industry_standardization(monkeypatch):
     assert np.isclose(row["A"], -1 / np.sqrt(2)) and np.isclose(row["B"], 1 / np.sqrt(2))
     assert np.isclose(row["C"], -1 / np.sqrt(2)) and np.isclose(row["D"], 1 / np.sqrt(2))
 
-    # 组内样本不足 → NaN（当日剔除）
+    # 组内样本不足 → 回退输入的全市场复合分，避免映射缺失造成股票池骤缩
     out_small = strat._group_z(df, min_group_size=5)
-    assert out_small.iloc[0].isna().all()
+    pd.testing.assert_frame_equal(out_small, df.astype("float32"))
+
+
+def test_rank_buffer_syncs_actual_positions():
+    strat = LowVolCompositeStrategy()
+    strat.prepare(make_md())
+
+    strat.sync_positions({"A": 0, "B": 100})
+
+    assert strat._held == {"B"}
 
 
 def test_indz_registry_default():
@@ -75,6 +84,25 @@ def test_indz_registry_default():
     assert s2.params.get("industry_z") is True
     s3 = build_strategy("lowvol_composite", top_k=1)
     assert "industry_z" not in s3.params
+
+
+def test_optional_robust_factors_are_disabled_until_research_admission():
+    baseline = LowVolCompositeStrategy()
+    assert baseline.params.get("long_vol_weight", 0.0) == 0.0
+    assert baseline.params.get("downside_weight", 0.0) == 0.0
+    assert baseline.params.get("tail_weight", 0.0) == 0.0
+
+    candidate = LowVolCompositeStrategy(
+        winsor_z=3.0,
+        long_vol_weight=0.5,
+        downside_weight=0.25,
+        tail_weight=0.25,
+        amount_stability_weight=0.2,
+    )
+    candidate.prepare(make_md(n_days=140))
+    assert candidate.winsor_z == 3.0
+    assert candidate.amount_stability_weight == 0.2
+    assert not candidate.composite.empty
 
 
 def test_returns_empty_before_warmup():
