@@ -109,6 +109,7 @@ TASKS = {
             "因子审计汇总": "reports/factor_audit_summary.csv",
             "滚动 IC": "reports/factor_audit_ic_history.csv",
             "因子相关性": "reports/factor_audit_correlation.csv",
+            "临时基线": "reports/factor_audit_provisional_baseline.csv",
             "制品目录": "artifacts/factor_audit_*/manifest.json",
         },
         "result_tab": "🔬 因子研究",

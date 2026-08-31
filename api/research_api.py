@@ -189,6 +189,7 @@ class FactorAuditBundle:
     ic_history: pd.DataFrame
     correlation: pd.DataFrame
     metadata: dict
+    provisional_baseline: pd.DataFrame | None = None
 
 
 def load_latest_factor_audit() -> FactorAuditBundle | None:
@@ -200,6 +201,7 @@ def load_latest_factor_audit() -> FactorAuditBundle | None:
             summary = store.read(manifest.run_id, "summary")
             history = store.read(manifest.run_id, "ic_history")
             correlation = store.read(manifest.run_id, "correlation")
+            provisional_baseline = store.read(manifest.run_id, "provisional_baseline")
             metadata_path = store.path_of(manifest.run_id, "metadata")
             if summary is not None and history is not None and correlation is not None:
                 import json
@@ -216,6 +218,7 @@ def load_latest_factor_audit() -> FactorAuditBundle | None:
                     history,
                     correlation,
                     metadata,
+                    provisional_baseline,
                 )
     except Exception as exc:
         _warn("load_latest_factor_audit.artifacts", exc)
@@ -237,6 +240,11 @@ def load_latest_factor_audit() -> FactorAuditBundle | None:
             pd.read_csv(history_path, parse_dates=["date"]),
             pd.read_csv(correlation_path, index_col=0),
             metadata,
+            (
+                pd.read_csv(reports_dir() / "factor_audit_provisional_baseline.csv")
+                if (reports_dir() / "factor_audit_provisional_baseline.csv").exists()
+                else None
+            ),
         )
     except Exception as exc:
         _warn("load_latest_factor_audit.reports", exc)
@@ -294,6 +302,14 @@ def factor_audit_summary() -> pd.DataFrame:
         if column in output.columns:
             output[column] = pd.to_numeric(output[column], errors="coerce").round(4)
     return output
+
+
+def factor_audit_provisional_baseline() -> pd.DataFrame:
+    """Latest provisional label-basket baseline, never an admission decision."""
+    bundle = load_latest_factor_audit()
+    if bundle is None or bundle.provisional_baseline is None:
+        return pd.DataFrame()
+    return bundle.provisional_baseline.copy()
 
 
 def factor_audit_status_md() -> str:
