@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from api.data_api import get_stock_names
 from api.portfolio_api import current_holdings, holding_bars, holding_price_frame
-from common import load_stock_names
 from frontend.theme import page_header
 
 # ---------- 指标说明常量 ----------
@@ -180,7 +180,7 @@ def render():
 
             # ---- 持仓权重明细表 ----
             with gr.Accordion("📋 持仓权重明细（点击展开）", open=False):
-                names = load_stock_names()
+                names = get_stock_names()
                 detail = pos_df.copy()
                 detail["名称"] = detail["code"].map(names).fillna("-")
                 detail["权重%"] = (detail["value"] / total * 100).round(1)
@@ -245,7 +245,7 @@ def render():
             - **Amihud非流动性** ⓘ = |日收益| / 日成交额，单位金额的价格冲击，越小越好
             """)
 
-            names = load_stock_names()
+            names = get_stock_names()
             liq_rows = []
             if not bars_frame.empty:
                 for sym, shares in positions.items():

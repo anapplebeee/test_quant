@@ -251,6 +251,16 @@ def load_latest_factor_audit() -> FactorAuditBundle | None:
         return None
 
 
+def factor_specs() -> list:
+    """因子定义注册表（FactorSpec 列表）。
+
+    UI-001：前端不直接 import `quart.research`，统一经 API 层。
+    """
+    from quart.research.factor_audit import FACTOR_SPECS
+
+    return list(FACTOR_SPECS)
+
+
 def factor_audit_summary() -> pd.DataFrame:
     bundle = load_latest_factor_audit()
     if bundle is None or bundle.summary.empty:

@@ -7,18 +7,17 @@ import gradio as gr
 import pandas as pd
 
 import data_bus
-from api.manual_trading_api import latest_prices, manual_settings, repository
+from api.manual_trading_api import get_holdings_summary
 from api.strategy_api import (
     STRATEGY_META,
-    live_signal_choices,
     configured_strategy_schedule,
+    live_signal_choices,
     strategy_catalog,
 )
 from api.strategy_api import (
     strategy_choices as _strategy_choices,
 )
 from api.task_api import TASKS, get_task_artifacts, task_queue
-from common import load_stock_names
 from frontend.theme import metric_card, page_header
 
 # ---------- 任务执行（流式+队列） ----------
@@ -103,51 +102,8 @@ def on_refresh_status():
 # ---------- 持仓数据 ----------
 
 def _get_holdings_data():
-    try:
-        _, account_name = manual_settings()
-        state = repository().account_state(account_name)
-    except Exception:
-        state = None
-    if state is None or not state.positions:
-        return None, None
-
-    cash = state.cash_total
-    positions = state.total_positions
-
-    stock_names = load_stock_names()
-    # 统一走 BarStore 分区查询（2026-08-31 修复：旧 per-symbol parquet 路径已迁移，直读会全部"数据缺失"）
-    prices = latest_prices(list(positions))
-    pos_data = []
-    total_value = cash
-    missing = []
-
-    for sym, shares in positions.items():
-        price = float(prices.get(sym, 0.0)) or None
-        if not price or price <= 0:
-            # 缺数据持仓按 price=0 计入会拉低其余持仓权重，单列提示不计入权重分母
-            missing.append({"代码": sym, "名称": stock_names.get(sym, "-"),
-                            "持股数": shares, "最新价": "数据缺失",
-                            "市值": "-", "权重%": "-"})
-            continue
-        value = shares * price
-        total_value += value
-        pos_data.append({
-            "代码": sym,
-            "名称": stock_names.get(sym, "-"),
-            "持股数": shares,
-            "最新价": round(price, 2),
-            "市值": round(value, 2),
-            "权重%": 0.0,
-        })
-
-    for row in pos_data:
-        row["权重%"] = round(float(row["市值"]) / total_value * 100, 1) if total_value > 0 else 0
-
-    pos_df = pd.DataFrame(pos_data + missing).sort_values(
-        "市值", ascending=False, key=lambda s: pd.to_numeric(s, errors="coerce").fillna(-1)
-    )
-    summary = {"cash": cash, "equity": total_value - cash, "total": total_value}
-    return pos_df, summary
+    """持仓明细 + 资产摘要（UI-001 DR-06：统一走 manual_trading_api）。"""
+    return get_holdings_summary()
 
 
 def render():

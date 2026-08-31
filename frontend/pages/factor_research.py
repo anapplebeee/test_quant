@@ -11,9 +11,9 @@ from api.research_api import (
     factor_audit_summary,
     factor_correlation,
     factor_ic_history,
+    factor_specs,
 )
 from frontend.theme import page_header
-from quart.research.factor_audit import FACTOR_SPECS
 
 FACTOR_DEFINITIONS = pd.DataFrame(
     [
@@ -24,7 +24,7 @@ FACTOR_DEFINITIONS = pd.DataFrame(
             "新候选": "是" if spec.is_new else "否",
             "当前策略": "是" if spec.in_strategy else "否",
         }
-        for spec in FACTOR_SPECS
+        for spec in factor_specs()
     ]
 )
 

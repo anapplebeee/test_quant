@@ -31,6 +31,73 @@ def repository() -> TradingRepository:
     return repo
 
 
+def get_account_summary(as_of: str | None = None) -> dict:
+    """账户现金/总资产快照（UI-001 DR-03：消除前端二次查询 repository）。
+
+    账户未初始化或查询失败时返回 {"cash": None, "total": None}。
+    """
+    try:
+        _, account_name = manual_settings()
+        state = repository().account_state(account_name, _date_text(as_of or date.today().isoformat()))
+    except Exception:
+        state = None
+    if state is None:
+        return {"cash": None, "total": None}
+    prices = _latest_prices(list(state.positions))
+    market_value = sum(
+        pos.total_quantity * prices.get(pos.symbol, 0.0)
+        for pos in state.positions.values()
+    )
+    return {
+        "cash": float(state.cash_total),
+        "total": float(state.cash_total + market_value),
+    }
+
+
+def get_holdings_summary() -> tuple[pd.DataFrame | None, dict | None]:
+    """持仓明细表 + 资产摘要（UI-001 DR-06：前端不直调 repository/名称缓存）。
+
+    Returns
+    -------
+    (持仓表, {"cash", "equity", "total"})；无账户/无持仓时 (None, None)。
+    缺价格的持仓单列"数据缺失"行，不计入权重分母。
+    """
+    try:
+        _, account_name = manual_settings()
+        state = repository().account_state(account_name)
+    except Exception:
+        state = None
+    if state is None or not state.positions:
+        return None, None
+
+    cash = state.cash_total
+    positions = state.total_positions
+    names = load_stock_names()
+    prices = _latest_prices(list(positions))
+    rows: list[dict] = []
+    missing: list[dict] = []
+    total_value = cash
+    for sym, shares in positions.items():
+        price = float(prices.get(sym, 0.0)) or None
+        if not price or price <= 0:
+            missing.append({"代码": sym, "名称": names.get(sym, "-"),
+                            "持股数": shares, "最新价": "数据缺失",
+                            "市值": "-", "权重%": "-"})
+            continue
+        value = shares * price
+        total_value += value
+        rows.append({
+            "代码": sym, "名称": names.get(sym, "-"), "持股数": shares,
+            "最新价": round(price, 2), "市值": round(value, 2), "权重%": 0.0,
+        })
+    for row in rows:
+        row["权重%"] = round(float(row["市值"]) / total_value * 100, 1) if total_value > 0 else 0
+    frame = pd.DataFrame(rows + missing).sort_values(
+        "市值", ascending=False, key=lambda s: pd.to_numeric(s, errors="coerce").fillna(-1)
+    )
+    return frame, {"cash": cash, "equity": total_value - cash, "total": total_value}
+
+
 def account_view(as_of: str | None = None) -> tuple[str, pd.DataFrame]:
     repo = repository()
     _, account_name = manual_settings()

@@ -3,28 +3,21 @@ from __future__ import annotations
 
 import gradio as gr
 
+from api.config_api import get_config_snapshot
 from frontend.theme import page_header
 
 
 def render():
     """渲染参数词典 Tab"""
-    from quart.config import load_config
-    from quart.strategy import build_strategy
-
-    cfg = load_config()
-    s = cfg.get("strategy", {})
-    r = cfg.get("risk", {})
-    b = cfg.get("backtest", {})
-    m = cfg.get("manual_trading", {})
+    snapshot = get_config_snapshot()
+    s = snapshot["strategy"]
+    r = snapshot["risk"]
+    b = snapshot["backtest"]
     # 当前生效值 = 默认策略（config.strategy.name）解析后的参数，与回测/信号同源
-    try:
-        d = build_strategy(s.get("name", "lowvol_indz")).params
-        cur_top_k = int(d.get("top_k", s.get("top_k", 10)))
-        cur_rebalance = int(d.get("rebalance_days", s.get("rebalance_days", 5)))
-    except Exception:
-        cur_top_k = int(s.get("top_k", 10))
-        cur_rebalance = int(s.get("rebalance_days", 5))
-    cur_regime = s.get("use_regime_filter", True)
+    effective = snapshot["effective"]
+    cur_top_k = effective["top_k"]
+    cur_rebalance = effective["rebalance_days"]
+    cur_regime = effective["use_regime_filter"]
 
     with gr.Tab("📖 参数词典"):
         gr.HTML(page_header("📖 量化参数词典", "所有关键参数的含义、计算方法和经验取值"))

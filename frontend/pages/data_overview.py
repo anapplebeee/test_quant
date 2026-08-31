@@ -7,7 +7,14 @@ import gradio as gr
 import plotly.express as px
 
 import data_bus
-from api.data_api import get_index_coverage, get_stock_data, get_stock_list, get_stock_stats, get_universe
+from api.data_api import (
+    get_index_coverage,
+    get_stock_data,
+    get_stock_list,
+    get_stock_names,
+    get_stock_stats,
+    get_universe,
+)
 from frontend.theme import metric_card, page_header
 
 
@@ -213,12 +220,7 @@ def render():
                 if df is None or df.empty:
                     return f"未找到 {symbol} 的数据", None
 
-                name_map = {}
-                try:
-                    from common import load_stock_names
-                    name_map = load_stock_names()
-                except Exception:
-                    pass
+                name_map = get_stock_names()
 
                 stock_name = name_map.get(symbol, "")
                 display_name = f"{symbol} {stock_name}" if stock_name else symbol

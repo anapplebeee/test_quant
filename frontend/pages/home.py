@@ -7,18 +7,18 @@
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 
 import gradio as gr
 import pandas as pd
 
 import data_bus
 from api.backtest_api import get_backtest_summary, get_window_stats, scan_summaries
-from api.manual_trading_api import account_view, manual_settings, latest_prices
+from api.data_api import get_freshness, get_next_trade_date
+from api.manual_trading_api import get_account_summary
 from api.research_api import latest_sweep_headlines
-from api.strategy_api import strategy_catalog, live_allowlist
-from common import load_stock_names
-from frontend.theme import metric_card, page_header, info_card, status_badge
+from api.strategy_api import strategy_catalog
+from frontend.theme import info_card, metric_card, status_badge
 
 
 def _fmt_pct(v, digits: int = 1) -> str:
@@ -51,13 +51,10 @@ def _today_status_card() -> str:
     # 是否为交易日（工作日即视为交易日，精确判断需交易日库）
     is_weekday = today.weekday() < 5
 
-    # 数据新鲜度
+    # 数据新鲜度（UI-001 DR-03：统一走 data_api）
     stale_text = "-"
-    stale_color = "gray"
     try:
-        from quart.data.store import BarStore
-        store = BarStore()
-        days = store.freshness_days()
+        days = get_freshness()
         if days is None:
             stale_text = "无数据"
             stale_color = "red"
@@ -72,34 +69,28 @@ def _today_status_card() -> str:
             stale_color = "red"
     except Exception:
         stale_text = "无法检测"
+        stale_color = "gray"
 
     # 下一交易日
     next_td_text = "-"
     countdown_text = "-"
-    try:
-        from quart.manual_trading.repository import next_trade_date
-        nxt = next_trade_date(today)
-        nxt_date = date.fromisoformat(nxt)
-        next_td_text = nxt
-        countdown_text = str((nxt_date - today).days) + " 天"
-    except Exception:
-        pass
+    nxt = get_next_trade_date(today)
+    if nxt:
+        try:
+            nxt_date = date.fromisoformat(nxt)
+            next_td_text = nxt
+            countdown_text = str((nxt_date - today).days) + " 天"
+        except ValueError:
+            pass
 
-    # 账户快照
+    # 账户快照（UI-001 DR-03：单一 API 调用，消除二次查询）
     cash_text = "-"
     total_text = "-"
-    try:
-        summary, _ = account_view(today.isoformat())
-        # 从 markdown 摘要里提取数字比较麻烦，直接调用一次
-        _, account_name = manual_settings()
-        from api.manual_trading_api import repository
-        repo = repository()
-        state = repo.account_state(account_name, today.isoformat())
-        if state:
-            cash_text = f"{state.cash_total:,.0f}"
-            total_text = f"{state.cash_total + sum(pos.total_quantity * latest_prices(list(state.positions)).get(pos.symbol, 0) for pos in state.positions.values()):,.0f}"
-    except Exception:
-        pass
+    account = get_account_summary(today.isoformat())
+    if account.get("cash") is not None:
+        cash_text = f"{account['cash']:,.0f}"
+    if account.get("total") is not None:
+        total_text = f"{account['total']:,.0f}"
 
     trade_badge = status_badge("active") if is_weekday else status_badge("inactive")
 
@@ -298,7 +289,7 @@ def render():
                 )
                 home_strat = gr.Dropdown(
                     label="策略筛选",
-                    choices=["全部"] + sorted(full_df["strategy"].unique().tolist()),
+                    choices=["全部", *sorted(full_df["strategy"].unique().tolist())],
                     value="全部",
                 )
 
@@ -344,7 +335,7 @@ def render():
                     gr.update(choices=["全部"], value="全部"),
                     _sweep_table(), cur,
                 )
-            new_choices = ["全部"] + sorted(new_full["strategy"].unique().tolist())
+            new_choices = ["全部", *sorted(new_full["strategy"].unique().tolist())]
             fmt_df, raw_df = _home_filter(kw, st, new_full)
             return (
                 _today_status_card(),

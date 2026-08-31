@@ -212,3 +212,61 @@ def _scores_path():
     from common import data_dir
 
     return data_dir() / "scores" / "preds.csv"
+
+
+# ---------------- UI-001：前端直读整改统一入口 ----------------
+
+
+def get_freshness() -> int | None:
+    """最新 bar 距今天数（None = 无数据/检测失败）。
+
+    UI-001 DR-03：前端不再直接实例化 BarStore。
+    """
+    try:
+        return _bar_store().freshness_days()
+    except Exception as exc:
+        degraded("get_freshness", exc)
+        return None
+
+
+def get_next_trade_date(as_of) -> str | None:
+    """下一交易日（ISO 日期）。UI-001 DR-03：前端不直调交易日历仓储。"""
+    try:
+        from quart.manual_trading.repository import next_trade_date
+
+        return next_trade_date(as_of)
+    except Exception as exc:
+        degraded("get_next_trade_date", exc)
+        return None
+
+
+def get_stock_names() -> dict[str, str]:
+    """股票代码 → 名称映射。
+
+    UI-001 DR-04/DR-06：统一入口，前端不直接读 common 缓存 parquet。
+    """
+    try:
+        from common import load_stock_names
+
+        return load_stock_names()
+    except Exception as exc:
+        degraded("get_stock_names", exc)
+        return {}
+
+
+def get_latest_ml_scores(limit: int = 50) -> pd.DataFrame | None:
+    """最新 ML 预测分数（按时间倒序取前 N）。
+
+    UI-001 DR-02：前端不直读 data/scores/preds.csv。
+    """
+    path = _scores_path()
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path)
+        if "datetime" in df.columns:
+            df = df.sort_values("datetime", ascending=False)
+        return df.head(limit) if len(df) > limit else df
+    except Exception as exc:
+        degraded("get_latest_ml_scores", exc)
+        return None

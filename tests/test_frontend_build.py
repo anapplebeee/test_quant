@@ -102,17 +102,19 @@ def test_all_pages_build(ui_stubs):
 
 
 def test_daily_signal_snapshot_reads_path_entries(tmp_path, ui_stubs, monkeypatch):
-    """信号目录非空时也必须能构建日期快照，防止把 Path 当字符串调用。"""
-    import common
+    """信号目录非空时也必须能构建日期快照（UI-001 后统一走 strategy_api）。"""
+    import api.strategy_api as strategy_api
+    from quart.data.artifacts import ArtifactStore
 
     (tmp_path / "signal_20260830.md").write_text("旧信号", encoding="utf-8")
     (tmp_path / "signal_20260831.md").write_text("最新信号", encoding="utf-8")
 
-    mod = _import_page("daily_signal")
-    monkeypatch.setattr(common, "reports_dir", lambda: tmp_path)
-    monkeypatch.setattr(mod, "reports_dir", lambda: tmp_path)
+    monkeypatch.setattr(strategy_api, "reports_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        strategy_api, "ArtifactStore", lambda: ArtifactStore(tmp_path / "arts")
+    )
 
-    choices, latest, content = mod._snapshot()
+    choices, latest, content = strategy_api.signal_snapshot()
 
     assert choices == ["20260830", "20260831"]
     assert latest == "20260831"

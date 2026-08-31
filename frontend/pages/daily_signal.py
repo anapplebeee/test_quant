@@ -7,41 +7,16 @@
 """
 from __future__ import annotations
 
-import os
 from datetime import date
 
 import gradio as gr
 import pandas as pd
 
 import data_bus
-from api.manual_trading_api import plans_view, plan_view
-from common import reports_dir
+from api.data_api import get_latest_ml_scores
+from api.manual_trading_api import plan_view, plans_view
+from api.strategy_api import load_signal_report, signal_snapshot
 from frontend.theme import page_header
-
-
-def _load_signal(date: str) -> str:
-    """加载信号报告（路径走 common.reports_dir()，避免配置根目录漂移）"""
-    from common import safe_path, valid_date8
-
-    if not valid_date8(date):
-        return "非法日期格式"
-    path = safe_path(reports_dir(), f"signal_{date}.md")
-    if path is not None and path.exists():
-        with open(path, encoding="utf-8") as f:
-            return f.read()
-    return "未找到信号报告"
-
-
-def _snapshot():
-    """扫描信号文件，返回 (日期选项, 最新日期, 最新内容)"""
-    signal_files = sorted([
-        f.stem.replace("signal_", "")
-        for f in reports_dir().glob("signal_*.md")
-    ])
-    if not signal_files:
-        return [], None, "暂无信号报告，运行 scripts/daily_signal.py 生成"
-    latest = signal_files[-1]
-    return signal_files, latest, _load_signal(latest)
 
 
 def _plan_snapshot(as_of: str):
@@ -113,13 +88,13 @@ def render():
 
         # ===== 信号报告区 =====
         with gr.Accordion("📄 每日信号报告", open=True):
-            choices2, latest2, content2 = _snapshot()
+            choices2, latest2, content2 = signal_snapshot()
             signal_date = gr.Dropdown(label="选择日期", choices=choices2, value=latest2)
             signal_content = gr.Markdown(value=content2)
-            signal_date.change(_load_signal, inputs=signal_date, outputs=signal_content)
+            signal_date.change(load_signal_report, inputs=signal_date, outputs=signal_content)
 
             def _refresh():
-                c, v, txt = _snapshot()
+                c, v, txt = signal_snapshot()
                 return gr.update(choices=c, value=v), txt
 
             refresh_btn = gr.Button("🔄 刷新信号列表", size="sm")
@@ -129,18 +104,7 @@ def render():
 
         # ===== ML 预测分数 =====
         with gr.Accordion("🤖 ML 预测分数 (最新)", open=False):
-            scores_path = os.path.join("data", "scores", "preds.csv")
-            scores_df = None
-            if os.path.exists(scores_path):
-                try:
-                    df = pd.read_csv(scores_path)
-                    if "datetime" in df.columns:
-                        df = df.sort_values("datetime", ascending=False)
-                    if len(df) > 50:
-                        df = df.head(50)
-                    scores_df = df
-                except Exception:
-                    scores_df = None
+            scores_df = get_latest_ml_scores(limit=50)
             if scores_df is None:
                 gr.Markdown("*暂无 ML 预测数据。运行 🤖 ML 训练 生成 `data/scores/preds.csv`*")
             preds_table = gr.Dataframe(value=scores_df, interactive=False, max_height=400)
@@ -154,17 +118,9 @@ def render():
                 return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), seen_val
             f, sel_update, sel_val = _plan_snapshot(plan_date_val)
             md, ords = plan_view(sel_val)
-            c, v, txt = _snapshot()
+            c, v, txt = signal_snapshot()
             sig_update = gr.update(choices=c, value=v if v in c else (sig_sel if sig_sel in c else v))
-            preds = None
-            if os.path.exists(scores_path):
-                try:
-                    p = pd.read_csv(scores_path)
-                    if "datetime" in p.columns:
-                        p = p.sort_values("datetime", ascending=False)
-                    preds = p.head(50)
-                except Exception:
-                    preds = None
+            preds = get_latest_ml_scores(limit=50)
             return f, sel_update, md, ords, sig_update, txt, preds, cur
 
         gr.Timer(5).tick(
