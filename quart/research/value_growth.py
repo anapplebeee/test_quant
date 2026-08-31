@@ -97,6 +97,64 @@ def build_value_growth(
     return out
 
 
+def pit_panels(
+    financials: pd.DataFrame,
+    closes: pd.DataFrame,
+    factors: tuple[str, ...] = ("roe", "roe_improve", "profit_yoy", "ep", "bp"),
+    disclosure_lag_days: int = 120,
+) -> dict[str, pd.DataFrame]:
+    """构建 PIT 价值成长因子的宽表面板（date × symbol），供策略层合成使用。
+
+    与 :func:`pit_features` 同一披露时滞口径（报告期 + lag 才可用），
+    但输出为逐日截面面板而非长表 —— 策略在 prepare() 阶段一次构建，
+    target_weights() 逐日取行，无逐日 merge 开销。
+
+    Args:
+        financials: 财务快照长表（symbol,date,eps,bps,roe,profit_yoy）。
+        closes: 收盘价宽表（index=date, columns=symbol），用于 ep/bp 定价。
+        factors: 需要的因子列。
+        disclosure_lag_days: 报告期→可用最短时滞（防前视）。
+
+    Returns:
+        {factor_name: DataFrame(index=date, columns=symbol)}，仅含有数据的
+        符号列；无财务数据的符号不出现在面板中（调用方自行中性填充）。
+    """
+    if financials.empty or closes.empty:
+        return {}
+    fin = financials.copy()
+    fin["date"] = pd.to_datetime(fin["date"], errors="coerce")
+    fin = fin.dropna(subset=["date"]).sort_values(["symbol", "date"])
+    for col in ("eps", "bps", "roe", "profit_yoy"):
+        if col in fin:
+            fin[col] = pd.to_numeric(fin[col], errors="coerce")
+    fin["usable_at"] = fin["date"] + pd.Timedelta(days=disclosure_lag_days)
+    fin["roe_improve"] = fin.groupby("symbol")["roe"].diff()
+
+    idx = pd.DatetimeIndex(closes.index)
+    left = pd.DataFrame({"datetime": idx}).sort_values("datetime")
+
+    frames: dict[str, list[pd.Series]] = {f: [] for f in factors}
+    for sym, g in fin.groupby("symbol"):
+        m = pd.merge_asof(
+            left,
+            g.rename(columns={"usable_at": "datetime"})
+            [["datetime", "eps", "bps", "roe", "roe_improve", "profit_yoy"]]
+            .sort_values("datetime"),
+            on="datetime",
+            direction="backward",
+        )
+        if sym in closes.columns:
+            px = closes[sym].reindex(idx).to_numpy()
+            m["ep"] = m["eps"] / px * 100.0  # % 口径，与 build_value_growth 一致
+            m["bp"] = m["bps"] / px * 100.0
+        m = m.set_index("datetime")
+        for f in factors:
+            if f in m.columns and m[f].notna().any():
+                frames[f].append(m[f].rename(sym).astype("float32"))
+
+    return {f: pd.concat(cols, axis=1) for f, cols in frames.items() if cols}
+
+
 def pit_features(
     financials: pd.DataFrame,
     feature_index: pd.MultiIndex,

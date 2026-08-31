@@ -72,6 +72,10 @@ def main() -> None:
                         help="换手频率（交易日），覆盖 config")
     parser.add_argument("--top-k", type=int, default=None, help="持仓数量，覆盖 config")
     parser.add_argument("--rev-weight", type=float, default=None, help="短期反转因子权重，覆盖 config")
+    parser.add_argument("--weight-mode", default=None, choices=["equal", "inv_vol", "zscore"],
+                        help="组合权重模式（lowvol 系策略），覆盖 config")
+    parser.add_argument("--vg-weight", type=float, default=None,
+                        help="PIT 价值成长因子合成权重 0~1（lowvol 系策略），覆盖 config")
     parser.add_argument("--no-risk", action="store_true",
                         help="关闭回测内风控（默认启用，与实盘同一约束）")
     parser.add_argument(
@@ -88,7 +92,13 @@ def main() -> None:
 
     cfg = load_config()
     store = BarStore()
-    bars = store.load(start=args.start, end=args.end)
+    # 数据质量阻断：隔离清单中的符号（物理不可能跳变 = 复权/源数据坏）不进入研究管线
+    from quart.data.quality import load_blocklist
+
+    blocked = load_blocklist()
+    if blocked:
+        console.print(f"[yellow]quality blocklist: excluding {len(blocked)} symbols[/yellow]")
+    bars = store.load(start=args.start, end=args.end, exclude_symbols=sorted(blocked))
     bench = store.load_benchmark(cfg["benchmark"])
     bench = bench[(bench["date"] >= args.start) & (args.end is None or bench["date"] <= args.end)]
     if bars.empty:
@@ -150,6 +160,12 @@ def main() -> None:
         explicit_params["top_k"] = args.top_k
     if args.rev_weight is not None:
         explicit_params["rev_weight"] = args.rev_weight
+    if args.weight_mode is not None:
+        explicit_params["weight_mode"] = args.weight_mode
+    if args.vg_weight is not None:
+        if not 0 <= args.vg_weight <= 1:
+            parser.error("--vg-weight 必须在 0 到 1 之间")
+        explicit_params["vg_weight"] = args.vg_weight
     strategy = build_strategy(args.strategy, **explicit_params)
     effective_params = dict(strategy.params)
 

@@ -20,6 +20,16 @@ class LowVolCompositeStrategy(BaseStrategy):
     cluster 映射，组内样本 <5 只回退全市场分）。依据 R2 因子研究：行业内相对
     反转 rel_ind_mom20 的 ICIR(-0.38) 高于全市场反转，行业中性化使低波打分
     摆脱行业间波动率基数差异（如银行 vs 券商）。
+
+    多因子合成（vg_weight > 0）：叠加正交来源——PIT 价值成长因子（质量改善
+    roe_improve/profit_yoy + 估值 ep/bp，见 quart/research/value_growth.py）。
+    诊断依据：单因子纯多头 alpha 被结构截断（IC 0.065 但超额集中在空头端），
+    抬组合 IC 的路径是正交因子合成。无财务数据的符号中性填充 0（financials
+    仅覆盖沪深 300，缺失 = 质量中性，不改变其余股票的低波排序）。
+
+    组合构造（weight_mode）：equal=等权（历史行为）；inv_vol=波动率倒数加权
+    （单票风险预算均等）；zscore=因子分数加权（保留因子强度横截面信息）。
+    非等权模式迭代 cap 至 max_weight_pct 并归一化。
     """
 
     name = "lowvol_composite"
@@ -42,10 +52,15 @@ class LowVolCompositeStrategy(BaseStrategy):
         "rank_buffer": (float, 0.0, "排名缓冲带（换手控制）"),
         "selection": (str, "composite", "选股模式 composite/bounce"),
         "industry_z": (bool, False, "是否行业内 z-score 中性化"),
+        "weight_mode": (str, "equal", "权重模式: equal=等权, inv_vol=波动率倒数, zscore=因子分数"),
+        "vg_weight": (float, 0.0, "价值成长因子合成权重（0=关闭，0~1）"),
     }
 
     def __init__(self, **params):
         super().__init__(**params)
+        self.weight_mode = str(self.params.get("weight_mode", "equal"))
+        if self.weight_mode not in ("equal", "inv_vol", "zscore"):
+            self.weight_mode = "equal"
         self.required_history_days = max(
             20,
             int(self.params.get("regime_filter_days", 20))
@@ -101,6 +116,34 @@ class LowVolCompositeStrategy(BaseStrategy):
         sd_b.columns = df.columns
         return df.div(sd_b, axis=0).sub(mu_b.div(sd_b, axis=0), axis=0).astype("float32")
 
+    VG_FACTORS = ("roe_improve", "profit_yoy", "ep", "bp")
+
+    def _build_vg_score(self, md: MarketData) -> pd.DataFrame | None:
+        """PIT 价值成长合成分：各因子截面 z 等权均值（仅限有财务覆盖的符号）。"""
+        import warnings
+
+        from quart.config import PROJECT_ROOT
+
+        fin_path = PROJECT_ROOT / "data" / "factors" / "financials.parquet"
+        if not fin_path.exists():
+            return None
+        try:
+            from quart.research.value_growth import pit_panels
+
+            fin = pd.read_parquet(fin_path)
+            panels = pit_panels(fin, md.close_val, self.VG_FACTORS)
+        except Exception:  # noqa: BLE001 - 财务数据缺失/损坏时优雅降级为纯低波
+            return None
+        zs = [self._z(panels[f].reindex(columns=md.close_val.columns))
+              for f in self.VG_FACTORS if f in panels]
+        zs = [z for z in zs if bool(z.notna().to_numpy().any())]
+        if not zs:
+            return None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # 全 NaN 截面的 nanmean
+            arr = np.nanmean(np.stack([z.to_numpy() for z in zs]), axis=0)
+        return pd.DataFrame(arr, index=zs[0].index, columns=zs[0].columns).astype("float32")
+
     def prepare(self, md: MarketData) -> None:
         super().prepare(md)
         p = self.params
@@ -117,6 +160,9 @@ class LowVolCompositeStrategy(BaseStrategy):
         self._held: set[str] = set()
         self.selection = str(p.get("selection", "composite"))
         self.industry_z = bool(p.get("industry_z", False))
+        self.weight_mode = str(p.get("weight_mode", "equal"))
+        if self.weight_mode not in ("equal", "inv_vol", "zscore"):
+            self.weight_mode = "equal"
 
         c = md.close_val.astype("float32")
         ret1 = c.pct_change(fill_method=None)
@@ -132,12 +178,27 @@ class LowVolCompositeStrategy(BaseStrategy):
         # fillna(0) 是死代码：随后的 where(complete) 会把任一因子缺失的行整行置 NaN
         complete = z_vol.notna() & z_amp.notna() & z_lot.notna()
         comp = ((z_vol + z_amp + z_lot) / 3.0).where(complete).astype("float32")
+
+        # 多因子合成：叠加 PIT 价值成长（正交来源），缺失财务数据 = 中性 0
+        self.vg_weight = float(p.get("vg_weight", 0.0))
+        if self.vg_weight > 0:
+            self.vg_score = self._build_vg_score(md)
+            if self.vg_score is not None:
+                comp = (
+                    (1.0 - self.vg_weight) * comp
+                    + self.vg_weight * self.vg_score.reindex_like(comp).fillna(0.0)
+                ).astype("float32")
+        else:
+            self.vg_score = None
+
         if self.industry_z:
             comp = self._group_z(comp)
         self.composite = comp
         del vol20, amp20, lotto, z_vol, z_amp, z_lot
 
         self.reversal = (-ret1.rolling(5).mean()).astype("float32")
+        # inv_vol 加权所需的逐票波动率
+        self.vol20 = ret1.rolling(20).std().astype("float32") if self.weight_mode == "inv_vol" else None
 
         self.regime_ma = (
             md.benchmark_close.rolling(self.regime_days).mean() if md.benchmark_close is not None else None
@@ -206,9 +267,45 @@ class LowVolCompositeStrategy(BaseStrategy):
         ranked = scores.sort_values(ascending=False).index.tolist()
         picks = self._buffer_select(ranked, self._held, self.top_k, self.rank_buffer)
         self._held = set(picks)
-        weight = min(1.0 / len(picks), self.max_weight)
-        # 分级仓位：0<exposure<1 时权重按比例缩减，余下留现金（R4 仓位管理）
-        return {sym: weight * exposure for sym in picks}
+        if self.weight_mode == "equal":
+            # 等权保持历史行为：超上限不归一，余量留现金
+            weight = min(1.0 / len(picks), self.max_weight)
+            # 分级仓位：0<exposure<1 时权重按比例缩减，余下留现金（R4 仓位管理）
+            return {sym: weight * exposure for sym in picks}
+        weights = self._risk_weights(picks, scores, i)
+        return {sym: float(w) * exposure for sym, w in weights.items()}
+
+    def _risk_weights(self, picks: list[str], scores: pd.Series, i: int) -> pd.Series:
+        """非等权组合构造：inv_vol / zscore，迭代截断至 max_weight 并归一化。"""
+        n = len(picks)
+        if n == 0:
+            return pd.Series(dtype="float64")
+        if self.weight_mode == "inv_vol" and self.vol20 is not None:
+            v = self.vol20.iloc[i].reindex(picks)
+            inv = 1.0 / v.where(v > 0)
+            if inv.notna().any():
+                w = inv.fillna(inv.mean())
+            else:
+                w = pd.Series(1.0 / n, index=picks)
+        elif self.weight_mode == "zscore":
+            s = scores.reindex(picks).astype("float64")
+            # 平移到非负，保留因子强度横截面信息；全同分退化为等权
+            w = (s - s.min() + 1e-6).fillna(1e-6)
+        else:
+            w = pd.Series(1.0 / n, index=picks)
+        w = w / w.sum()
+        for _ in range(3):  # 迭代截断：超上限部分按比例回填未超上限的票
+            over = w > self.max_weight
+            if not over.any():
+                break
+            excess = float((w[over] - self.max_weight).sum())
+            w[over] = self.max_weight
+            free_idx = w.index[~over]
+            if len(free_idx) == 0:
+                break
+            free = w[free_idx]
+            w[free_idx] = free + excess * free / free.sum()
+        return w
 
     def state_dict(self):
         return {

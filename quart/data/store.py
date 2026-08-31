@@ -191,10 +191,20 @@ class BarStore:
         start: str | None = None,
         end: str | None = None,
         include_index: bool = False,
+        exclude_symbols: list[str] | None = None,
     ) -> pd.DataFrame:
         if symbols is not None:
-            return self._load_symbols(list(symbols), start, end, include_index)
+            df = self._load_symbols(list(symbols), start, end, include_index)
+            if exclude_symbols:
+                df = df[~df["symbol"].isin(set(exclude_symbols))]
+            return df
 
+        df = self._load_all_paths(start, end, include_index)
+        if exclude_symbols:
+            df = df[~df["symbol"].isin(set(exclude_symbols))]
+        return df
+
+    def _load_all_paths(self, start, end, include_index: bool) -> pd.DataFrame:
         if self._partitioned:
             return self._query_partitioned(start, end, include_index)
 

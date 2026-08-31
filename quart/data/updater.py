@@ -49,8 +49,18 @@ def update_universe_data(
     # hfq 钉住：被 qfq 伪影污染后修复过的股票，增量/全量均用 hfq，防止损坏复发
     hfq_pins = read_hfq_pins()
 
+    # 数据质量阻断：隔离清单中的符号（物理不可能跳变 = 复权/源数据坏）不再更新，
+    # 防止坏数据在每次增量更新中持续扩散；恢复需人工复核后从清单移除
+    from quart.data.quality import load_blocklist
+
+    blocked = load_blocklist()
+    skipped_blocked = 0
+
     targets = list(symbols[:max_names] if max_names else symbols)
     for n, symbol in enumerate(targets, 1):
+        if symbol in blocked:
+            skipped_blocked += 1
+            continue
         try:
             adjust = "hfq" if symbol in hfq_pins else cfg["data"]["adjust"]
             first = store.first_date(symbol)
