@@ -1,6 +1,13 @@
+"""回测/信号兼容的风控接口（委托到 RISK-001 Risk Engine）。
+
+权重的单票上限与总敞口逻辑唯一实现在 `quart.risk.engine.evaluate_weights`；
+本模块保留回测引擎与日频信号历史调用的函数签名，行为与措辞不变。
+"""
 from __future__ import annotations
 
 import pandas as pd
+
+from quart.risk.engine import RiskLimits, evaluate_weights
 
 
 def validate_weights(
@@ -9,25 +16,9 @@ def validate_weights(
     equity: float,
     max_position_pct: float,
 ) -> tuple[dict[str, float], list[str]]:
-    violations: list[str] = []
-    clean: dict[str, float] = {}
-    total = 0.0
-    for sym, w in sorted(weights.items()):
-        if w <= 0:
-            continue
-        if sym not in latest_close.index or pd.isna(latest_close[sym]):
-            violations.append(f"{sym}: 无最新价格，剔除")
-            continue
-        if w > max_position_pct:
-            violations.append(f"{sym}: 权重 {w:.1%} 超过单票上限 {max_position_pct:.1%}，已截断")
-            w = max_position_pct
-        clean[sym] = w
-        total += w
-    if total > 1.0:
-        scale = 1.0 / total
-        clean = {s: w * scale for s, w in clean.items()}
-        violations.append(f"总权重 {total:.1%} 超限，已等比缩放至 100%")
-    return clean, violations
+    limits = RiskLimits(max_position_pct=max_position_pct)
+    clean, results = evaluate_weights(limits, weights, latest_close, equity)
+    return clean, [r.message for r in results]
 
 
 def check_holdings_risk(
@@ -75,10 +66,12 @@ def make_weight_validator(max_position_pct: float, collect: list[str] | None = N
     ...         cfg["risk"]["max_position_pct"], collect=violations),
     ... )
     """
+    limits = RiskLimits(max_position_pct=max_position_pct)
+
     def _validator(targets: dict[str, float], prices: pd.Series, equity: float) -> dict[str, float]:
-        clean, violations = validate_weights(targets, prices, equity, max_position_pct)
+        clean, results = evaluate_weights(limits, targets, prices, equity)
         if collect is not None:
-            collect.extend(violations)
+            collect.extend(r.message for r in results)
         return clean
 
     return _validator

@@ -12,6 +12,7 @@ from quart.data.market import MarketData
 from quart.data.store import BarStore, drop_incomplete_today
 from quart.data.universe import filter_for_simulation
 from quart.execution import (
+    BUY,
     FLAT,
     ExecutionContext,
     Fees,
@@ -22,10 +23,21 @@ from quart.execution import generate_orders as build_rebalance_plan
 from quart.execution.constraints import A_SHARE_LOT
 from quart.manual_trading import PlannedOrderInput, TradingRepository, next_trade_date
 from quart.notify.dingtalk import send_markdown
+from quart.risk.engine import RiskState, limits_from_config
 from quart.risk.rules import check_holdings_risk, validate_weights
+from quart.risk.store import RiskRepository
 from quart.strategy import build_strategy
 
 console = Console()
+
+
+def _signal_risk_state(account_name: str, warnings: list[str]) -> RiskState:
+    """正式信号路径读取风险状态（RISK-001 强制链路，fail-closed）。"""
+    try:
+        return RiskRepository().get_state(account_name)
+    except Exception as exc:
+        warnings.append(f"风险状态读取失败，按 HALTED 处理（fail-closed）: {exc}")
+        return RiskState.HALTED
 
 
 def load_holdings(path: Path | None = None) -> tuple[float, dict[str, int]]:
@@ -211,7 +223,6 @@ def run_daily(
     strategy.prepare(md)
     i = len(md.dates) - 1
 
-    risk_cfg = cfg["risk"]
     manual_cfg = cfg.get("manual_trading", {})
     manual_enabled = bool(manual_cfg.get("enabled", True))
     account_name = str(manual_cfg.get("account_name", "manual"))
@@ -251,27 +262,45 @@ def run_daily(
         for sym, sh in positions.items()
         if sym in last_close.index and not pd.isna(last_close[sym])
     )
-    weights, violations = validate_weights(
-        raw_weights,
-        last_close,
-        equity=equity,
-        max_position_pct=float(risk_cfg["max_position_pct"]),
-    )
-    warnings = list(violations)
+    # RISK-001：正式信号必须经过 Risk Engine（限额与状态都不可绕过）
+    limits = limits_from_config(cfg)
+    warnings: list[str] = []
+    risk_state = _signal_risk_state(account_name, warnings)
     # 前一交易日收盘：涨跌停判断必须基于它，不能用当日收盘
     # （今收 vs 今收算出的涨跌停价永远不触发）
     prev_close = md.closes.iloc[i - 1] if i > 0 else last_close
-    orders, equity = generate_orders(
-        weights, last_close, cash, positions,
-        force_flat=force_flat,
-        warnings=warnings,
-        prev_close=prev_close,
-        sellable_positions=sellable_positions,
-    )
+    if risk_state in (RiskState.HALTED, RiskState.RECOVERY):
+        weights: dict[str, float] = {}
+        orders: list[OrderPlan] = []
+        warnings.append(
+            f"风险状态 {risk_state.value}：停止生成新订单（撤单与查询不受影响）"
+        )
+    else:
+        weights, violations = validate_weights(
+            raw_weights,
+            last_close,
+            equity=equity,
+            max_position_pct=limits.max_position_pct,
+        )
+        warnings += violations
+        orders, equity = generate_orders(
+            weights, last_close, cash, positions,
+            force_flat=force_flat,
+            warnings=warnings,
+            prev_close=prev_close,
+            sellable_positions=sellable_positions,
+        )
+        if risk_state is RiskState.REDUCING:
+            buys = [o for o in orders if o.side == BUY]
+            if buys:
+                warnings.append(
+                    f"风险状态 REDUCING：剔除 {len(buys)} 笔买入，只保留降风险方向"
+                )
+                orders = [o for o in orders if o.side != BUY]
     if force_flat:
         warnings.append("策略发出择时清仓(FLAT)信号：建议全部卖出")
     warnings += check_holdings_risk(
-        positions, last_close, equity, float(risk_cfg["max_position_pct"])
+        positions, last_close, equity, limits.max_position_pct
     )
 
     date = md.dates[i]
