@@ -9,6 +9,7 @@ Quart 是面向单机研究和人工交易确认的 A 股中低频平台：**数
 ```
 data/            AKShare(东财→腾讯自动降级) 日线采集, 前复权
 quart/
+├── domain/      统一交易合同：ID / OrderIntent / RiskDecision / ExecutionReport / Fill / 订单状态机
 ├── data/        BarStore(Parquet+DuckDB) / 多源采集 / 中证指数成分股票池
 ├── backtest/    T+1 · 100股整手 · 佣金/印花税/过户费/滑点 撮合引擎 + 绩效指标
 ├── strategy/    统一 Strategy 接口: momentum_rotation / dual_ma / ml_rank / lowvol_composite / lowvol_indz (可注册扩展)
@@ -393,6 +394,62 @@ uv run python scripts/migrate_partition_store.py              # 执行（幂等�
 ```
 
 实测：61 只标的迁移后，回测结果与迁移前**逐位一致**（289 笔 / CAGR 6.08% / Sharpe 0.80 / MDD -3.41%）。
+
+## 基础设施：持久化 Job 与 Migration（ADR-0001）
+
+任务系统从**进程内内存**（`api/task_api.py`）演进为 **SQLite 持久化**（`quart/infrastructure/`）。
+解决进程重启丢失、无 claim/lease/recovery/幂等的问题。
+
+### Migration 框架（DB-001）
+
+```python
+from quart.infrastructure.db import Database, Migration
+
+db = Database()            # state/quart.db，WAL + busy timeout + foreign_keys
+db.apply(migrations)        # 前向升级（PRAGMA user_version 记录版本，幂等）
+db.rollback(migrations, to_version=0)  # 回滚演练（需 migration 定义 down）
+```
+
+- **versioned migration**：`user_version` 记录 schema 版本，只前向应用；
+- **WAL**：读写并发不互相阻塞；**busy timeout**：并发写等待；
+- **并发安全**：migration 有实例级锁 + 事务，多线程同时 apply 不产生半迁移。
+
+### 持久化 Job（JOB-001）
+
+`quart/infrastructure/job.py:JobRepository`，状态机：
+
+```
+CREATED → QUEUED → CLAIMED → RUNNING → SUCCEEDED
+                              ↘ FAILED
+                              ↘ CANCELLED
+```
+
+```python
+repo = JobRepository()                      # 默认 state/quart.db
+repo.migrate()
+job = repo.create("backtest", {"s": "lowvol_indz"}, idempotency_key="k-1")
+claimed = repo.claim("worker-1")            # CAS 原子认领，分配租约
+repo.mark_running(claimed.job_id, "worker-1")
+repo.heartbeat(claimed.job_id, "worker-1")  # 续约
+repo.succeed(claimed.job_id, "worker-1", {"ok": True})
+```
+
+- **幂等**：`idempotency_key` 唯一，重复提交返回原 job；
+- **claim**：`UPDATE ... WHERE status='QUEUED'` 的 CAS 语义，多 Worker 不抢同一 job；
+- **lease/heartbeat**：Worker 周期续约，防假死；
+- **recovery**：进程崩溃后，租约过期的 RUNNING/CLAIMED job 重置为 QUEUED（重试）
+  或超限标记 FAILED（`max_attempts`）；
+- **cancel**：取消未终态 job。
+
+### 恢复演练
+
+```powershell
+# 演示：Worker 崩溃 → 新进程 recover() 回收 → 重新认领执行
+uv run python scripts/job_recovery_demo.py
+```
+
+恢复测试夹具见 `tests/job_recovery_fixtures.py`，CI 覆盖崩溃/恢复/幂等。
+设计决策见 `docs/adr/0001-persistent-job-and-sqlite-migration.md`。
 
 ## ML 研究层 (Qlib + LightGBM)
 

@@ -87,21 +87,48 @@ def test_rotation_sells_then_buys_with_lots():
     assert b.date == pd.Timestamp("2024-01-04")
 
 
-def test_signal_start_position_preserves_warmup_without_early_trades():
+def test_signal_offset_lets_strategy_see_prior_history():
+    """signal_md + signal_offset：策略在更长的历史上下文上 prepare，
+    但执行仍从 md 的第 0 天开始，前段收益不进入 OOS。"""
     dates = pd.date_range("2024-01-01", periods=8)
     bars = make_bars({"600001": 10.0}, dates, step=0.0)
     md = MarketData.from_bars(bars)
+
+    # 信号上下文比执行上下文多前 3 个交易日（offset=3）。
+    # 用 md.dates 前推 offset 个工作日，保证 signal_dates[offset:] == md.dates。
+    extended_dates = pd.bdate_range(end=dates[0] - pd.Timedelta(days=1), periods=3).append(dates)
+    signal_bars = make_bars({"600001": 10.0}, extended_dates, step=0.0)
+    signal_md = MarketData.from_bars(signal_bars)
+
     engine = BacktestEngine(
         md,
         OnceStrategy("600001"),
         fees=ZERO_FEES,
         initial_cash=100_000,
-        signal_start_pos=4,
+        signal_md=signal_md,
+        signal_offset=3,
     )
 
     engine.run()
 
-    assert engine.trades[0].date == dates[5]
+    # 策略在 signal_md 的第 3 天（=md 第 0 天）看，引擎 T+1 在 md 第 1 天执行
+    assert engine.trades[0].date == dates[1]
+
+
+def test_signal_offset_mismatched_dates_rejected():
+    """signal_offset 超出 signal_md 长度或日期不对齐时必须报错。"""
+    dates = pd.date_range("2024-01-01", periods=8)
+    bars = make_bars({"600001": 10.0}, dates, step=0.0)
+    md = MarketData.from_bars(bars)
+    signal_md = MarketData.from_bars(make_bars({"600001": 10.0},
+                                               pd.date_range("2024-01-01", periods=4)))
+
+    import pytest
+
+    # offset + len(md) > len(signal_md)：越界
+    with pytest.raises(ValueError, match="signal_offset"):
+        BacktestEngine(md, OnceStrategy("600001"), fees=ZERO_FEES,
+                       initial_cash=100_000, signal_md=signal_md, signal_offset=3)
 
 
 def test_t_plus_one_buy_not_sold_same_day():
