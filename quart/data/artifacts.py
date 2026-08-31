@@ -73,6 +73,11 @@ def _git_revision() -> str:
     return "unknown"
 
 
+def git_revision() -> str:
+    """当前代码版本（git 短哈希），非 git 环境返回 'unknown'。"""
+    return _git_revision()
+
+
 def _global_data_dates(store) -> tuple[str | None, str | None]:
     """全市场最早/最新交易日（不依赖单只票）。
 
@@ -124,12 +129,41 @@ def _global_data_dates(store) -> tuple[str | None, str | None]:
     )
 
 
-def data_version(store=None) -> dict:
-    """数据版本指纹：股票数 + 全市场最新日期 + 最早日期。
+def _snapshot_provenance(base: Path | None = None) -> tuple[dict[str, str | None], str | None]:
+    """DATA-001 内容哈希快照版本：(数据集 -> snapshot_id) + 证券主数据版本。
+
+    快照未构建（清单缺失）时对应值为 None —— 可复现契约降级但不报错。
+    只读小体积 JSON 清单，可在每次 create_run 时安全调用。
+    """
+    ids: dict[str, str | None] = {"daily": None, "index": None}
+    master_version: str | None = None
+    try:
+        from quart.data import snapshot as snap
+    except Exception:
+        return ids, master_version
+    for ds in ids:
+        try:
+            manifest = snap.load_manifest(ds, base=base)
+        except Exception:
+            manifest = None
+        if manifest is None:
+            continue
+        ids[ds] = manifest.snapshot_id
+        if master_version is None and manifest.security_master_version:
+            master_version = manifest.security_master_version
+    return ids, master_version
+
+
+def data_version(store=None, snapshot_base: Path | None = None) -> dict:
+    """数据版本指纹：股票数 + 全市场日期区间 + DATA-001 内容哈希快照。
 
     结果数字必须能回答"跑在哪份数据上"——数据变了，
     fingerprint 就变，旧结论自动失效而不必靠人工记忆。
+    首尾日期只能发现增删，历史行情修订靠 snapshot_id 变化识别
+    （快照未构建时该字段为 None，审计时应先运行
+    ``scripts/data_snapshot.py build``）。
     """
+    snapshot_ids, master_version = _snapshot_provenance(snapshot_base)
     try:
         if store is None:
             from quart.data.store import BarStore
@@ -137,15 +171,25 @@ def data_version(store=None) -> dict:
             store = BarStore()
         symbols = store.symbols()
         if not symbols:
-            return {"symbols": 0, "last_date": None, "first_date": None}
+            return {
+                "symbols": 0, "last_date": None, "first_date": None,
+                "snapshot_ids": snapshot_ids,
+                "security_master_version": master_version,
+            }
         last_date, first_date = _global_data_dates(store)
         return {
             "symbols": len(symbols),
             "last_date": last_date,
             "first_date": first_date,
+            "snapshot_ids": snapshot_ids,
+            "security_master_version": master_version,
         }
     except Exception:
-        return {"symbols": 0, "last_date": None, "first_date": None}
+        return {
+            "symbols": 0, "last_date": None, "first_date": None,
+            "snapshot_ids": snapshot_ids,
+            "security_master_version": master_version,
+        }
 
 
 def fingerprint(params: dict, data: dict | None = None, code: str = "unknown") -> str:
@@ -212,7 +256,7 @@ class Manifest:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Manifest":
+    def from_dict(cls, d: dict) -> Manifest:
         return cls(
             **{**d, "artifacts": [Artifact(**a) for a in d.get("artifacts", [])]}
         )
@@ -221,7 +265,7 @@ class Manifest:
 class RunWriter:
     """一次运行的写入句柄。用 `store.create_run()` 获取，不要直接构造。"""
 
-    def __init__(self, store: "ArtifactStore", manifest: Manifest):
+    def __init__(self, store: ArtifactStore, manifest: Manifest):
         self._store = store
         self.manifest = manifest
         self.dir = store.root / manifest.run_id
@@ -423,4 +467,5 @@ __all__ = [
     "artifacts_root",
     "data_version",
     "fingerprint",
+    "git_revision",
 ]
