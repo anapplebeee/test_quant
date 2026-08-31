@@ -4,6 +4,15 @@
 >
 > 风险声明：任何架构或策略都不能保证 A 股市场中的高额稳定收益。本项目应以“严格样本外超额、可控回撤、成本后盈利、容量匹配、实盘偏差可解释”为目标。
 
+配套文档：
+
+- 当前实现与已知偏差：[`ARCHITECTURE_OVERVIEW.md`](ARCHITECTURE_OVERVIEW.md)
+- 目标模块、运行拓扑与迁移阶段：[`docs/TARGET_ARCHITECTURE_V3.md`](docs/TARGET_ARCHITECTURE_V3.md)
+- 工作包、依赖、PR 门禁与发布流程：[`docs/DEVELOPMENT_COORDINATION.md`](docs/DEVELOPMENT_COORDINATION.md)
+- 长期架构决策：[`docs/adr/README.md`](docs/adr/README.md)
+
+当本文的长期方向与目标架构文档发生冲突时，以已接受的 ADR 和目标架构文档为准；本文继续负责里程碑与商业能力差距，不重复定义领域契约。
+
 ## 1. 当前定位与总体判断
 
 当前项目已经具备以下基础：

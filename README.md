@@ -24,6 +24,15 @@ run_scheduler.py APScheduler 每交易日 17:30 自动执行
 tests/           pytest: 撮合精度/T+1/无未来函数/指标数学 验证
 ```
 
+### 架构与开发文档
+
+- 当前实现（As-Is）：[`ARCHITECTURE_OVERVIEW.md`](ARCHITECTURE_OVERVIEW.md)
+- 目标架构（To-Be）：[`docs/TARGET_ARCHITECTURE_V3.md`](docs/TARGET_ARCHITECTURE_V3.md)
+- 开发协调与质量门禁：[`docs/DEVELOPMENT_COORDINATION.md`](docs/DEVELOPMENT_COORDINATION.md)
+- 架构决策记录：[`docs/adr/README.md`](docs/adr/README.md)
+- 商业级改造路线：[`QUANT_PLATFORM_REFACTOR_ROADMAP.md`](QUANT_PLATFORM_REFACTOR_ROADMAP.md)
+- 完整文档索引：[`docs/README.md`](docs/README.md)
+
 ## 快速开始
 
 ```powershell
@@ -264,7 +273,7 @@ uv run python scripts/manual_trade.py reconcile state/broker_snapshot.json `
 
 ## 前端架构
 
-当前唯一维护的 Web 前端是 Gradio，入口为 `app.py`。页面不直接执行 SQL 或拼接 shell 命令：
+当前唯一维护的 Web 前端是 Gradio，入口为 `app.py`。新增功能必须遵循以下依赖方向；存量页面仍有少量直读 `reports/`、`BarStore` 或配置的路径，按 [`UI-001`](docs/DEVELOPMENT_COORDINATION.md#12-当前优先工作包) 逐步迁入应用服务层：
 
 ```text
 frontend/pages/*
@@ -283,6 +292,8 @@ frontend/pages/*
 - 回测、WFA 和信号产物写入 ArtifactStore，保留参数、数据版本和代码指纹。
 
 CLI 仍保留并与前端共用同一领域代码，适用于调度器、CI、批处理和前端故障时的应急操作。
+
+当前态、目标态和迁移顺序分别以 [`ARCHITECTURE_OVERVIEW.md`](ARCHITECTURE_OVERVIEW.md)、[`docs/TARGET_ARCHITECTURE_V3.md`](docs/TARGET_ARCHITECTURE_V3.md) 和 [`docs/DEVELOPMENT_COORDINATION.md`](docs/DEVELOPMENT_COORDINATION.md) 为准；跨模块且难回滚的调整必须先提交 ADR。
 
 ## Roadmap
 

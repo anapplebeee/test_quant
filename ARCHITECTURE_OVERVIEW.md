@@ -1,4 +1,8 @@
-# Quart 前后端交互架构梳理（2026-08-31，GLM 架构检视）
+# Quart 当前态前后端交互架构（As-Is，2026-08-31）
+
+> 本文只描述当前工作树及已知缺口，不代表目标架构已经完成。目标边界、运行拓扑和迁移阶段见 [`docs/TARGET_ARCHITECTURE_V3.md`](docs/TARGET_ARCHITECTURE_V3.md)，任务拆分与质量门禁见 [`docs/DEVELOPMENT_COORDINATION.md`](docs/DEVELOPMENT_COORDINATION.md)。
+>
+> 已知偏差：部分页面仍直接读取 `reports/`、`BarStore` 或配置；当前任务队列和刷新总线仍依赖进程内状态。新增代码必须遵守分层约束，存量偏差按 `UI-001`、`ARCH-001` 和 `ARCH-002` 收敛。
 
 ## 1. 分层架构
 
@@ -15,7 +19,7 @@ flowchart TD
     SCHED[run_scheduler.py APScheduler] --> CLI
 ```
 
-**硬约束（架构评审 v1/v2 确立）**：
+**目标依赖约束（新增代码必须遵守，存量偏差按计划迁移）**：
 
 | 层级 | 允许 | 禁止 |
 |---|---|---|
@@ -100,7 +104,14 @@ sequenceDiagram
 
 ## 6. 仍待实现（按规划）
 
+- P0：持久化任务表、claim/lease/fencing 与进程重启恢复，替换进程内任务状态；
+- P0：统一 OMS/订单账本、幂等键、合法状态迁移与成交入账事务；
+- P0：`SecurityMaster` / `RuleBook`，统一 ST、板块、涨跌停、停复牌、上市日和手数规则；
+- P0：独立组合约束与常驻风控状态机，在计划审批和订单提交前强制执行；
+- P0：前端统一走版本化应用服务，消除页面对 `reports/`、`BarStore`、配置和账本的直读；
 - 阶段 F：**具体券商 SDK 接入**（BrokerAdapter 契约 / PaperBroker 状态机 / `sync_broker_fills`
   回报统一入账 / 前端模拟执行入口均已完成，2026-08-31；真实券商需权限与联调环境）
 - 因子生态：拥挤度（截面离散度）、失效预警（滚动 IC 时序）——需因子研究管线输出
 - 归因页：价值/反转/流动性暴露需 Barra 类风格因子数据源
+
+完整优先级、依赖和验收标准见 [`docs/DEVELOPMENT_COORDINATION.md`](docs/DEVELOPMENT_COORDINATION.md)；长期商业化能力边界见 [`QUANT_PLATFORM_REFACTOR_ROADMAP.md`](QUANT_PLATFORM_REFACTOR_ROADMAP.md)。
