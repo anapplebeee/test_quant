@@ -358,6 +358,7 @@ class Task:
     on_output: Callable | None = None    # 回调随任务实例注册，不再依赖首次 submit（修复排队任务收不到事件）
     on_complete: Callable | None = None
     cancel_requested: bool = False
+    job_id: str | None = None            # 持久化 Job 记录（JOB-001），无持久化时为 None
 
     @property
     def progress_hint(self) -> str:
@@ -394,13 +395,23 @@ class TaskQueue:
     - compute 资源最多2个并行
     """
 
-    def __init__(self, max_history: int = 50):
+    def __init__(self, max_history: int = 50, backend=None, persistent: bool = True):
+        from api.persistent_task_backend import PersistentTaskBackend
+
         self.max_history = max_history
         self.tasks: dict[str, Task] = {}       # 全部任务记录
         self.queue_order: deque[str] = deque()  # FIFO 顺序
         self._lock = threading.Lock()
         self._dispatch_thread: threading.Thread | None = None
         self._shutdown = False
+        # JOB-001：任务状态持久化镜像；persistent=False 时退化为纯内存（测试）
+        if backend is not None:
+            self.backend = backend
+        elif persistent:
+            self.backend = PersistentTaskBackend()
+        else:
+            self.backend = PersistentTaskBackend(None)
+        self._recovered = False
 
     # ---------- 公共接口 ----------
 
@@ -438,6 +449,13 @@ class TaskQueue:
             # 合并默认参数和动态参数
             final_args = list(tpl.get("args", [])) + list(extra_args or [])
 
+            # JOB-001：先落库再进内存队列；同参数非终态任务已存在时拒绝（幂等）
+            proceed, dup_msg, job_id = self.backend.submit(
+                task_id, final_args, tpl["script"], tpl.get("resource", "compute")
+            )
+            if not proceed:
+                return False, f"'{TASKS[task_id]['name']}' {dup_msg}", ""
+
             task = Task(
                 task_id=instance_id,
                 name=tpl["name"],
@@ -447,6 +465,7 @@ class TaskQueue:
                 family=task_id,
                 on_output=on_output,
                 on_complete=on_complete,
+                job_id=job_id,
             )
             self.tasks[instance_id] = task
             self.queue_order.append(instance_id)
@@ -519,11 +538,13 @@ class TaskQueue:
                 return False, "任务不存在"
             if task.status == TaskStatus.PENDING:
                 task.status = TaskStatus.CANCELLED
+                self.backend.cancel(task.job_id, "cancelled while pending")
                 return True, "已取消排队任务"
             if task.status == TaskStatus.RUNNING and task.process:
                 task.cancel_requested = True
                 _kill_process_tree(task.process)
                 task.status = TaskStatus.CANCELLED
+                self.backend.cancel(task.job_id, "cancelled while running")
                 return True, "已终止运行中任务（含子进程）"
             return False, f"无法取消 (状态={task.status.value})"
 
@@ -546,12 +567,45 @@ class TaskQueue:
 
     def _ensure_dispatcher(self):
         """确保调度线程运行（带锁单例，回调从任务实例读取）"""
+        if not self._recovered:
+            self._recovered = True
+            self._recover_persisted()
         with self._lock:
             if self._dispatch_thread and self._dispatch_thread.is_alive():
                 return
             self._dispatch_thread = threading.Thread(
                 target=self._dispatch_loop, daemon=True)
             self._dispatch_thread.start()
+
+    def _recover_persisted(self):
+        """JOB-001 重启恢复：把上次进程遗留的持久化任务水合回内存队列。
+
+        首次 submit 也会触发本方法，此时刚创建的 job 已在内存中，
+        必须按 job_id 去重，否则同一任务会被水合成第二个实例。
+        """
+        jobs = self.backend.recover()
+        if not jobs:
+            return
+        with self._lock:
+            known_job_ids = {t.job_id for t in self.tasks.values() if t.job_id}
+            for job in jobs:
+                if job.job_id in known_job_ids:
+                    continue
+                family = job.job_type
+                payload = job.payload or {}
+                instance_id = f"{family}#restored-{job.job_id[:8]}"
+                if instance_id in self.tasks:
+                    continue
+                self.tasks[instance_id] = Task(
+                    task_id=instance_id,
+                    name=str(TASKS.get(family, {}).get("name", family)),
+                    script=str(payload.get("script", "")),
+                    args=[str(a) for a in payload.get("args", [])],
+                    resource=str(payload.get("resource", "compute")),
+                    family=family,
+                    job_id=job.job_id,
+                )
+                self.queue_order.append(instance_id)
 
     def _dispatch_loop(self):
         """后台调度循环"""
@@ -587,10 +641,27 @@ class TaskQueue:
 
     def _start_task(self, task: Task):
         """启动单个任务（回调从任务实例读取，每个提交者都能收到自己的事件）"""
+        # JOB-001：先原子认领持久化记录；已被认领/终态（如重启后被回收）则不启动
+        if task.job_id is not None and not self.backend.claim_and_run(task.job_id):
+            task.status = TaskStatus.CANCELLED
+            task.output_lines.append("持久化任务状态不允许启动（已被认领或已结束）")
+            task.ended_at = datetime.now()
+            return
+
         cmd = self._build_command(task)
         task.status = TaskStatus.RUNNING
         task.started_at = datetime.now()
         task.output_lines.append(f"$ {' '.join(cmd)}")
+
+        # 租约续约：子进程长于单次租约时靠心跳防止 recovery 误回收
+        stop_heartbeat = threading.Event()
+
+        def _heartbeat_loop():
+            while not stop_heartbeat.wait(60.0):
+                self.backend.heartbeat(task.job_id)
+
+        heartbeat = threading.Thread(target=_heartbeat_loop, daemon=True)
+        heartbeat.start()
 
         def _run():
             try:
@@ -648,6 +719,8 @@ class TaskQueue:
                     else:
                         task.status = TaskStatus.COMPLETED if returncode == 0 else TaskStatus.FAILED
                 task.process = None
+                stop_heartbeat.set()
+                self._finalize_persistent(task)
 
                 # 数据版本总线：任务成功完成后通知前端各页面刷新（数据刷新/信号/回测等
                 # 会改写 reports/、data/ 下的产出，页面静态数据需要更新）
@@ -667,12 +740,23 @@ class TaskQueue:
                 task.ended_at = datetime.now()
                 if task.status != TaskStatus.CANCELLED:
                     task.status = TaskStatus.FAILED
+                stop_heartbeat.set()
+                self._finalize_persistent(task)
                 if task.on_complete:
                     with suppress(Exception):
                         task.on_complete(task.task_id, -1)
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
+
+    def _finalize_persistent(self, task: Task) -> None:
+        """JOB-001：把内存任务的终态镜像到持久化 Job 记录。"""
+        if task.job_id is None:
+            return
+        if task.status == TaskStatus.CANCELLED:
+            self.backend.cancel(task.job_id, "task cancelled")
+        else:
+            self.backend.finish(task.job_id, task.returncode if task.returncode is not None else -1)
 
 
 # 全局任务队列单例

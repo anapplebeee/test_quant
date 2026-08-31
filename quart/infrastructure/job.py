@@ -17,12 +17,11 @@ import json
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from quart.infrastructure.db import Database
 from quart.infrastructure.job_schema import (
-    CLAIMABLE,
     JOB_CANCELLED,
     JOB_CLAIMED,
     JOB_CREATED,
@@ -30,19 +29,12 @@ from quart.infrastructure.job_schema import (
     JOB_QUEUED,
     JOB_RUNNING,
     JOB_SUCCEEDED,
-    JOB_MIGRATIONS,
-    TERMINAL,
 )
+from quart.infrastructure.migrations import PLATFORM_MIGRATIONS
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _utc_parse(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    return datetime.fromisoformat(value)
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 @dataclass
@@ -66,8 +58,9 @@ class Job:
     error: str | None = None
 
     @classmethod
-    def from_row(cls, row) -> "Job":
+    def from_row(cls, row) -> Job:
         d = dict(row)
+        result_raw = d.get("result_json")
         return cls(
             job_id=str(d["job_id"]),
             job_type=str(d["job_type"]),
@@ -82,7 +75,7 @@ class Job:
             finished_at=d.get("finished_at"),
             claimed_by=d.get("claimed_by"),
             lease_until=d.get("lease_until"),
-            result=json.loads(d.get("result_json")) if d.get("result_json") else None,
+            result=json.loads(result_raw) if result_raw else None,
             error=d.get("error"),
         )
 
@@ -99,18 +92,17 @@ class JobRepository:
     """
 
     def __init__(self, db: Database | None = None, lease_seconds: int = 300):
-        self.db = db
-        self._default_db_owned = False
-        if self.db is None:
+        if db is None:
             from quart.infrastructure.db import get_db
 
-            self.db = get_db()
+            db = get_db()
+        self.db: Database = db
         self.lease_seconds = lease_seconds
         self._lock = threading.Lock()
 
     def migrate(self) -> list[int]:
-        """应用 Job schema migration。"""
-        return self.db.apply(JOB_MIGRATIONS)
+        """应用平台 schema migration（全量，保证任意初始化顺序下表都齐全）。"""
+        return self.db.apply(PLATFORM_MIGRATIONS)
 
     # ---------------- Create ----------------
 
@@ -205,7 +197,28 @@ class JobRepository:
             )
             if cur.rowcount == 0:
                 return None  # 被其他 Worker 抢走
-        return self.get(job_id)  # type: ignore[return-value]
+        return self.get(job_id)
+
+    def claim_job(self, job_id: str, worker_id: str) -> Job | None:
+        """原子认领**指定** job（已知 job_id 的调用方，如 task_api 水合恢复）。
+
+        CAS 语义与 `claim()` 相同；状态非可认领时返回 None。
+        """
+        self.migrate()
+        lease_until = _now_plus(self.lease_seconds)
+        with self.db.connect() as conn:
+            cur = conn.execute(
+                f"""
+                UPDATE jobs
+                SET status = ?, claimed_by = ?, lease_until = ?,
+                    attempts = attempts + 1, started_at = ?
+                WHERE job_id = ? AND status IN ('{JOB_CREATED}', '{JOB_QUEUED}')
+                """,
+                (JOB_CLAIMED, worker_id, lease_until, _now(), job_id),
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get(job_id)
 
     def mark_running(self, job_id: str, worker_id: str, lease_seconds: int | None = None) -> bool:
         """Worker 确认接手，job 进入 RUNNING，并续租。"""
@@ -351,7 +364,8 @@ class JobRepository:
             return []
         self.migrate()
         sql = "SELECT * FROM jobs"
-        conds, params = [], []
+        conds: list[str] = []
+        params: list[Any] = []
         if status:
             conds.append("status = ?")
             params.append(status)
@@ -368,7 +382,7 @@ class JobRepository:
 
 
 def _now_plus(seconds: int) -> str:
-    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat(timespec="seconds")
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat(timespec="seconds")
 
 
 __all__ = ["Job", "JobRepository"]

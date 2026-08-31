@@ -302,7 +302,7 @@ git diff --check
 | ARCH-001 | 统一领域 ID、OrderIntent、RiskDecision、ExecutionReport | 架构师 + 后端交易 | 0 | P0 | 无 | ✅ 2026-09-01 完成：回测/手动/Broker 可转换到统一合同，PaperBroker 全程记录标准化状态回报 |
 | UI-AUDIT-001 | 页面直读与命令入口盘点 | 前端 | 0 | P0 | 无 | 页面/API/状态源矩阵完整，形成 UI-001 清单 |
 | DB-001 | SQLite migration、WAL、busy timeout | 后端平台 | 1 | P0 | ARCH-001 | ✅ 2026-09-01 完成：`quart/infrastructure/db.py` migration 框架（user_version/WAL/busy_timeout/上下迁移） |
-| JOB-001 | 持久化 Job/Command | 后端平台 | 1 | P0 | DB-001 | 重启恢复、claim、取消、幂等测试通过（仓储层已完成 2a29557，task_api 接线进行中） |
+| JOB-001 | 持久化 Job/Command | 后端平台 | 1 | P0 | DB-001 | ✅ 2026-09-01 完成：仓储层（2a29557）+ task_api 接线（提交先落库、幂等键去重、重启恢复水合、claim/心跳/取消/终态镜像），10 个接线测试 + 重启恢复测试通过 |
 | DATA-001 | 内容哈希数据快照 | 数据工程 | 0-1 | P0 | 无 | ✅ 2026-09-01 完成：`quart/data/snapshot.py` 内容哈希清单，更新后自动构建，历史修订改变 snapshot_id |
 | RULE-001 | SecurityMaster 与 RuleBook | 数据工程 + 后端交易 | 1 | P0 | DATA-001 | ✅ 2026-09-01 完成：`quart/market_rules/rule_book.py` 按日期生效规则（创业板改革/主板注册制/科创北交所开市/印花税历史），历史日期规则测试通过，`rule_book_version` 已接入快照 PIT 元数据 |
 | API-001 | 版本化 Control API | 后端平台 | 2 | P0 | JOB-001 | OpenAPI 与合同测试通过 |
