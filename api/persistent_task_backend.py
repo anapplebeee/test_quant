@@ -25,6 +25,7 @@ from loguru import logger
 
 from quart.infrastructure.job import Job, JobRepository
 from quart.infrastructure.job_schema import TERMINAL
+from quart.observability.structured import log_event
 
 _WORKER_ID = "task_api"
 
@@ -79,6 +80,12 @@ class PersistentTaskBackend:
                 payload={"script": script, "args": args, "resource": resource},
                 idempotency_key=create_key,
             )
+            log_event(
+                "job.created",
+                job_id=job.job_id,
+                job_type=family,
+                idempotency_key=create_key,
+            )
             return True, "", job.job_id
         except Exception as exc:  # 持久化故障不阻塞内存提交
             logger.warning("persistent job create failed: {}", exc)
@@ -93,7 +100,10 @@ class PersistentTaskBackend:
         try:
             if self.repo.claim_job(job_id, _WORKER_ID) is None:
                 return False
-            return self.repo.mark_running(job_id, _WORKER_ID)
+            started = self.repo.mark_running(job_id, _WORKER_ID)
+            if started:
+                log_event("job.started", job_id=job_id)
+            return started
         except Exception as exc:  # pragma: no cover - 镜像失败不影响执行
             logger.warning("persistent claim_and_run failed: {}", exc)
             return True
@@ -112,8 +122,11 @@ class PersistentTaskBackend:
         try:
             if returncode == 0:
                 self.repo.succeed(job_id, _WORKER_ID, result={"returncode": returncode})
+                log_event("job.succeeded", job_id=job_id)
             else:
-                self.repo.fail(job_id, _WORKER_ID, error or f"returncode={returncode}")
+                message = error or f"returncode={returncode}"
+                self.repo.fail(job_id, _WORKER_ID, message)
+                log_event("job.failed", level="WARNING", job_id=job_id, error=message)
         except Exception as exc:  # pragma: no cover
             logger.warning("persistent finish failed: {}", exc)
 
@@ -121,7 +134,8 @@ class PersistentTaskBackend:
         if self.repo is None or not job_id:
             return
         try:
-            self.repo.cancel(job_id, reason)
+            if self.repo.cancel(job_id, reason):
+                log_event("job.cancelled", job_id=job_id, reason=reason)
         except Exception as exc:  # pragma: no cover
             logger.warning("persistent cancel failed: {}", exc)
 
@@ -139,6 +153,11 @@ class PersistentTaskBackend:
             stats = self.repo.recover()
             if stats["requeued"] or stats["failed"]:
                 logger.info("job recovery: {}", stats)
+                log_event(
+                    "job.recovered",
+                    requeued=stats["requeued"],
+                    failed=stats["failed"],
+                )
             jobs: list[Job] = []
             for job in self.repo.list(status="QUEUED", limit=100):
                 payload = job.payload or {}

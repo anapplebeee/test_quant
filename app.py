@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import gradio as gr
 
-from frontend.theme import CUSTOM_CSS, soft_theme
 from frontend.pages import (
     attribution,
     backtest,
@@ -26,6 +25,7 @@ from frontend.pages import (
     risk_management,
     strategy_monitor,
 )
+from frontend.theme import CUSTOM_CSS, soft_theme
 
 
 def create_app() -> gr.Blocks:
@@ -57,6 +57,10 @@ def create_app() -> gr.Blocks:
 if __name__ == "__main__":
     import os
 
+    from quart.config import PROJECT_ROOT
+    from quart.observability import configure_structured_logging
+
+    configure_structured_logging(PROJECT_ROOT / "logs" / "platform.jsonl")
     app = create_app()
     # 安全默认：仅本机监听。如需局域网访问，设置 QUART_SERVER_NAME=0.0.0.0
     # 并务必同时设置 QUART_AUTH="user:password" 启用 basic auth（无鉴权暴露 = 任何人可触发训练/回测/读文件）

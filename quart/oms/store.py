@@ -30,6 +30,7 @@ from quart.domain.ids import stable_id
 from quart.domain.orders import BrokerOrder
 from quart.domain.state_machine import apply_execution_report
 from quart.infrastructure.db import Database
+from quart.observability.structured import log_event
 
 _FILL_STATUSES = (OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED)
 
@@ -163,6 +164,15 @@ class OrderRepository:
             order = self._order_from_row(row)
             assert order is not None
             if replay:
+                log_event(
+                    "order.report_replayed",
+                    level="DEBUG",
+                    order_id=report.client_order_id,
+                    account_id=report.account_id,
+                    environment=report.environment.value,
+                    idempotency_key=report.idempotency_key,
+                    event_id=report.event_id,
+                )
                 return order
             updated = apply_execution_report(order, report)
             fill = self._fill_from_report(updated, report)
@@ -256,6 +266,16 @@ class OrderRepository:
                 conn.rollback()
                 replayed = self.get_order(report.client_order_id)
                 return replayed if replayed is not None else updated
+        log_event(
+            "order.transition",
+            order_id=updated.client_order_id,
+            broker_order_id=updated.broker_order_id,
+            account_id=updated.account_id,
+            environment=updated.environment.value,
+            status=updated.status.value,
+            filled_quantity=updated.filled_quantity,
+            event_id=report.event_id,
+        )
         return updated
 
     def list_reports(self, client_order_id: str) -> list[dict[str, Any]]:
