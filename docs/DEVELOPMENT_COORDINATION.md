@@ -311,7 +311,7 @@ git diff --check
 | OMS-001 | 持久化订单状态机 | 后端交易 | 3 | P0 | ARCH-001、RISK-001 | ✅ 2026-09-01 完成：`quart/oms/` 持久化订单状态机（订单/回报/成交三表，状态只能由 ExecutionReport 推进）；回报与成交按幂等键去重、同事务入账（重复回报/重启不重复入账测试通过）；`list_active_orders` 重启恢复 + 成交派生持仓查询模型，已接线 Control API `GET /accounts/{id}/positions` |
 | UI-001 | 清除前端直读领域/文件 | 前端 + 后端平台 | 3 | P0 | API-001 | `frontend/` 只依赖展示适配器/API |
 | RESEARCH-002 | 新因子与组合优化 | 量化研究 | 3 | P1 | RESEARCH-001 | 候选通过独立 OOS、成本与容量门禁 |
-| BROKER-001 | PaperBroker 持久化与恢复 | 后端交易 | 4 | P1 | OMS-001 | 故障注入通过 |
+| BROKER-001 | PaperBroker 持久化与恢复 | 后端交易 | 4 | P1 | OMS-001 | ✅ 2026-09-01 完成：`quart/broker/persistent.py` `PersistentPaperBroker` 以 OMS 为单一状态源（订单/回报/成交全部落库，重启直接读库恢复）；报单/成交/撤单幂等，重复回报不重复入账；`PaperFaultConfig` 故障注入（reject / drop_ack）通过，drop_ack 恢复先按 `client_order_id` 查询再补发回报 |
 | OBS-001 | 结构化日志与核心指标 | 后端平台 | 3-4 | P1 | JOB-001、OMS-001 | 可定位 job/order/reconcile 全链路 |
 | QA-001 | Paper E2E 与故障演练 | QA/交易运维 | 4 | P0 | UI-001、BROKER-001、OBS-001 | T+1、重启、断线、重复回报和对账通过 |
 | BROKER-002 | 首个真实券商灰度 | 后端交易 + 交易负责人 | 5 | P1 | QA-001 | 先查询对账，再小资金报单 |
