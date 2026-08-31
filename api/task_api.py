@@ -417,11 +417,14 @@ class TaskQueue:
 
     def submit(self, task_id: str, on_output: Callable | None = None,
                on_complete: Callable | None = None,
-               extra_args: list | None = None) -> tuple[bool, str, str]:
+               extra_args: list | None = None,
+               idempotency_key: str | None = None) -> tuple[bool, str, str]:
         """提交任务到队列
 
         Args:
             extra_args: 附加命令行参数（如 ["--strategy", "lowvol_composite"]）
+            idempotency_key: 客户端显式幂等键（Control API Idempotency-Key），
+                缺省按 (任务 + 参数) 内容哈希
 
         Returns:
             (是否成功, 消息, 实例ID)  实例ID 可用于 get_output/cancel/完成事件匹配
@@ -451,7 +454,8 @@ class TaskQueue:
 
             # JOB-001：先落库再进内存队列；同参数非终态任务已存在时拒绝（幂等）
             proceed, dup_msg, job_id = self.backend.submit(
-                task_id, final_args, tpl["script"], tpl.get("resource", "compute")
+                task_id, final_args, tpl["script"], tpl.get("resource", "compute"),
+                idempotency_key=idempotency_key,
             )
             if not proceed:
                 return False, f"'{TASKS[task_id]['name']}' {dup_msg}", ""

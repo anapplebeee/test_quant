@@ -43,9 +43,19 @@ class PersistentTaskBackend:
     # ---------------- 提交 ----------------
 
     def submit(
-        self, family: str, args: list[str], script: str, resource: str
+        self,
+        family: str,
+        args: list[str],
+        script: str,
+        resource: str,
+        idempotency_key: str | None = None,
     ) -> tuple[bool, str, str | None]:
         """落库一个新任务。
+
+        Args:
+            idempotency_key: 客户端显式提供的幂等键（Control API 的
+                Idempotency-Key）。提供时替代内容哈希，且任何既有记录
+                （含终态）都视为重复——重放语义由上层 API 负责。
 
         Returns
         -------
@@ -54,12 +64,13 @@ class PersistentTaskBackend:
         """
         if self.repo is None:
             return True, "", None
-        key = _idempotency_key(family, args)
+        client_key = idempotency_key is not None
+        key = idempotency_key or _idempotency_key(family, args)
         create_key: str | None = key
         try:
             existing = self.repo.get_by_idempotency_key(key)
             if existing is not None:
-                if existing.status not in TERMINAL:
+                if existing.status not in TERMINAL or client_key:
                     return False, f"持久化任务已存在（{existing.status}）", existing.job_id
                 # 已终态：允许重新执行。丢弃幂等键，避免 create 直接返回旧的终态记录。
                 create_key = None
