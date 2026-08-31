@@ -49,6 +49,10 @@ def main() -> None:
         help="score 模式档位数（2=全仓/空仓，3=加半仓档），仅 --regime-mode score 有效",
     )
     parser.add_argument(
+        "--regime-filter-days", type=int, default=None,
+        help="择时均线窗口（交易日），覆盖 config",
+    )
+    parser.add_argument(
         "--momentum-mode",
         choices=("simple", "rank", "smooth", "remove_limit_up"),
         default=None,
@@ -76,6 +80,12 @@ def main() -> None:
                         help="组合权重模式（lowvol 系策略），覆盖 config")
     parser.add_argument("--vg-weight", type=float, default=None,
                         help="PIT 价值成长因子合成权重 0~1（lowvol 系策略），覆盖 config")
+    parser.add_argument("--size-weight", type=float, default=None,
+                        help="小市值因子权重（lowvol 系，需 baostock 基本面数据）")
+    parser.add_argument("--turnover-weight", type=float, default=None,
+                        help="低换手率因子权重（lowvol 系，需 baostock 基本面数据）")
+    parser.add_argument("--value-weight", type=float, default=None,
+                        help="价值因子权重 z(1/PE_TTM)（lowvol 系，需 baostock 基本面数据）")
     parser.add_argument("--no-risk", action="store_true",
                         help="关闭回测内风控（默认启用，与实盘同一约束）")
     parser.add_argument(
@@ -140,6 +150,10 @@ def main() -> None:
         explicit_params["regime_mode"] = args.regime_mode
     if args.timing_levels is not None:
         explicit_params["timing_levels"] = args.timing_levels
+    if args.regime_filter_days is not None:
+        if args.regime_filter_days < 2:
+            parser.error("--regime-filter-days 必须 ≥2")
+        explicit_params["regime_filter_days"] = args.regime_filter_days
     if args.momentum_mode is not None:
         explicit_params["momentum_mode"] = args.momentum_mode
     if args.lookback_days is not None:
@@ -166,6 +180,15 @@ def main() -> None:
         if not 0 <= args.vg_weight <= 1:
             parser.error("--vg-weight 必须在 0 到 1 之间")
         explicit_params["vg_weight"] = args.vg_weight
+    for flag, key in (
+        (args.size_weight, "size_weight"),
+        (args.turnover_weight, "turnover_weight"),
+        (args.value_weight, "value_weight"),
+    ):
+        if flag is not None:
+            if flag < 0:
+                parser.error(f"--{key.replace('_', '-')} 不能为负数")
+            explicit_params[key] = flag
     strategy = build_strategy(args.strategy, **explicit_params)
     effective_params = dict(strategy.params)
 

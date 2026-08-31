@@ -18,6 +18,7 @@ dependencies = [
     "plotly>=7.0.0",
     "gradio>=5.0",
     "baostock>=0.9.3",
+    "scikit-learn>=1.9.0",
 ]
 
 [dependency-groups]

@@ -193,7 +193,7 @@ class LowVolCompositeStrategy(BaseStrategy):
 
             fin = pd.read_parquet(fin_path)
             panels = pit_panels(fin, md.close_val, self.VG_FACTORS)
-        except Exception:  # noqa: BLE001 - 财务数据缺失/损坏时优雅降级为纯低波
+        except Exception:  # 财务数据缺失/损坏时优雅降级为纯低波
             return None
         zs = [self._z(panels[f].reindex(columns=md.close_val.columns))
               for f in self.VG_FACTORS if f in panels]
@@ -347,10 +347,9 @@ class LowVolCompositeStrategy(BaseStrategy):
         self._next_rebalance = i + self.rebalance_days
 
         exposure = 1.0
-        if self.use_regime and self.regime_flat is not None:
-            if bool(self.regime_flat.iloc[i]):
-                self._held = set()  # FLAT 已清仓，同步清空持仓记忆
-                return {FLAT: 1.0}
+        if self.use_regime and self.regime_flat is not None and bool(self.regime_flat.iloc[i]):
+            self._held = set()  # FLAT 已清仓，同步清空持仓记忆
+            return {FLAT: 1.0}
         if self.use_regime and self.timing_exposure is not None:
             exposure = float(self.timing_exposure.iloc[i])
             if exposure <= 0:
@@ -396,10 +395,7 @@ class LowVolCompositeStrategy(BaseStrategy):
         if self.weight_mode == "inv_vol" and self.vol20 is not None:
             v = self.vol20.iloc[i].reindex(picks)
             inv = 1.0 / v.where(v > 0)
-            if inv.notna().any():
-                w = inv.fillna(inv.mean())
-            else:
-                w = pd.Series(1.0 / n, index=picks)
+            w = inv.fillna(inv.mean()) if inv.notna().any() else pd.Series(1.0 / n, index=picks)
         elif self.weight_mode == "zscore":
             s = scores.reindex(picks).astype("float64")
             # 平移到非负，保留因子强度横截面信息；全同分退化为等权

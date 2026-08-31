@@ -129,16 +129,22 @@ def test_operations_full_refresh_requires_confirmation(ui_stubs, monkeypatch):
 
     monkeypatch.setattr(mod, "_stream_operation", fake_stream)
 
-    rejected = list(mod._run_refresh("all", "000300", "20190101", None, False, True, False))
+    rejected = list(mod._run_refresh("all", "000300", "20190101", None, 8, False, True, False))
     assert rejected == ["❌ 全量刷新会重拉并覆盖所选股票历史，请先勾选确认。"]
     assert submitted == []
 
-    accepted = list(mod._run_refresh("all", "000300", "20190101", None, False, True, True))
+    accepted = list(mod._run_refresh("all", "000300", "20190101", None, 8, False, True, True))
     assert accepted == ["已提交"]
     assert submitted == [
         (
             "refresh",
-            ["--universe", "all", "--index", "000300", "--start", "20190101", "--full-refresh"],
+            [
+                "--universe", "all",
+                "--index", "000300",
+                "--start", "20190101",
+                "--workers", "8",
+                "--full",
+            ],
             "全量数据刷新",
         )
     ]

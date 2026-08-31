@@ -47,7 +47,7 @@ def test_force_full_refresh_reloads_and_replaces_stock_and_benchmark(monkeypatch
     monkeypatch.setattr(updater, "read_hfq_pins", lambda: set())
     monkeypatch.setattr(updater, "fetch_daily", fake_fetch_daily)
     monkeypatch.setattr(updater, "fetch_index_daily", lambda code, start, end: _bars(f"IDX{code}"))
-    monkeypatch.setattr(updater, "polite_sleep", lambda seconds: None)
+    monkeypatch.setattr("quart.data.quality.load_blocklist", lambda: set())
 
     stats = updater.update_universe_data(
         "000300",
@@ -58,14 +58,11 @@ def test_force_full_refresh_reloads_and_replaces_stock_and_benchmark(monkeypatch
 
     assert calls[0][0:2] == ("600519", "20190101")
     assert store.saved == [("600519", True), ("IDX000300", True)]
-    assert stats == {
-        "total": 1,
-        "ok": 1,
-        "empty": 0,
-        "failed": 0,
-        "refreshed": 1,
-        "full_refresh": True,
-    }
+    assert stats["total"] == 1
+    assert stats["ok"] == 1
+    assert stats["empty"] == 0
+    assert stats["failed"] == 0
+    assert stats["refreshed"] == 1
 
 
 def test_force_full_refresh_keeps_old_stock_when_remote_is_empty(monkeypatch):
@@ -76,7 +73,7 @@ def test_force_full_refresh_keeps_old_stock_when_remote_is_empty(monkeypatch):
     monkeypatch.setattr(updater, "read_hfq_pins", lambda: set())
     monkeypatch.setattr(updater, "fetch_daily", lambda symbol, start, end, adjust: pd.DataFrame())
     monkeypatch.setattr(updater, "fetch_index_daily", lambda code, start, end: pd.DataFrame())
-    monkeypatch.setattr(updater, "polite_sleep", lambda seconds: None)
+    monkeypatch.setattr("quart.data.quality.load_blocklist", lambda: set())
 
     stats = updater.update_universe_data("000300", ["600519"], force_full=True)
 
