@@ -308,7 +308,7 @@ git diff --check
 | API-001 | 版本化 Control API | 后端平台 | 2 | P0 | JOB-001 | ✅ 2026-09-01 完成：`api/control/` 同进程版本化 Control API（10 端点路由表 + 稳定 DTO + Idempotency-Key 重放语义），冻结规范 `openapi_v1.json` 由合同测试守护一致性；订单/持仓/对账端点显式 503 合同占位，等待 OMS-001 接线 |
 | RISK-001 | 强制 Risk Engine 与状态机 | 后端交易 | 2 | P0 | RULE-001 | ✅ 2026-09-01 完成：`quart/risk/engine.py` 强制风控链路（状态闸门/单票上限/整手/价格笼子，限额内容哈希 `limit_version`）+ ACTIVE/REDUCING/HALTED/RECOVERY 状态机持久化与审计流水 + 决策落库幂等；日频信号路径按风险状态强制拦截，回测/信号/paper 一致性测试通过 |
 | RESEARCH-001 | 当前策略与因子正式审计 | 量化研究 | 2 | P0 | DATA-001、RULE-001 | OOS/WFA/成本/容量报告可复现 |
-| OMS-001 | 持久化订单状态机 | 后端交易 | 3 | P0 | ARCH-001、RISK-001 | 重复回报/重启不重复入账 |
+| OMS-001 | 持久化订单状态机 | 后端交易 | 3 | P0 | ARCH-001、RISK-001 | ✅ 2026-09-01 完成：`quart/oms/` 持久化订单状态机（订单/回报/成交三表，状态只能由 ExecutionReport 推进）；回报与成交按幂等键去重、同事务入账（重复回报/重启不重复入账测试通过）；`list_active_orders` 重启恢复 + 成交派生持仓查询模型，已接线 Control API `GET /accounts/{id}/positions` |
 | UI-001 | 清除前端直读领域/文件 | 前端 + 后端平台 | 3 | P0 | API-001 | `frontend/` 只依赖展示适配器/API |
 | RESEARCH-002 | 新因子与组合优化 | 量化研究 | 3 | P1 | RESEARCH-001 | 候选通过独立 OOS、成本与容量门禁 |
 | BROKER-001 | PaperBroker 持久化与恢复 | 后端交易 | 4 | P1 | OMS-001 | 故障注入通过 |

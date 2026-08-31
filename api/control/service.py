@@ -6,9 +6,11 @@
 - 任务：`api.task_api.task_queue`（内存 + JOB-001 持久化镜像）
 - 制品：`api.artifacts_api.get_run`
 - 交易计划：`quart.manual_trading.TradingRepository`
+- 持仓：`quart.oms.OrderRepository`（成交账本派生的查询模型）
 - 健康：`BarStore` 数据新鲜度 + 最新数据快照 + 规则书版本
 
-订单/持仓/对账端点是合同占位：返回 503，等待 `OMS-001` 落地后接线。
+报单/撤单/对账端点是合同占位：返回 503，等待 `BROKER-001` 与
+对账流程落地后接线。
 """
 from __future__ import annotations
 
@@ -22,11 +24,13 @@ from api.control.dto import (
     HealthDTO,
     JobDTO,
     JobEventsDTO,
+    PositionsDTO,
     TradePlanDTO,
 )
 from api.control.errors import ApiError, ApiErrorCode
 
-OMS_PENDING = "等待 OMS-001（持久化订单状态机）落地后开放"
+BROKER_PENDING = "等待 BROKER-001（PaperBroker 持久化与恢复）落地后开放"
+RECON_PENDING = "等待对账流程（BROKER-001 收盘对账）落地后开放"
 
 
 class ControlServiceV1:
@@ -39,6 +43,7 @@ class ControlServiceV1:
         job_repo: object | None = None,
         artifacts_getter: Callable[[str], dict | None] | None = None,
         trading_repo: object | None = None,
+        order_repo: object | None = None,
         freshness_probe: Callable[[], int | None] | None = None,
         snapshot_probe: Callable[[], str | None] | None = None,
     ):
@@ -46,6 +51,7 @@ class ControlServiceV1:
         self._job_repo = job_repo
         self._artifacts_getter = artifacts_getter
         self._trading_repo = trading_repo
+        self._order_repo = order_repo
         self._freshness_probe = freshness_probe
         self._snapshot_probe = snapshot_probe
 
@@ -299,27 +305,39 @@ class ControlServiceV1:
             order_count=len(orders),
         )
 
-    # ---------------- 合同占位：等待 OMS-001 ----------------
+    # ---------------- positions（OMS-001 接线） ----------------
+
+    def get_positions(
+        self, params: dict[str, str], body: dict[str, Any], idempotency_key: str | None
+    ) -> PositionsDTO:
+        account_id = params["account_id"]
+        positions = self.order_repo.positions_from_fills(account_id)
+        return PositionsDTO(account_id=account_id, positions=positions)
+
+    @property
+    def order_repo(self):
+        if self._order_repo is None:
+            from quart.oms import OrderRepository
+
+            self._order_repo = OrderRepository()
+        return self._order_repo
+
+    # ---------------- 合同占位：等待 BROKER-001 / 对账 ----------------
 
     def create_order(
         self, params: dict[str, str], body: dict[str, Any], idempotency_key: str | None
     ) -> None:
-        raise ApiError(ApiErrorCode.SERVICE_UNAVAILABLE, OMS_PENDING)
+        raise ApiError(ApiErrorCode.SERVICE_UNAVAILABLE, BROKER_PENDING)
 
     def cancel_order(
         self, params: dict[str, str], body: dict[str, Any], idempotency_key: str | None
     ) -> None:
-        raise ApiError(ApiErrorCode.SERVICE_UNAVAILABLE, OMS_PENDING)
-
-    def get_positions(
-        self, params: dict[str, str], body: dict[str, Any], idempotency_key: str | None
-    ) -> None:
-        raise ApiError(ApiErrorCode.SERVICE_UNAVAILABLE, OMS_PENDING)
+        raise ApiError(ApiErrorCode.SERVICE_UNAVAILABLE, BROKER_PENDING)
 
     def create_reconciliation(
         self, params: dict[str, str], body: dict[str, Any], idempotency_key: str | None
     ) -> None:
-        raise ApiError(ApiErrorCode.SERVICE_UNAVAILABLE, OMS_PENDING)
+        raise ApiError(ApiErrorCode.SERVICE_UNAVAILABLE, RECON_PENDING)
 
 
-__all__ = ["OMS_PENDING", "ControlServiceV1"]
+__all__ = ["BROKER_PENDING", "RECON_PENDING", "ControlServiceV1"]

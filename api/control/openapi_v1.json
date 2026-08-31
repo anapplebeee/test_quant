@@ -158,6 +158,25 @@
         ],
         "type": "object"
       },
+      "PositionsDTO": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "type": "string"
+          },
+          "derived_from": {
+            "type": "string"
+          },
+          "positions": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "account_id",
+          "positions"
+        ],
+        "type": "object"
+      },
       "TradePlanDTO": {
         "additionalProperties": false,
         "properties": {
@@ -220,7 +239,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDTO"
+                  "$ref": "#/components/schemas/PositionsDTO"
                 }
               }
             },

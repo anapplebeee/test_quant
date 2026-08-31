@@ -96,6 +96,14 @@ class FakeTradingRepo:
         self.plans[plan_id]["status"] = "APPROVED"
 
 
+class FakeOrderRepo:
+    def __init__(self, positions=None):
+        self._positions = positions or {}
+
+    def positions_from_fills(self, account_id):
+        return dict(self._positions.get(account_id, {}))
+
+
 ARTIFACT_RUNS = {
     "run-1": {
         "run_id": "run-1",
@@ -123,6 +131,7 @@ def control(tmp_path):
         job_repo=repo,
         artifacts_getter=lambda run_id: ARTIFACT_RUNS.get(run_id),
         trading_repo=FakeTradingRepo(),
+        order_repo=FakeOrderRepo({"paper-main": {"600000.SH": 700}}),
         freshness_probe=lambda: 0,
         snapshot_probe=lambda: "snap-1",
     )
@@ -269,14 +278,22 @@ def test_approve_trade_plan(control):
     assert missing["status"] == 404
 
 
-# ---------------- OMS 占位：显式 503 ----------------
+# ---------------- 持仓（OMS-001 接线）与剩余占位 ----------------
 
 
-def test_oms_placeholders_return_503(control):
+def test_positions_from_oms_fills(control):
+    router, _ = control
+    resp = router.dispatch("GET", "/api/v1/accounts/paper-main/positions")
+    assert resp["status"] == 200
+    assert resp["data"]["account_id"] == "paper-main"
+    assert resp["data"]["positions"] == {"600000.SH": 700}
+    assert resp["data"]["derived_from"] == "oms_fills"
+
+
+def test_broker_placeholders_return_503(control):
     router, _ = control
     assert post(router, "/api/v1/orders", {"symbol": "600000.SH"})["status"] == 503
     assert post(router, "/api/v1/orders/ord-1/cancel", {})["status"] == 503
-    assert router.dispatch("GET", "/api/v1/accounts/main/positions")["status"] == 503
     assert post(router, "/api/v1/reconciliations", {})["status"] == 503
 
 
@@ -295,6 +312,7 @@ EXPECTED_DTO_FIELDS = {
         "plan_id", "status", "account_id", "signal_date",
         "intended_trade_date", "order_count",
     },
+    "PositionsDTO": {"account_id", "positions", "derived_from"},
 }
 
 

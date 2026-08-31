@@ -133,10 +133,10 @@ def _response_dto_of(handler: str) -> str:
         "job_events": "JobEventsDTO",
         "get_artifact": "ArtifactRunDTO",
         "approve_trade_plan": "TradePlanDTO",
-        "create_order": "ErrorDTO",      # 合同占位：等待 OMS-001 实现
-        "cancel_order": "ErrorDTO",      # 合同占位：等待 OMS-001 实现
-        "get_positions": "ErrorDTO",     # 合同占位：等待 OMS-001 实现
-        "create_reconciliation": "ErrorDTO",  # 合同占位：等待 OMS-001 实现
+        "get_positions": "PositionsDTO",
+        "create_order": "ErrorDTO",      # 合同占位：等待 BROKER-001 实现
+        "cancel_order": "ErrorDTO",      # 合同占位：等待 BROKER-001 实现
+        "create_reconciliation": "ErrorDTO",  # 合同占位：等待对账流程实现
     }
     return mapping[handler]
 

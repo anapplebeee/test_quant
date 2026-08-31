@@ -16,16 +16,19 @@ from api.control.dto import (
     HealthDTO,
     JobDTO,
     JobEventsDTO,
+    PositionsDTO,
     TradePlanDTO,
 )
 from api.control.errors import ApiError, ApiErrorCode
 from api.control.openapi import generate_openapi, write_openapi
 from api.control.router import ROUTES, ControlRouter, Route
-from api.control.service import ControlServiceV1
+from api.control.service import BROKER_PENDING, RECON_PENDING, ControlServiceV1
 
 __all__ = [
     "API_VERSION",
+    "BROKER_PENDING",
     "CONTRACT_DTOS",
+    "RECON_PENDING",
     "ROUTES",
     "ApiError",
     "ApiErrorCode",
@@ -36,6 +39,7 @@ __all__ = [
     "HealthDTO",
     "JobDTO",
     "JobEventsDTO",
+    "PositionsDTO",
     "Route",
     "TradePlanDTO",
     "generate_openapi",

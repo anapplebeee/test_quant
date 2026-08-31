@@ -136,6 +136,25 @@ class TradePlanDTO:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PositionsDTO:
+    """GET /api/v1/accounts/{account_id}/positions
+
+    由 OMS 成交账本推导的持仓查询模型（只读派生视图，不是账户权威源）。
+    """
+
+    account_id: str
+    positions: dict[str, int]
+    derived_from: str = "oms_fills"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "account_id": self.account_id,
+            "positions": dict(self.positions),
+            "derived_from": self.derived_from,
+        }
+
+
 #: 合同内全部 DTO（供 OpenAPI 生成与合同测试枚举）
 CONTRACT_DTOS: tuple[type, ...] = (
     ErrorDTO,
@@ -144,6 +163,7 @@ CONTRACT_DTOS: tuple[type, ...] = (
     JobEventsDTO,
     ArtifactRunDTO,
     TradePlanDTO,
+    PositionsDTO,
 )
 
 __all__ = [
@@ -154,5 +174,6 @@ __all__ = [
     "HealthDTO",
     "JobDTO",
     "JobEventsDTO",
+    "PositionsDTO",
     "TradePlanDTO",
 ]
