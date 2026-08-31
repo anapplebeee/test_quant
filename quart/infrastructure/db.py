@@ -55,6 +55,8 @@ class Database:
         self.busy_timeout_ms = busy_timeout_ms
         # 单进程内 migration 互斥（SQLite 写锁本身也保证，此处防重入）
         self._migration_lock = threading.Lock()
+        # WAL 模式只需初始化一次（并发下避免反复切换持锁）
+        self._wal_initialized = False
 
     def connect(self) -> sqlite3.Connection:
         """创建并配置一个连接（WAL + busy timeout + foreign keys）。"""
@@ -66,9 +68,19 @@ class Database:
         return conn
 
     def _enable_wal(self) -> None:
-        """开启 WAL 模式（幂等）。journal_mode 是持久化设置，只需设一次。"""
-        with self.connect() as conn:
-            conn.execute("PRAGMA journal_mode = WAL")
+        """开启 WAL 模式（幂等）。journal_mode 是持久化设置，只需设一次。
+
+        用实例标志避免并发下每次都执行 WAL 切换（WAL 切换可能持锁，
+        导致并发 apply 偶发 'database is locked'）。
+        """
+        if self._wal_initialized:
+            return
+        with self._migration_lock:
+            if self._wal_initialized:
+                return
+            with self.connect() as conn:
+                conn.execute("PRAGMA journal_mode = WAL")
+            self._wal_initialized = True
 
     # ---------------- Migration ----------------
 
@@ -108,8 +120,8 @@ class Database:
         """向下回滚到指定版本（需 migration 定义 down）。返回回滚的版本列表。"""
         self._enable_wal()
         rolled: list[int] = []
-        current = self.current_version()
         with self._migration_lock:
+            current = self.current_version()
             for m in sorted(migrations, key=lambda m: m.version, reverse=True):
                 if m.version <= to_version or m.version > current:
                     continue

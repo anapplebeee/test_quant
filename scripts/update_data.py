@@ -98,6 +98,39 @@ def main() -> None:
     if stats["failed_symbols"]:
         console.print(f"[yellow]failed: {stats['failed_symbols'][:20]}{'...' if len(stats['failed_symbols'])>20 else ''}[/yellow]")
 
+    # 数据更新后自动构建内容哈希快照（DATA-001）。
+    # 协调文档 10.1 Research Release 要求"固定数据快照"——快照必须是
+    # 数据更新的自动产出，而非手动跑 CLI，否则正式研究无法追溯数据版本。
+    try:
+        from quart.data import snapshot as snap
+
+        datasets = ["daily", "index"]
+        if args.universe in ("all", "mainboard"):
+            datasets.append("universe")
+        snapshot_ids = {}
+        for ds in datasets:
+            try:
+                manifest = snap.build_snapshot(
+                    ds, quality_status="updated",
+                    pit_metadata=snap.collect_pit_metadata(),
+                )
+                snap.save_manifest(manifest)
+                snapshot_ids[ds] = manifest.snapshot_id
+            except FileNotFoundError as exc:
+                logger.warning("snapshot skip {}: {}", ds, exc)
+        # 记录快照 ID 到更新状态，便于追溯"这次数据更新对应哪个快照"
+        status["snapshot_ids"] = snapshot_ids
+        temp_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path.replace(status_path)
+        if snapshot_ids:
+            console.print(
+                "[green]snapshot built[/green] "
+                + ", ".join(f"{k}={v}" for k, v in snapshot_ids.items())
+            )
+    except Exception as exc:
+        # 快照构建失败不应阻断数据更新（数据已落盘），只告警
+        logger.warning("snapshot build failed (data update ok): {}", exc)
+
 
 if __name__ == "__main__":
     main()
