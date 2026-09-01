@@ -364,6 +364,7 @@ class BrokerOrder:
             OrderStatus.DENIED,
             OrderStatus.FILLED,
             OrderStatus.CANCELED,
+            OrderStatus.EXPIRED,
             OrderStatus.REJECTED,
         }
 

@@ -23,14 +23,21 @@ _ALLOWED_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
             OrderStatus.PARTIALLY_FILLED,
             OrderStatus.FILLED,
             OrderStatus.CANCELED,
+            OrderStatus.EXPIRED,
             OrderStatus.REJECTED,
         }
     ),
     OrderStatus.PARTIALLY_FILLED: frozenset(
-        {OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED, OrderStatus.CANCELED}
+        {
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.FILLED,
+            OrderStatus.CANCELED,
+            OrderStatus.EXPIRED,
+        }
     ),
     OrderStatus.FILLED: frozenset(),
     OrderStatus.CANCELED: frozenset(),
+    OrderStatus.EXPIRED: frozenset(),
     OrderStatus.REJECTED: frozenset(),
     OrderStatus.DENIED: frozenset(),
 }

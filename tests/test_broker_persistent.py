@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from quart.broker.models import BrokerOrderRequest
@@ -188,3 +190,54 @@ def test_cancel_and_cancel_idempotency(db_path):
     broker.apply_fill(filled.client_order_id, 1000, 10.0, broker_fill_id="F-x")
     with pytest.raises(ValueError):
         broker.cancel_order(filled.client_order_id)
+
+
+# ---------------- 跨日剩余委托 ----------------
+
+
+def test_expire_prior_day_submitted_and_partial_orders_without_replaying_risk(db_path):
+    broker = make_broker(db_path)
+    previous_day = datetime.fromisoformat("2026-08-31T01:30:00+00:00")
+    partial = broker.submit_order(BrokerOrderRequest(
+        symbol="600000.SH", side="BUY", quantity=1_000,
+        client_order_id="prior-partial", business_time=previous_day,
+    ))
+    broker.apply_fill(
+        partial.client_order_id, 400, 10.0,
+        trade_date="2026-08-31", trade_time="10:00:00", broker_fill_id="prior-fill",
+    )
+    submitted = broker.submit_order(BrokerOrderRequest(
+        symbol="600000.SH", side="BUY", quantity=100,
+        client_order_id="prior-submitted", business_time=previous_day,
+    ))
+    same_day = broker.submit_order(BrokerOrderRequest(
+        symbol="600000.SH", side="BUY", quantity=100,
+        client_order_id="same-day", business_time=datetime.fromisoformat("2026-09-01T01:30:00+00:00"),
+    ))
+
+    expired = broker.expire_orders("2026-09-01")
+
+    assert {order.client_order_id for order in expired} == {
+        partial.client_order_id, submitted.client_order_id,
+    }
+    carried = broker.get_order(partial.client_order_id)
+    assert carried is not None
+    assert carried.status is OrderStatus.EXPIRED
+    assert carried.remaining_quantity == 600
+    assert carried.status_reason and "重新评估" in carried.status_reason
+    assert broker.get_order(same_day.client_order_id).status is OrderStatus.SUBMITTED  # type: ignore[union-attr]
+    assert broker.active_orders() == [same_day]
+    assert broker.expire_orders("2026-09-01") == []  # 到期任务幂等
+
+
+def test_expiry_does_not_guess_a_submitting_order_is_safe_to_close(db_path):
+    broker = make_broker(db_path, PaperFaultConfig(submit_outcome="drop_ack"))
+    prior = broker.submit_order(BrokerOrderRequest(
+        symbol="600000.SH", side="BUY", quantity=100,
+        client_order_id="prior-uncertain",
+        business_time=datetime.fromisoformat("2026-08-31T01:30:00+00:00"),
+    ))
+    assert prior.status is OrderStatus.SUBMITTING
+
+    assert broker.expire_orders("2026-09-01") == []
+    assert broker.get_order(prior.client_order_id).status is OrderStatus.SUBMITTING  # type: ignore[union-attr]

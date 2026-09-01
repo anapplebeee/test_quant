@@ -84,7 +84,13 @@ class PaperBrokerAdapter:
 
     def cancel_order(self, broker_order_id: str) -> BrokerOrder:
         order = self._required_domain_order(broker_order_id)
-        if order.status in (OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.DENIED):
+        if order.status in (
+            OrderStatus.FILLED,
+            OrderStatus.CANCELED,
+            OrderStatus.EXPIRED,
+            OrderStatus.REJECTED,
+            OrderStatus.DENIED,
+        ):
             raise ValueError(f"订单当前状态不可撤销: {order.status}")
         updated = self._apply_report(
             order,

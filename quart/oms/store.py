@@ -21,14 +21,14 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from quart.domain.enums import OrderStatus
 from quart.domain.executions import ExecutionReport, Fill
 from quart.domain.ids import stable_id
 from quart.domain.orders import BrokerOrder
-from quart.domain.state_machine import apply_execution_report
+from quart.domain.state_machine import apply_execution_report, make_execution_report
 from quart.infrastructure.db import Database
 from quart.observability.structured import log_event
 
@@ -40,6 +40,15 @@ def _parse_dt(value: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt
+
+
+def _parse_trading_date(value: date | str) -> date:
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise ValueError("trading_date 必须为 YYYY-MM-DD") from exc
 
 
 class OrderRepository:
@@ -125,7 +134,7 @@ class OrderRepository:
         if only_active:
             terminal = ", ".join(f"'{s.value}'" for s in (
                 OrderStatus.FILLED, OrderStatus.CANCELED,
-                OrderStatus.REJECTED, OrderStatus.DENIED,
+                OrderStatus.EXPIRED, OrderStatus.REJECTED, OrderStatus.DENIED,
             ))
             clauses.append(f"status NOT IN ({terminal})")
         if clauses:
@@ -139,6 +148,38 @@ class OrderRepository:
     def list_active_orders(self, account_id: str | None = None) -> list[BrokerOrder]:
         """重启恢复入口：全部非终态订单。"""
         return self.list_orders(account_id=account_id, only_active=True, limit=1000)
+
+    def expire_orders(
+        self,
+        trading_date: date | str,
+        *,
+        account_id: str | None = None,
+    ) -> list[BrokerOrder]:
+        """使上一交易日遗留的已送达订单到期，并保留可审计的剩余数量。
+
+        仅处理 ``SUBMITTED`` / ``PARTIALLY_FILLED``：``SUBMITTING`` 代表券商
+        确认未知，必须先查询券商，绝不由定时任务猜测为到期。到期不自动重挂；
+        次日须重新经过信号、规则与风控，避免将昨日风险决策偷渡到今日。
+        """
+        cutoff = _parse_trading_date(trading_date)
+        expired: list[BrokerOrder] = []
+        for order in self.list_active_orders(account_id=account_id):
+            if order.business_time.date() >= cutoff:
+                continue
+            if order.status not in {OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED}:
+                continue
+            expired.append(self.apply_report(make_execution_report(
+                order,
+                status=OrderStatus.EXPIRED,
+                source="OMS_EXPIRY",
+                idempotency_key=f"{order.idempotency_key}:expire:{cutoff.isoformat()}",
+                broker_order_id=order.broker_order_id,
+                business_time=datetime.combine(cutoff, datetime.min.time(), tzinfo=UTC),
+                reason=(
+                    f"EOD 到期：剩余 {order.remaining_quantity} 股必须于下一交易日重新评估"
+                ),
+            )))
+        return expired
 
     # ---------------- 回报与成交入账 ----------------
 

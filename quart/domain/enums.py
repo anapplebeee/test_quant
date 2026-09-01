@@ -36,6 +36,7 @@ class OrderStatus(StrEnum):
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
     FILLED = "FILLED"
     CANCELED = "CANCELED"
+    EXPIRED = "EXPIRED"
     REJECTED = "REJECTED"
 
     @classmethod
@@ -74,6 +75,7 @@ TERMINAL_ORDER_STATUSES = frozenset(
         OrderStatus.DENIED,
         OrderStatus.FILLED,
         OrderStatus.CANCELED,
+        OrderStatus.EXPIRED,
         OrderStatus.REJECTED,
     }
 )

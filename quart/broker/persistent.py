@@ -236,6 +236,14 @@ class PersistentPaperBroker:
             o for o in self.oms.list_active_orders() if o.account_id == self.account_id
         ]
 
+    def expire_orders(self, trading_date: date | str) -> list[DomainBrokerOrder]:
+        """交易日切换时将遗留已送达委托显式标为到期。
+
+        ``SUBMITTING`` 的券商状态尚不确定，仍由 ``active_orders`` 暴露给恢复
+        流程先查询；它不会被这里静默到期。
+        """
+        return self.oms.expire_orders(trading_date, account_id=self.account_id)
+
     def positions(self) -> dict[str, int]:
         """成交账本派生的持仓查询模型（不是账户权威源）。"""
         return self.oms.positions_from_fills(self.account_id)
