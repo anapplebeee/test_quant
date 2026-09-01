@@ -9,6 +9,7 @@ from rich.table import Table
 
 from quart.config import PROJECT_ROOT, load_config
 from quart.data.market import MarketData
+from quart.data.quality_gate import require_quality_gate
 from quart.data.store import BarStore, drop_incomplete_today
 from quart.data.universe import filter_for_simulation
 from quart.execution import (
@@ -216,6 +217,12 @@ def run_daily(
         exclude_chinext=data_cfg.get("exclude_chinext", True),
         exclude_st=data_cfg.get("exclude_st", True),
         min_list_days=int(data_cfg.get("min_list_days", 0)),
+    )
+    # 每日信号会生成待执行交易计划，质量失败必须 fail-closed，而不是只打印扫描报告。
+    require_quality_gate(
+        bars,
+        bench,
+        as_of=pd.Timestamp.now().normalize(),
     )
 
     md = MarketData.from_bars(bars, benchmark=bench)

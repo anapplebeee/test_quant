@@ -114,13 +114,12 @@ def main() -> None:
 
     cfg = load_config()
     store = BarStore()
-    # 数据质量阻断：隔离清单中的符号（物理不可能跳变 = 复权/源数据坏）不进入研究管线
+    # 门禁必须看到原始输入；formal 不能靠“先排除 blocklist”绕过质量失败。
     from quart.data.quality import load_blocklist
+    from quart.data.quality_gate import evaluate_quality_gate, require_quality_gate, save_quality_gate
 
     blocked = load_blocklist()
-    if blocked:
-        console.print(f"[yellow]quality blocklist: excluding {len(blocked)} symbols[/yellow]")
-    bars = store.load(start=args.start, end=args.end, exclude_symbols=sorted(blocked))
+    bars = store.load(start=args.start, end=args.end)
     bench = store.load_benchmark(cfg["benchmark"])
     bench = bench[(bench["date"] >= args.start) & (args.end is None or bench["date"] <= args.end)]
     if bars.empty:
@@ -145,6 +144,33 @@ def main() -> None:
         if bars.empty:
             raise SystemExit("PIT 股票池在回测区间内为空")
         universe_meta["pit_evidence"] = pit_evidence.to_dict()
+
+    quality_as_of = args.end or str(pd.Timestamp(bars["date"].max()).date())
+    try:
+        if args.research_mode == "formal":
+            quality_gate = require_quality_gate(
+                bars, bench, as_of=quality_as_of, blocked_symbols=blocked
+            )
+        else:
+            quality_gate = evaluate_quality_gate(
+                bars, bench, as_of=quality_as_of, blocked_symbols=blocked
+            )
+            save_quality_gate(quality_gate)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    universe_meta["quality_gate"] = quality_gate.to_dict()
+    universe_meta["quality"] = (
+        "FORMAL_PASS" if args.research_mode == "formal" else
+        ("EXPLORATORY_PASS" if quality_gate.passed else "DEGRADED")
+    )
+    if not quality_gate.passed:
+        console.print(
+            f"[yellow]exploratory quality degraded: {len(quality_gate.issues)} issue(s); "
+            "artifact 已标记 DEGRADED[/yellow]"
+        )
+    if blocked:
+        console.print(f"[yellow]quality blocklist: excluding {len(blocked)} symbols[/yellow]")
+        bars = bars[~bars["symbol"].astype(str).str.zfill(6).isin({str(s).zfill(6) for s in blocked})]
 
     data_cfg = cfg.get("data", {})
     bars = filter_for_simulation(

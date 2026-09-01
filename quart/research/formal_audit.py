@@ -29,6 +29,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pandas as pd
 from loguru import logger
 
 from quart.config import PROJECT_ROOT, load_config
@@ -72,6 +73,7 @@ def run_single_backtest(
     from quart.data.benchmark import equal_weight_benchmark
     from quart.data.market import MarketData
     from quart.data.quality import load_blocklist
+    from quart.data.quality_gate import require_quality_gate
     from quart.data.store import BarStore
     from quart.data.universe import filter_for_simulation
     from quart.execution.fees import Fees
@@ -80,11 +82,22 @@ def run_single_backtest(
     cfg = load_config()
     store = BarStore()
     blocked = load_blocklist()
-    bars = store.load(start=start, end=end, exclude_symbols=sorted(blocked))
+    # 准入审计属于 formal 研究，不能通过预先排除 blocklist 绕过质量失败。
+    bars = store.load(start=start, end=end)
     bench = store.load_benchmark(cfg["benchmark"])
     bench = bench[(bench["date"] >= start) & (end is None or bench["date"] <= end)]
     if bars.empty:
         raise SystemExit("本地数据为空，请先运行 scripts/update_data.py")
+    try:
+        require_quality_gate(
+            bars,
+            bench,
+            as_of=end or str(pd.Timestamp(bars["date"].max()).date()),
+            blocked_symbols=blocked,
+        )
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    bars = bars[~bars["symbol"].astype(str).str.zfill(6).isin({str(s).zfill(6) for s in blocked})]
 
     data_cfg = cfg.get("data", {})
     bars = filter_for_simulation(

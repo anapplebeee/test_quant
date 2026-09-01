@@ -140,6 +140,31 @@ def main() -> None:
             raise SystemExit("PIT 股票池在回测区间内为空")
         universe_meta["pit_evidence"] = pit_evidence.to_dict()
 
+    from quart.data.quality import load_blocklist
+    from quart.data.quality_gate import evaluate_quality_gate, require_quality_gate, save_quality_gate
+
+    blocked = load_blocklist()
+    quality_as_of = args.end or str(pd.Timestamp(bars["date"].max()).date())
+    try:
+        if args.research_mode == "formal":
+            quality_gate = require_quality_gate(
+                bars, bench, as_of=quality_as_of, blocked_symbols=blocked
+            )
+        else:
+            quality_gate = evaluate_quality_gate(
+                bars, bench, as_of=quality_as_of, blocked_symbols=blocked
+            )
+            save_quality_gate(quality_gate)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    universe_meta["quality_gate"] = quality_gate.to_dict()
+    universe_meta["quality"] = (
+        "FORMAL_PASS" if args.research_mode == "formal" else
+        ("EXPLORATORY_PASS" if quality_gate.passed else "DEGRADED")
+    )
+    if blocked:
+        bars = bars[~bars["symbol"].astype(str).str.zfill(6).isin({str(s).zfill(6) for s in blocked})]
+
     dc = cfg.get("data", {})
     bars = filter_for_simulation(
         bars,

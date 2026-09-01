@@ -43,6 +43,28 @@ def _freshness_text(stats: dict) -> str:
     return text
 
 
+def _quality_gate_text() -> str:
+    """显示最近一次正式/信号 Preflight，避免质量状态只藏在日志里。"""
+    from quart.data.quality_gate import load_quality_gate
+
+    status = load_quality_gate()
+    if status is None:
+        return "> ⚠️ **质量门禁**：尚无运行记录。正式回测或每日信号将在启动前执行 Preflight。"
+    if status.get("passed"):
+        meta = status.get("metadata") or {}
+        return (
+            "> ✅ **质量门禁通过**："
+            f"{meta.get('start', '?')} ~ {meta.get('end', '?')}，"
+            f"{meta.get('symbols', 0):,} 只股票 / {meta.get('rows', 0):,} 行。"
+        )
+    problems = status.get("issues") or []
+    detail = "；".join(
+        f"`{item.get('rule_id', '?')}` {item.get('message', '')}"
+        for item in problems[:3]
+    ) or "未解析到问题明细"
+    return f"> ❌ **质量门禁阻断**：{detail}。请在「🧰 操作中心 → 数据治理」处理后重试。"
+
+
 def render():
     """渲染数据总览 Tab"""
     with gr.Tab("🗃️ 数据总览"):
@@ -148,6 +170,8 @@ def render():
             m5 = gr.HTML(metric_card("最新日覆盖", f"{stats.get('latest_coverage', 0):.1%}", "orange"))
         board_md = gr.Markdown(f"> **指数板块覆盖**：{_board_text(stats)}（明细见下方表格）")
         freshness_md = gr.Markdown(_freshness_text(stats))
+        quality_gate_md = gr.Markdown(_quality_gate_text())
+        gr.Timer(60).tick(_quality_gate_text, outputs=[quality_gate_md])
 
         def _refresh_overview():
             s = get_stock_stats()
