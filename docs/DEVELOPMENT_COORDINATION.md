@@ -313,7 +313,7 @@ git diff --check
 | RESEARCH-002 | 新因子与组合优化 | 量化研究 | 3 | P1 | RESEARCH-001 | 候选通过独立 OOS、成本与容量门禁 |
 | BROKER-001 | PaperBroker 持久化与恢复 | 后端交易 | 4 | P1 | OMS-001 | ✅ 2026-09-01 完成：`quart/broker/persistent.py` `PersistentPaperBroker` 以 OMS 为单一状态源（订单/回报/成交全部落库，重启直接读库恢复）；报单/成交/撤单幂等，重复回报不重复入账；`PaperFaultConfig` 故障注入（reject / drop_ack）通过，drop_ack 恢复先按 `client_order_id` 查询再补发回报 |
 | OBS-001 | 结构化日志与核心指标 | 后端平台 | 3-4 | P1 | JOB-001、OMS-001 | ✅ 2026-09-01 完成：`quart/observability/` 结构化日志（§13.2 关联字段全量、JSONL 落盘、`trace_context` 链路绑定）+ 核心指标（`obs_metrics` v4 表 + 从 jobs/oms/risk 表派生的排队/运行时长、失败率、委托拒绝率、成交率、风控拒绝与状态切换）；订单状态推进与 Job 生命周期事件化，job/order 全链路可按字段检索（reconcile 事件随对账能力落地接入） |
-| QA-001 | Paper E2E 与故障演练 | QA/交易运维 | 4 | P0 | UI-001、BROKER-001、OBS-001 | T+1、重启、断线、重复回报和对账通过 |
+| QA-001 | Paper E2E 与故障演练 | QA/交易运维 | 4 | P0 | UI-001、BROKER-001、OBS-001 | ✅ 2026-09-01 完成：`tests/test_paper_e2e_fault_drill.py` 15 个演练用例把风控/OMS/Paper/T+1 账本/对账/OBS 串成端到端链路——T+1 结算（当日不可卖→次日可卖→卖出回路）、drop_ack 断线恢复（先查询再补发、重试不重复发单）、reject 终态落库、Kill Switch（HALTED 拒新单/允许撤单/RECOVERY 复核后恢复）、重复回报两层幂等、跨进程重启恢复（在途订单+账本持久+断点续传不重复入账）、对账预览→确认覆盖→复核一致、OBS 派生指标与 §13.2 字段可检索；演练暴露并修复缺口：`FillInput.from_domain_fill` 幂等键兜底（否则 OMS 派生成交重复回报无法被账本拦截） |
 | BROKER-002 | 首个真实券商灰度 | 后端交易 + 交易负责人 | 5 | P1 | QA-001 | 先查询对账，再小资金报单 |
 
 ## 13. 完成定义

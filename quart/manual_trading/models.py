@@ -163,7 +163,8 @@ class FillInput:
     def from_domain_fill(cls, fill: DomainFill) -> FillInput:
         """领域成交到现有 SQLite 账本输入的兼容转换。"""
         business_time = fill.business_time.astimezone(SHANGHAI_TZ)
-        planned_order_id = int(fill.planned_order_id) if (fill.planned_order_id or "").isdigit() else None
+        planned_raw = fill.planned_order_id or ""
+        planned_order_id = int(planned_raw) if planned_raw.isdigit() else None
         return cls(
             symbol=fill.symbol,
             side=fill.side.value,
@@ -172,7 +173,9 @@ class FillInput:
             trade_date=business_time.date().isoformat(),
             trade_time=business_time.strftime("%H:%M:%S"),
             planned_order_id=planned_order_id,
-            broker_fill_id=fill.broker_fill_id,
+            # 幂等兜底：OMS 派生的成交没有券商成交编号时，用稳定幂等键
+            # 充当账本去重键（QA-001 演练发现：否则重复回报无法被账本拦截）。
+            broker_fill_id=fill.broker_fill_id or fill.idempotency_key,
             commission=float(fill.commission),
             stamp_tax=float(fill.stamp_tax),
             transfer_fee=float(fill.transfer_fee),
