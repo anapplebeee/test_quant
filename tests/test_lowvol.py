@@ -168,6 +168,55 @@ def test_event_only_candidate_uses_event_score_without_changing_default():
     pd.testing.assert_frame_equal(candidate.composite, candidate.event_crowding_score)
 
 
+def test_event_crowding_liq_switch_uses_capacity_adjacent_factor():
+    """容量化开关：启用时事件拥挤分取自 crowding_liq20_neg，而非原始拥挤。
+
+    构造 A/B 两股：A 成交额恒为 1e8、B 恒为 1e6（ADV 差距大），使容量化版
+    （拥挤度 ÷ ADV 分位）对 A 的惩罚远轻于 B。若用原始拥挤（无流动性分量），
+    A/B 因成交额倍数差异不大、拥挤分接近，选股结果与容量化版不同。
+    """
+    dates = pd.date_range("2024-01-01", periods=80)
+    rng = np.random.default_rng(7)
+
+    def path(salt, vol):
+        rets = rng.normal(0.0002, vol, size=80)
+        return (1 + rets).cumprod() * 10
+
+    closes = pd.DataFrame({"A": path(1, 0.01), "B": path(2, 0.01)}, index=dates)
+    opens = closes.shift(1).fillna(closes.iloc[0])
+    frames = []
+    for s, amount in (("A", 1e8), ("B", 1e6)):
+        frames.append(pd.DataFrame({
+            "date": dates, "symbol": s, "open": opens[s], "high": np.maximum(opens[s], closes[s]) * 1.005,
+            "low": np.minimum(opens[s], closes[s]) * 0.995, "close": closes[s],
+            "volume": 1e6, "amount": amount,
+        }))
+    bars = pd.concat(frames, ignore_index=True)
+    md = MarketData.from_bars(bars)
+
+    base = LowVolCompositeStrategy(
+        event_crowding_only=True, event_crowding_liq=False,
+        top_k=1, rebalance_days=1, min_avg_amount=None,
+        use_regime_filter=False, max_weight_pct=1.0,
+    )
+    base.prepare(md)
+
+    liq = LowVolCompositeStrategy(
+        event_crowding_only=True, event_crowding_liq=True,
+        top_k=1, rebalance_days=1, min_avg_amount=None,
+        use_regime_filter=False, max_weight_pct=1.0,
+    )
+    liq.prepare(md)
+
+    # 容量化开启后，高流动性 A 应获得更高（更负向惩罚更轻）的分，
+    # 使最终选股从低流动性 B 偏向 A。
+    assert liq.event_crowding_score is not None
+    i = len(md.dates) - 2
+    a_liq = liq.event_crowding_score.iloc[i].get("A")
+    b_liq = liq.event_crowding_score.iloc[i].get("B")
+    assert a_liq > b_liq, f"容量化拥挤应偏好高流动性 A（A={a_liq}, B={b_liq}）"
+
+
 def test_returns_empty_before_warmup():
     md = make_md()
     strat = LowVolCompositeStrategy(top_k=1, rebalance_days=5, use_regime_filter=False)

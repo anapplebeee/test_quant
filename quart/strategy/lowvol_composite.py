@@ -70,6 +70,7 @@ class LowVolCompositeStrategy(BaseStrategy):
         "value_weight": (float, 0.0, "价值因子权重（z(1/PE_TTM)，仅盈利为正）"),
         "event_crowding_weight": (float, 0.0, "涨停/放量追涨拥挤因子权重（研究，0=关闭）"),
         "event_crowding_only": (bool, False, "仅使用事件拥挤分选股（研究候选）"),
+        "event_crowding_liq": (bool, False, "拥挤度使用容量化版本（÷ADV分位，Top篮子可投资化）"),
         "event_orthogonalize": (bool, True, "事件因子是否对低波复合分截面正交化"),
         "event_max_limit_hits_20d": (
             (int, type(None)), None, "近20日允许的最多涨停次数（研究，None=关闭）"
@@ -287,6 +288,7 @@ class LowVolCompositeStrategy(BaseStrategy):
         self.value_weight = max(0.0, float(p.get("value_weight", 0.0)))
         self.event_crowding_weight = max(0.0, float(p.get("event_crowding_weight", 0.0)))
         self.event_crowding_only = bool(p.get("event_crowding_only", False))
+        self.event_crowding_liq = bool(p.get("event_crowding_liq", False))
         self.event_orthogonalize = bool(p.get("event_orthogonalize", True))
         event_max_hits = p.get("event_max_limit_hits_20d")
         self.event_max_limit_hits_20d = (
@@ -375,7 +377,14 @@ class LowVolCompositeStrategy(BaseStrategy):
 
             event_panels = limit_event_panels(md)
             if self.event_crowding_weight > 0 or self.event_crowding_only:
-                raw_event = event_panels["speculative_crowding20_neg"]
+                # 容量化版本（÷ADV 横截面分位）让 Top 篮子自动偏向高流动性股票，
+                # 解决原始拥挤因子选出的全是无量僵尸股（组合端无法成交）的问题。
+                key = (
+                    "crowding_liq20_neg"
+                    if self.event_crowding_liq and "crowding_liq20_neg" in event_panels
+                    else "speculative_crowding20_neg"
+                )
+                raw_event = event_panels[key]
                 event_score = self._z(raw_event.reindex_like(comp))
                 if self.event_orthogonalize and not self.event_crowding_only:
                     event_score = neutralize_against(event_score, comp)
