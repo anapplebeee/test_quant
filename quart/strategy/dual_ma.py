@@ -3,11 +3,21 @@ from __future__ import annotations
 import pandas as pd
 
 from quart.data.market import MarketData
+from quart.execution.constraints import FLAT
 from quart.strategy.base import BaseStrategy
 
 
 class DualMAStrategy(BaseStrategy):
-    """Long symbols whose fast SMA is above slow SMA; equal weight, capped count."""
+    """快线上穿慢线（金叉）趋势跟踪；刚确认金叉优先、超买剔除、无标的即清仓。
+
+    修复记录（RESEARCH 2026-09 核查）：
+    - 旧版在无金叉标的时返回 ``{}`` —— 引擎语义是"保持持仓"（见
+      ``BaseStrategy`` 契约），导致跌破均线的标的被死扛，贡献 -98% 级回撤。
+      现在明确返回 ``{FLAT: 1.0}`` 清仓。
+    - 旧版按 ``fast/slow - 1`` 降序"专挑最超买"的 top-K，等价于高位追涨。
+      现在按金叉新鲜度升序（刚上穿优先），并剔除乖离超过 ``max_overshoot_pct``
+      的标的。
+    """
 
     name = "dual_ma"
     required_history_days = 21
@@ -17,7 +27,8 @@ class DualMAStrategy(BaseStrategy):
         "slow_days": (int, 20, "慢线均线窗口"),
         "max_names": (int, 10, "最大持仓数"),
         "max_weight_pct": (float, 0.15, "单票权重上限"),
-        "rebalance_days": (int, 1, "调仓周期（交易日）"),
+        "rebalance_days": (int, 5, "调仓周期（交易日）"),
+        "max_overshoot_pct": (float, 0.15, "快线相对慢线最大乖离（超过视为超买剔除）"),
     }
 
     def __init__(self, **params):
@@ -31,7 +42,10 @@ class DualMAStrategy(BaseStrategy):
         self.slow = int(p.get("slow_days", 20))
         self.max_names = int(p.get("max_names", 10))
         self.max_weight = float(p.get("max_weight_pct", 0.15))
-        self.rebalance_days = int(p.get("rebalance_days", 1))
+        self.rebalance_days = int(p.get("rebalance_days", 5))
+        self.max_overshoot = float(p.get("max_overshoot_pct", 0.15))
+        if not 0 < self.max_overshoot < 1:
+            raise ValueError("max_overshoot_pct 必须在 (0, 1)")
         self.warmup = self.slow + 1
         self.required_history_days = self.warmup
         self.fast_ma = md.closes.rolling(self.fast).mean()
@@ -54,10 +68,19 @@ class DualMAStrategy(BaseStrategy):
             and (pd.isna(volume_row.get(sym)) is False and volume_row.get(sym, 0) > 0)
         ]
         if not active:
-            return {}
-        active = sorted(active, key=lambda s: fast_row[s] / slow_row[s] - 1, reverse=True)[: self.max_names]
-        weight = min(1.0 / len(active), self.max_weight)
-        return {sym: weight for sym in active}
+            # 无金叉标的 → 明确清仓；返回 {} 会被引擎理解为"保持持仓"而死扛
+            return {FLAT: 1.0}
+        overshoot = pd.Series(
+            {sym: fast_row[sym] / slow_row[sym] - 1.0 for sym in active}
+        )
+        keep = overshoot[overshoot <= self.max_overshoot].sort_values()
+        if keep.empty:
+            # 全部标的都超买 → 不追高，清仓等待回踩
+            return {FLAT: 1.0}
+        # 金叉新鲜度排序：刚上穿（乖离最小）优先，而非专挑最超买
+        ranked = list(keep.index[: self.max_names])
+        weight = min(1.0 / len(ranked), self.max_weight)
+        return {sym: weight for sym in ranked}
 
     def state_dict(self):
         return {"next_rebalance": int(self._next_rebalance)}
