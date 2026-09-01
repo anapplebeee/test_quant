@@ -137,6 +137,10 @@ def test_parallel_matches_serial_output(monkeypatch, tmp_path):
     monkeypatch.setattr(updater, "load_config",
                         lambda: {"data": {"adjust": "qfq", "sleep_seconds": 0.0}})
     monkeypatch.setattr(updater, "read_hfq_pins", lambda: set())
+    # 隔离全局治理阻断清单：测试用 600000+i 硬编码符号，可能与真实清单冲突
+    import quart.data.quality as quality_mod
+
+    monkeypatch.setattr(quality_mod, "load_blocklist", lambda: set())
 
     symbols = [f"{600000 + i:06d}" for i in range(12)]
 
@@ -193,6 +197,10 @@ def test_parallel_with_dedup_symbols(monkeypatch, tmp_path):
     monkeypatch.setattr(updater, "load_config",
                         lambda: {"data": {"adjust": "qfq", "sleep_seconds": 0.0}})
     monkeypatch.setattr(updater, "read_hfq_pins", lambda: set())
+    # 隔离全局治理阻断清单：600001 等测试符号可能在真实清单中
+    import quart.data.quality as quality_mod
+
+    monkeypatch.setattr(quality_mod, "load_blocklist", lambda: set())
 
     import quart.data.store as store_mod
 
