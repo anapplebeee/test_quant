@@ -160,21 +160,35 @@ class PersistentPaperBroker:
         trade_time: str | None = None,
         broker_fill_id: str | None = None,
     ) -> DomainBrokerOrder:
-        """按回报入账成交；同 `broker_fill_id` 重复回报幂等不重复入账。"""
+        """按回报入账成交；同 `broker_fill_id` 重复回报幂等不重复入账。
+
+        券商未返回成交编号时（`broker_fill_id` 为空），用"订单号 + 累计成交量
+        + 本笔量价 + 成交时间"派生稳定幂等键：同一笔回报重放键不变→幂等生效，
+        后续不同累计量的成交键不同→不会被误判为重放。
+        """
         order = self._required_order(client_order_id)
-        fill_key = broker_fill_id or new_id("paper_fill")
+        if quantity <= 0 or price <= 0:
+            raise ValueError("成交数量和价格必须为正")
+        new_filled = order.filled_quantity + quantity
+        if broker_fill_id is not None:
+            fill_key = broker_fill_id
+        else:
+            # 内容键不含累计量：重放时累计量已变，含它会导致键漂移而幂等失效。
+            # 代价是"同订单两笔量价到秒完全相同的成交"会被判为重放——这种
+            # 情形无法与重放区分，宁可报错让调用方显式补 broker_fill_id。
+            fill_time = f"{trade_date or ''}T{trade_time or ''}"
+            fill_key = f"auto:{quantity}:{price}:{fill_time}"
         report_key = f"paper-fill:{fill_key}"
-        if broker_fill_id is not None and any(
+        # 查重必须先于状态校验：终态订单（已 FILLED）再收到同一笔回报时，
+        # 这是券商重放而非新成交，应幂等返回而不是抛"状态不可成交"。
+        if any(
             r["idempotency_key"] == report_key for r in self.oms.list_reports(client_order_id)
         ):
             return order  # 重复回报幂等重放：返回当前状态，不再次入账
         if order.status not in (OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED):
             raise ValueError(f"订单当前状态不可成交: {order.status}")
-        if quantity <= 0 or price <= 0:
-            raise ValueError("成交数量和价格必须为正")
         if quantity > order.remaining_quantity:
             raise ValueError("成交数量超过订单剩余数量")
-        new_filled = order.filled_quantity + quantity
         next_status = (
             OrderStatus.FILLED
             if new_filled == order.approved_quantity

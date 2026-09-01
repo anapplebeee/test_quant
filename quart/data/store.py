@@ -546,17 +546,29 @@ class BarStore:
                     continue
                 symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns else src.stem
                 df = df.assign(**{PARTITION_COLUMN: pd.to_datetime(df["date"]).dt.year})
+                # 先全量读入已存在的分区再写回：任一年份读失败就整体放弃该
+                # symbol，绝不"用部分数据覆盖 + 删源"——那会不可逆地销毁历史。
+                merged_by_year: dict[int, pd.DataFrame] = {}
+                failed = False
                 for year, group in df.groupby(PARTITION_COLUMN):
                     dst = d / f"{PARTITION_PREFIX}{int(year)}" / f"{symbol}.parquet"
-                    dst.parent.mkdir(parents=True, exist_ok=True)
                     if dst.exists():
                         try:
                             existing = pd.read_parquet(dst)
                             group = pd.concat([existing, group], ignore_index=True)
                             group = group.drop_duplicates(subset=["date", "symbol"], keep="last")
-                        except Exception:
-                            pass
-                    group = group.drop(columns=[PARTITION_COLUMN]).sort_values("date")
+                        except Exception as exc:
+                            # 读不出旧分区就中止本次迁移，保留源平铺文件待人工处理
+                            logger.error("migrate abort {}: read {}: {}", symbol, dst.name, exc)
+                            failed = True
+                            break
+                    merged_by_year[int(year)] = group.drop(columns=[PARTITION_COLUMN]).sort_values("date")
+                if failed:
+                    stats["skipped"] += 1
+                    continue
+                for year, group in merged_by_year.items():
+                    dst = d / f"{PARTITION_PREFIX}{year}" / f"{symbol}.parquet"
+                    dst.parent.mkdir(parents=True, exist_ok=True)
                     tmp = dst.with_suffix(".parquet.tmp")
                     group.to_parquet(tmp, index=False)
                     os.replace(tmp, dst)

@@ -15,6 +15,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from rich.console import Console
 from rich.table import Table
@@ -24,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from quart.config import reports_dir
 from quart.data.artifacts import ArtifactStore
 from quart.data.quality import (
+    QUARANTINE_DIR,
     _classify_single,
     build_blocklist,
     load_blocklist,

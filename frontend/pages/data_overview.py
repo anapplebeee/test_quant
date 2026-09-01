@@ -71,12 +71,17 @@ def render():
             def _submit_refresh(universe: str, workers: float, full: bool):
                 from api.task_api import TASKS, task_queue
 
+                # 注意：本函数含 yield（生成器），错误分支必须用 yield 返回；
+                # 用 return 会变成 StopIteration.value，Gradio 消费迭代器时
+                # 拿不到该值，用户会看到"点了没反应"。
                 if "refresh" not in TASKS:
-                    return "❌ 未找到刷新任务定义"
+                    yield "❌ 未找到刷新任务定义"
+                    return
                 try:
                     w = int(workers) if workers else 8
                 except Exception:
-                    return "❌ 并发数必须为整数"
+                    yield "❌ 并发数必须为整数"
+                    return
                 extra = ["--universe", universe, "--workers", str(w)]
                 if full:
                     extra += ["--full"]
@@ -94,7 +99,8 @@ def render():
                     extra_args=extra,
                 )
                 if not ok:
-                    return f"⚠️ {msg}"
+                    yield f"⚠️ {msg}"
+                    return
 
                 lines = [
                     f"🚀 已提交并发刷新：**{universe}** | 并发 {w} | "

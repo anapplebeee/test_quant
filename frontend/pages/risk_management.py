@@ -247,6 +247,7 @@ def render():
 
             names = get_stock_names()
             liq_rows = []
+            liq_skipped: list[str] = []
             if not bars_frame.empty:
                 for sym, shares in positions.items():
                     group = bars_frame[bars_frame["symbol"].astype(str) == str(sym)]
@@ -268,8 +269,18 @@ def render():
                                 "变现天数": f"{days:.1f}",
                                 "Amihud ⓘ": f"{amihud:.2f}",
                             })
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            # 静默跳过的持仓必须计数：否则样本不全时仍会输出
+                            # "所有持仓流动性良好"，给出虚假的安全结论。
+                            liq_skipped.append(f"{sym}({type(exc).__name__})")
+                            continue
+
+            if liq_skipped:
+                gr.Info(
+                    f"ℹ️ {len(liq_skipped)} 只持仓因数据不完整未纳入流动性测算: "
+                    + ", ".join(liq_skipped[:8])
+                    + ("…" if len(liq_skipped) > 8 else "")
+                )
 
             if liq_rows:
                 liq_df = pd.DataFrame(liq_rows).sort_values("变现天数", ascending=False)
@@ -277,6 +288,12 @@ def render():
                 n_bad = sum(1 for r in liq_rows if float(r["变现天数"]) > 3)
                 if n_bad:
                     gr.Warning(f"⚠️ {n_bad} 只持仓变现天数 > 3 天，存在流动性风险")
+                elif liq_skipped:
+                    # 已测部分虽达标，但存在未测算持仓，不能给出"全部良好"结论
+                    gr.Warning(
+                        f"⚠️ 已测算持仓变现天数均 < 3 天，但 {len(liq_skipped)} 只"
+                        "未能测算，结论不完整"
+                    )
                 else:
                     gr.Success("✅ 所有持仓变现天数 < 3 天，流动性良好")
 

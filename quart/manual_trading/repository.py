@@ -604,13 +604,19 @@ class TradingRepository:
             raise ValueError("成交数量和价格必须为正")
         trade_date = _iso_date(fill.trade_date)
         with self._connect() as connection:
-            if fill.broker_fill_id:
-                duplicate = connection.execute(
-                    "SELECT fill_id FROM manual_fills WHERE account_id = ? AND broker_fill_id = ?",
-                    (account_id, fill.broker_fill_id),
-                ).fetchone()
-                if duplicate is not None:
-                    raise ValueError(f"成交编号重复: {fill.broker_fill_id}")
+            # 券商未返回成交编号时，用成交内容派生去重键——否则同一笔回报
+            # 重放（超时重试/CSV 二次导入）会被重复入账。键冲突即判重复。
+            dedup_key = fill.broker_fill_id or "|".join([
+                "auto", str(account_id), fill.symbol, side,
+                str(int(fill.quantity)), f"{float(fill.price):.6f}",
+                trade_date, str(fill.trade_time or ""),
+            ])
+            duplicate = connection.execute(
+                "SELECT fill_id FROM manual_fills WHERE account_id = ? AND broker_fill_id = ?",
+                (account_id, dedup_key),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError(f"成交编号重复: {dedup_key}")
 
             if fill.planned_order_id is not None:
                 planned = connection.execute(
@@ -660,6 +666,9 @@ class TradingRepository:
                 net = amount - total_fee
                 cash_total += net
                 cash_available += net
+                # 卖出回笼资金同样计入可取（与买入扣减对称），否则反复买卖后
+                # cash_withdrawable 单向衰减到 0，与券商快照产生虚假差异。
+                cash_withdrawable += net
 
             cursor = connection.execute(
                 """
@@ -672,7 +681,9 @@ class TradingRepository:
                 (
                     account_id,
                     fill.planned_order_id,
-                    fill.broker_fill_id,
+                    # 入库值与查重键必须同源：空成交编号时存派生键，
+                    # 否则第二次查重永远查不到（库里是 NULL）。
+                    dedup_key,
                     trade_date,
                     fill.trade_time,
                     fill.symbol,
