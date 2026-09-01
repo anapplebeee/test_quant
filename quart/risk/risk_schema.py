@@ -66,9 +66,40 @@ def _down_v2(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE IF EXISTS risk_states")
 
 
+def _up_v5(conn: sqlite3.Connection) -> None:
+    """RISK-002：日损的日初权益、评估结果与触发状态审计。"""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS risk_daily_equity_marks (
+            account_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            opening_equity REAL NOT NULL,
+            current_equity REAL NOT NULL,
+            daily_loss_pct REAL NOT NULL,
+            baseline_date TEXT,
+            baseline_available INTEGER NOT NULL DEFAULT 0,
+            limit_version TEXT NOT NULL,
+            triggered_state TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (account_id, trade_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_risk_daily_equity_marks_account_date
+            ON risk_daily_equity_marks(account_id, trade_date DESC);
+        ALTER TABLE risk_state_history
+            ADD COLUMN limit_version TEXT NOT NULL DEFAULT '';
+        """
+    )
+
+
+def _down_v5(conn: sqlite3.Connection) -> None:
+    conn.execute("DROP TABLE IF EXISTS risk_daily_equity_marks")
+
+
 #: 全部 Risk migration（后续 schema 变更在此追加新版本）
 RISK_MIGRATIONS: list[Migration] = [
     Migration(version=2, name="risk_state_and_decisions", up=_up_v2, down=_down_v2),
+    Migration(version=5, name="risk_daily_equity_marks", up=_up_v5, down=_down_v5),
 ]
 
 __all__ = ["RISK_MIGRATIONS"]

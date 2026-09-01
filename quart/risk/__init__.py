@@ -1,4 +1,5 @@
 """风控域：强制 Risk Engine、风险状态机与限额（RISK-001）。"""
+from quart.risk.daily_loss import DailyEquityMark, DailyLossAssessment, DailyLossGuard, DailyLossStore
 from quart.risk.engine import (
     ALLOWED_TRANSITIONS,
     DecisionRecorder,
@@ -20,6 +21,10 @@ from quart.risk.store import RiskRepository
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
+    "DailyEquityMark",
+    "DailyLossAssessment",
+    "DailyLossGuard",
+    "DailyLossStore",
     "DecisionRecorder",
     "EvaluationContext",
     "LotSizeRule",

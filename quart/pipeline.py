@@ -24,7 +24,8 @@ from quart.execution import generate_orders as build_rebalance_plan
 from quart.execution.constraints import A_SHARE_LOT
 from quart.manual_trading import PlannedOrderInput, TradingRepository, next_trade_date
 from quart.notify.dingtalk import send_markdown
-from quart.risk.engine import RiskState, limits_from_config
+from quart.risk.daily_loss import DailyLossAssessment, DailyLossGuard
+from quart.risk.engine import RiskLimits, RiskState, limits_from_config
 from quart.risk.rules import check_holdings_risk, validate_weights
 from quart.risk.store import RiskRepository
 from quart.strategy import build_strategy
@@ -32,13 +33,38 @@ from quart.strategy import build_strategy
 console = Console()
 
 
-def _signal_risk_state(account_name: str, warnings: list[str]) -> RiskState:
-    """正式信号路径读取风险状态（RISK-001 强制链路，fail-closed）。"""
+def _apply_daily_loss_guard(
+    account_name: str,
+    trade_date: str | pd.Timestamp,
+    current_equity: float,
+    limits: RiskLimits,
+    warnings: list[str],
+    *,
+    repository: RiskRepository | None = None,
+) -> tuple[RiskState, DailyLossAssessment | None]:
+    """日损检查是每日信号的 fail-closed 前置条件。
+
+    日初基线未知时会显式记录并提示；无法读写风险账本或权益无法估值时按
+    ``HALTED`` 处理，避免在风控盲区继续生成新风险订单。
+    """
     try:
-        return RiskRepository().get_state(account_name)
+        assessment = DailyLossGuard(limits, repository or RiskRepository()).evaluate(
+            account_name,
+            trade_date,
+            current_equity,
+        )
     except Exception as exc:
-        warnings.append(f"风险状态读取失败，按 HALTED 处理（fail-closed）: {exc}")
-        return RiskState.HALTED
+        warnings.append(f"日损风险检查失败，按 HALTED 处理（fail-closed）: {exc}")
+        return RiskState.HALTED, None
+
+    if not assessment.mark.baseline_available:
+        warnings.append(
+            "日损基线已初始化：首次接入尚无可审计日初权益，"
+            "本日不触发日损；下一交易日将使用本日终权益作为基线"
+        )
+    elif assessment.triggered:
+        warnings.append(f"日损熔断：{assessment.reason}，风险状态已转为 HALTED")
+    return assessment.state_after, assessment
 
 
 def load_holdings(path: Path | None = None) -> tuple[float, dict[str, int]]:
@@ -264,10 +290,12 @@ def run_daily(
         account_state = repository.account_state(account_name, str(md.dates[-1].date()))
     if account_state is not None:
         cash = account_state.cash_available_to_trade
+        cash_total = account_state.cash_total
         positions = account_state.total_positions
         sellable_positions = account_state.sellable_positions
     else:
         cash, positions = load_holdings()
+        cash_total = cash
         sellable_positions = positions
     strategy.sync_positions(positions)
     raw_weights = strategy.target_weights(i)
@@ -282,12 +310,23 @@ def run_daily(
     # RISK-001：正式信号必须经过 Risk Engine（限额与状态都不可绕过）
     limits = limits_from_config(cfg)
     warnings: list[str] = []
-    risk_state = _signal_risk_state(account_name, warnings)
     # 前一交易日收盘：涨跌停判断必须基于它，不能用当日收盘
     # （今收 vs 今收算出的涨跌停价永远不触发）
     prev_close = md.closes.iloc[i - 1] if i > 0 else last_close
     date = md.dates[i]
     trade_date = intended_trade_date or next_trade_date(str(date.date()))
+    risk_equity = cash_total + sum(
+        sh * last_close[sym]
+        for sym, sh in positions.items()
+        if sym in last_close.index and not pd.isna(last_close[sym])
+    )
+    risk_state, daily_loss = _apply_daily_loss_guard(
+        account_name,
+        date,
+        risk_equity,
+        limits,
+        warnings,
+    )
     if risk_state in (RiskState.HALTED, RiskState.RECOVERY):
         weights: dict[str, float] = {}
         orders: list[OrderPlan] = []
@@ -381,6 +420,8 @@ def run_daily(
                 "plan_id": plan_id,
                 "intended_trade_date": trade_date,
                 "rule_book_version": rule_book_version,
+                "risk_state": risk_state.value,
+                "daily_loss": daily_loss.to_dict() if daily_loss else None,
             },
         )
         run.put_text("report", report)
@@ -391,7 +432,12 @@ def run_daily(
         run.put_table("weights", pd.DataFrame(
             [{"symbol": s, "weight": w} for s, w in sorted(weights.items())]
         ))
-        run.add_metrics(equity=float(equity), n_warnings=len(warnings))
+        run.add_metrics(
+            equity=float(equity),
+            risk_equity=float(risk_equity),
+            daily_loss_pct=(daily_loss.mark.daily_loss_pct if daily_loss else None),
+            n_warnings=len(warnings),
+        )
         manifest = run.finish()
         if plan_id and repository is not None:
             repository.attach_source_run(plan_id, manifest.run_id)

@@ -17,6 +17,7 @@ from typing import Any
 
 from quart.domain.orders import RiskDecision, RiskRuleResult
 from quart.infrastructure.db import Database
+from quart.risk.daily_loss import DailyEquityMark
 from quart.risk.engine import ALLOWED_TRANSITIONS, RiskState
 
 
@@ -106,10 +107,10 @@ class RiskRepository:
             conn.execute(
                 """
                 INSERT INTO risk_state_history
-                    (account_id, state, reason, operator, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                    (account_id, state, reason, operator, limit_version, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (account_id, target.value, reason, operator, now),
+                (account_id, target.value, reason, operator, limit_version, now),
             )
             conn.commit()
         return target
@@ -120,7 +121,7 @@ class RiskRepository:
         with self.db.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT state, reason, operator, created_at
+                SELECT state, reason, operator, limit_version, created_at
                 FROM risk_state_history
                 WHERE account_id = ?
                 ORDER BY history_id DESC LIMIT ?
@@ -128,6 +129,105 @@ class RiskRepository:
                 (account_id, int(limit)),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ---------------- 日损权益基线 ----------------
+
+    def get_daily_mark(self, account_id: str, trade_date) -> DailyEquityMark | None:
+        """读取账户在指定交易日已记录的日损权益观测。"""
+        day = str(trade_date)[:10]
+        self.migrate()
+        with self.db.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM risk_daily_equity_marks
+                WHERE account_id = ? AND trade_date = ?
+                """,
+                (str(account_id), day),
+            ).fetchone()
+        return self._daily_mark_from_row(row)
+
+    def latest_daily_mark_before(self, account_id: str, trade_date) -> DailyEquityMark | None:
+        """读取严格早于指定日的最近日终权益，作为下一个交易日的日初基线。"""
+        day = str(trade_date)[:10]
+        self.migrate()
+        with self.db.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM risk_daily_equity_marks
+                WHERE account_id = ? AND trade_date < ?
+                ORDER BY trade_date DESC
+                LIMIT 1
+                """,
+                (str(account_id), day),
+            ).fetchone()
+        return self._daily_mark_from_row(row)
+
+    def upsert_daily_mark(self, mark: DailyEquityMark) -> DailyEquityMark:
+        """原子更新同日权益观测，保留首次入库时间供审计。"""
+        self.migrate()
+        now = _now()
+        with self.db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO risk_daily_equity_marks (
+                    account_id, trade_date, opening_equity, current_equity,
+                    daily_loss_pct, baseline_date, baseline_available,
+                    limit_version, triggered_state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, trade_date) DO UPDATE SET
+                    opening_equity = excluded.opening_equity,
+                    current_equity = excluded.current_equity,
+                    daily_loss_pct = excluded.daily_loss_pct,
+                    baseline_date = excluded.baseline_date,
+                    baseline_available = excluded.baseline_available,
+                    limit_version = excluded.limit_version,
+                    triggered_state = excluded.triggered_state,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    mark.account_id,
+                    mark.trade_date.isoformat(),
+                    mark.opening_equity,
+                    mark.current_equity,
+                    mark.daily_loss_pct,
+                    mark.baseline_date.isoformat() if mark.baseline_date else None,
+                    int(mark.baseline_available),
+                    mark.limit_version,
+                    mark.triggered_state.value if mark.triggered_state else None,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        return self.get_daily_mark(mark.account_id, mark.trade_date) or mark
+
+    @staticmethod
+    def _daily_mark_from_row(row) -> DailyEquityMark | None:
+        if row is None:
+            return None
+        try:
+            value = dict(row)
+            return DailyEquityMark(
+                account_id=str(value["account_id"]),
+                trade_date=datetime.fromisoformat(str(value["trade_date"])).date(),
+                opening_equity=float(value["opening_equity"]),
+                current_equity=float(value["current_equity"]),
+                daily_loss_pct=float(value["daily_loss_pct"]),
+                baseline_date=(
+                    datetime.fromisoformat(str(value["baseline_date"])).date()
+                    if value.get("baseline_date")
+                    else None
+                ),
+                baseline_available=bool(value["baseline_available"]),
+                limit_version=str(value["limit_version"]),
+                triggered_state=(
+                    RiskState.coerce(value["triggered_state"])
+                    if value.get("triggered_state")
+                    else None
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
 
     # ---------------- 决策 ----------------
 
