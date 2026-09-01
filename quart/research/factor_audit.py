@@ -52,6 +52,10 @@ FACTOR_SPECS = (
     FactorSpec("vwap_pos20_neg", "量价", "收盘价相对 20 日 VWAP 位置（负向）"),
     FactorSpec("rel_ind_rev20", "行业相对", "20 日行业内相对收益反转"),
     FactorSpec("rel_ind_mom20", "行业相对", "20 日行业内相对收益动量（行业中性动量，N1 候选）", is_new=True),
+    FactorSpec("rel_ind_rev60", "行业相对", "60 日行业内相对收益反转（长窗口持续性检验）", is_new=True),
+    FactorSpec("overnight_rev10", "隔夜", "10 日隔夜收益反转（开盘相对前收的均值回复）", is_new=True),
+    FactorSpec("intraday_rev10_neg", "日内", "10 日日内收益反转（收盘相对开盘，负向）", is_new=True),
+    FactorSpec("close_pos20_neg", "量价", "20 日收盘在日内区间位置（负向，收盘偏高=超买）", is_new=True),
     FactorSpec("downside_semivol20_neg", "尾部风险", "20 日下行半方差（负向）", is_new=True),
     FactorSpec("downside_semivol60_neg", "尾部风险", "60 日下行半方差（负向）", is_new=True),
     FactorSpec("tail_loss60", "尾部风险", "60 日收益 10% 分位数（越高尾损越小）", is_new=True),
@@ -209,6 +213,18 @@ class FactorInputs:
             value = self._relative_industry_reversal()
         elif name == "rel_ind_mom20":
             value = self._relative_industry_momentum()
+        elif name == "rel_ind_rev60":
+            value = self._relative_industry_reversal(window=60)
+        elif name == "overnight_rev10":
+            overnight = self.open / close.shift(1).replace(0, np.nan) - 1.0
+            value = -overnight.rolling(10).mean()
+        elif name == "intraday_rev10_neg":
+            intraday = close / self.open.replace(0, np.nan) - 1.0
+            value = -intraday.rolling(10).mean()
+        elif name == "close_pos20_neg":
+            span = (self.high - self.low).replace(0, np.nan)
+            position = (close - self.low) / span
+            value = -position.rolling(20).mean()
         elif name == "downside_semivol20_neg":
             value = -np.sqrt(ret.clip(upper=0).pow(2).rolling(20).mean())
         elif name == "downside_semivol60_neg":
@@ -251,14 +267,14 @@ class FactorInputs:
             return None
         return value.replace([np.inf, -np.inf], np.nan).astype("float32")
 
-    def _relative_industry_reversal(self) -> pd.DataFrame | None:
+    def _relative_industry_reversal(self, window: int = 20) -> pd.DataFrame | None:
         try:
             from quart.strategy.industries import load_industry_series
 
             mapping = load_industry_series("first")
         except (FileNotFoundError, ValueError):
             return None
-        relative_return = self.close.pct_change(20, fill_method=None)
+        relative_return = self.close.pct_change(window, fill_method=None)
         groups = pd.Series(
             [mapping.get(symbol, "UNKNOWN") for symbol in relative_return.columns],
             index=relative_return.columns,
@@ -268,10 +284,10 @@ class FactorInputs:
         broadcast.columns = relative_return.columns
         return -(relative_return - broadcast)
 
-    def _relative_industry_momentum(self) -> pd.DataFrame | None:
-        """行业中性动量：个股 20 日收益减其所属行业（申万一级/统计聚类）
-        等权平均 20 日收益。与 ``rel_ind_rev20`` 互为反方向；A 股实证通常
-        显示行业内反转更稳定（ICIR 更高），故本因子方向需以单因子检验定夺。
+    def _relative_industry_momentum(self, window: int = 20) -> pd.DataFrame | None:
+        """行业中性动量：个股窗口收益减其所属行业（申万一级/统计聚类）
+        等权平均窗口收益。与 ``rel_ind_rev{window}`` 互为反方向；A 股实证
+        通常显示行业内反转更稳定（ICIR 更高），故本因子方向需以单因子检验定夺。
         """
         try:
             from quart.strategy.industries import load_industry_series
@@ -279,7 +295,7 @@ class FactorInputs:
             mapping = load_industry_series("first")
         except (FileNotFoundError, ValueError):
             return None
-        relative_return = self.close.pct_change(20, fill_method=None)
+        relative_return = self.close.pct_change(window, fill_method=None)
         groups = pd.Series(
             [mapping.get(symbol, "UNKNOWN") for symbol in relative_return.columns],
             index=relative_return.columns,
