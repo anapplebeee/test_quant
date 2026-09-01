@@ -140,22 +140,27 @@ def render():
         # ===== 信号生成策略选择（仅白名单） =====
         live_choices = live_signal_choices()
         if not live_choices:
-            # 没有白名单时从全量列表中只取已准入的
-            live_choices = [item["name"] for item in strategy_catalog() if "准入" in item.get("admitted", "")]
+            # 没有白名单时从全量列表中只取准入或 Paper 候选
+            live_choices = [
+                item["name"] for item in strategy_catalog()
+                if "准入" in item.get("admitted", "") or "Paper" in item.get("admitted", "")
+            ]
         signal_default = live_choices[0] if live_choices else (strategy_choices[0] if strategy_choices else "")
 
         signal_strategy_select = gr.Dropdown(
-            label="📋 信号策略（仅实盘准入，受白名单约束）",
-            choices=live_choices if live_choices else ["(无准入策略)"],
+            label="📋 信号策略（准入 ∪ Paper 候选，受白名单约束）",
+            choices=live_choices if live_choices else ["(无可生成信号的策略)"],
             value=signal_default if signal_default in (live_choices or []) else (live_choices[0] if live_choices else None),
-            info="仅出现在 backend/config/strategy.live_allowlist 中的策略可生成正式 T+1 信号",
+            info="正式实盘须 `strategy.live_allowlist`（准入台账 PASS）；Paper 候选仅限模拟盘人工确认",
         )
 
         # ===== 策略准入状态 =====
         gr.Markdown("### 🎯 策略准入状态")
         gr.Markdown(
-            "> **准入** = 允许生成正式 T+1 实盘信号（`strategy.live_allowlist`）；"
-            "**研究** = 仅回测/扫描，禁止实盘信号。策略升级必须通过回测、成本压力和 Walk-Forward 验证。"
+            "> **✅ 准入** = 通过 Admission Gate，可生成正式实盘信号（`strategy.live_allowlist`）；"
+            "**📝 Paper候选** = 仅 Paper 模拟盘 T+1 信号，人工确认、逐笔对账，禁止真实报单"
+            "（`strategy.paper_allowlist`）；**🔬 研究** = 仅回测/扫描。"
+            "晋级证据链：`data/meta/admission_status.csv` 台账 + `scripts/admission_gate.py` 全项通过。"
         )
         catalog_rows = [
             {

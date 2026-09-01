@@ -35,7 +35,16 @@ backtest:
 strategy:
   # 默认信号只使用经过成本检验的低频防御候选；不代表收益保证。
   name: lowvol_indz
-  live_allowlist:
+  # 正式实盘信号白名单：进入本表的策略必须在 data/meta/admission_status.csv
+  # 有 Admission Gate PASS 记录（测试强制校验）。2026-09-01 治理修正：
+  # lowvol_indz 全区间绝对收益为正，但对同股票池等权基准超额为负、固定参数
+  # WFA OOS 仅 CAGR ~1.78% / Sharpe ~0.28，未满足"稳定正超额"准入证据，
+  # 从实盘白名单降级为 Paper 候选（见 paper_allowlist）。
+  # 历史绝对收益不是晋级理由；晋级路径 = scripts/admission_gate.py 全项通过。
+  live_allowlist: []
+  # Paper 模拟盘候选白名单：允许生成 T+1 Paper 信号（人工确认、逐笔对账），
+  # 禁止晋级真实券商报单。候选必须在准入台账中有评估记录（含 FAIL）。
+  paper_allowlist:
     - lowvol_indz
   top_k: 10
   lookback_days: 60

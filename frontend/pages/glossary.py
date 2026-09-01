@@ -37,7 +37,8 @@ def render():
             | `max_weight_pct` | 单股最大权重 | 5%-20% | {s.get('max_weight_pct', 0.15) * 100:.0f}% |
             | `min_avg_amount` | 流动性门槛 | 1000万-1亿 | {s.get('min_avg_amount', 50_000_000) / 1e4:.0f}万 |
             | `use_regime_filter` | 市场环境过滤 | true/false | {str(cur_regime).lower()} |
-            | `live_allowlist` | 正式信号白名单 | - | {s.get('live_allowlist') or '全部研究'} |
+            | `live_allowlist` | 实盘准入白名单（须有门禁 PASS） | - | {s.get('live_allowlist') or '无（空=无策略准入）'} |
+            | `paper_allowlist` | Paper 模拟盘候选白名单 | - | {s.get('paper_allowlist') or '无'} |
             """
             )
 

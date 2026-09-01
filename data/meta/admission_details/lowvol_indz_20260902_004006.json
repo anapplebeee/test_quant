@@ -1,0 +1,28 @@
+{
+  "strategy": "lowvol_indz",
+  "passed": false,
+  "evaluated_at": "2026-09-02T00:40:06",
+  "checks": [
+    {"check": "cagr_2x_min", "status": "PASS", "detail": "2x cost CAGR=+6.09% (>+0.00%)"},
+    {"check": "sharpe_1x_min", "status": "PASS", "detail": "1x cost Sharpe=0.690 (>=0.5)"},
+    {"check": "mdd_1x_max", "status": "PASS", "detail": "1x cost MDD 约 -19%~-24%（复验报告口径，>=-45%）"},
+    {"check": "excess_cagr_1x_min", "status": "FAIL", "detail": "1x cost 对同股票池等权基准年化超额为负"},
+    {"check": "min_trades", "status": "PASS", "detail": "全区间交易笔数充足（>=30）"},
+    {"check": "wfa_oos", "status": "PASS", "detail": "固定参数 WFA OOS CAGR≈+1.78% (>0)，但 Sharpe≈0.28 偏弱"}
+  ],
+  "thresholds": {
+    "cagr_2x_min": 0.0,
+    "sharpe_1x_min": 0.5,
+    "mdd_1x_max": -0.45,
+    "excess_cagr_1x_min": 0.0,
+    "min_trades": 30,
+    "wfa_oos_cagr_min": 0.0,
+    "wfa_oos_mdd_max": -0.60
+  },
+  "sources": [
+    "全市场策略复验报告（full_market_validation_2026-08-31）：1x CAGR 7.53% / Sharpe 0.69；2x CAGR 6.09% / Sharpe 0.57",
+    "固定参数 WFA：OOS CAGR ~1.78% / Sharpe ~0.28",
+    "量化平台能力缺口与交付路线（2026-09-01）：绝对收益为正但无稳定正超额，不构成晋级理由"
+  ],
+  "disposition": "降级为 Paper 候选（strategy.paper_allowlist），禁止实盘晋级；晋级须重跑 scripts/admission_gate.py 并全项通过"
+}

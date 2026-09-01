@@ -1,0 +1,2 @@
+strategy,checked_at,passed,grandfathered,failed,details
+lowvol_indz,2026-09-02T00:40:06,False,False,excess_cagr_1x_min,data/meta/admission_details/lowvol_indz_20260902_004006.json

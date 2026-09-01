@@ -217,6 +217,25 @@ def render_report(
     return "\n".join(lines)
 
 
+def signal_tier(cfg: dict, strategy_name: str) -> str:
+    """信号白名单分层：'live'（正式准入）/ 'paper'（Paper 候选）。
+
+    两者皆不在则抛 ValueError。live_allowlist 为空表示没有策略通过
+    准入门禁——不是"全部放行"（2026-09-01 治理修正）。
+    """
+    strategy_cfg = cfg.get("strategy", {})
+    live = set(strategy_cfg.get("live_allowlist") or [])
+    paper = set(strategy_cfg.get("paper_allowlist") or [])
+    if strategy_name in live:
+        return "live"
+    if strategy_name in paper:
+        return "paper"
+    raise ValueError(
+        f"策略 {strategy_name!r} 未进入实盘准入或 Paper 候选白名单。"
+        f"晋级路径：scripts/admission_gate.py 全项通过后加入 live_allowlist。"
+    )
+
+
 def run_daily(
     strategy_name: str | None = None,
     push: bool = True,
@@ -225,12 +244,7 @@ def run_daily(
 ) -> str:
     cfg = load_config()
     strategy_name = strategy_name or cfg["strategy"]["name"]
-    live_allowlist = set(cfg.get("strategy", {}).get("live_allowlist") or [])
-    if live_allowlist and strategy_name not in live_allowlist:
-        raise ValueError(
-            f"策略 {strategy_name!r} 未进入实盘信号白名单；"
-            f"允许策略: {sorted(live_allowlist)}。请先完成样本外与模拟盘验收。"
-        )
+    tier = signal_tier(cfg, strategy_name)
     store = BarStore()
     stale = store.freshness_days()
     if stale is None:
@@ -332,6 +346,12 @@ def run_daily(
     # RISK-001：正式信号必须经过 Risk Engine（限额与状态都不可绕过）
     limits = limits_from_config(cfg)
     warnings: list[str] = []
+    if tier == "paper":
+        warnings.append(
+            "【Paper 候选】该策略未通过实盘准入门禁（对等权基准无稳定正超额），"
+            "本计划仅限 Paper 模拟盘：人工确认、逐笔对账，禁止真实报单。"
+            "见 data/meta/admission_status.csv"
+        )
     # 前一交易日收盘：涨跌停判断必须基于它，不能用当日收盘
     # （今收 vs 今收算出的涨跌停价永远不触发）
     prev_close = md.closes.iloc[i - 1] if i > 0 else last_close
@@ -409,7 +429,9 @@ def run_daily(
                 )
                 for order in orders
             ],
-            notes="平台生成, 等待用户在券商端手动确认和执行",
+            notes=(
+                "[Paper候选] " if tier == "paper" else ""
+            ) + "平台生成, 等待用户在券商端手动确认和执行",
         )
     report = render_report(
         date,

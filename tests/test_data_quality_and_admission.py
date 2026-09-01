@@ -7,9 +7,6 @@
 """
 from __future__ import annotations
 
-from pathlib import Path
-
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -29,7 +26,6 @@ from quart.research.admission import (
     seed_grandfathered,
     write_status,
 )
-
 
 # ---------------------------------------------------------------- 涨跌停规则
 
@@ -245,24 +241,60 @@ def test_status_roundtrip_and_grandfather(tmp_path, monkeypatch):
     assert bool(df.loc[df["strategy"] == "s_old", "grandfathered"].iloc[0]) is True
 
 
-def test_live_allowlist_has_admission_record(tmp_path, monkeypatch):
-    """白名单强制校验：live_allowlist 中每个策略必须在台账有 PASS 记录。
+def test_live_allowlist_has_admission_record():
+    """白名单强制校验：live_allowlist 中每个策略必须在入库台账有 PASS 记录。
 
-    台账文件缺失时为首次引导：自动为存量白名单补 GRANDFATHERED 记录并落盘；
-    台账一旦存在，任何新晋白名单策略必须先跑 admission_gate.py 拿到 PASS。
+    台账（data/meta/admission_status.csv）随仓库提交，不再做首次引导自动
+    补登记——自动 grandfathered 曾掩盖"无 PASS 记录却在实盘白名单"的治理缺口。
     """
-    import quart.research.admission as adm
     from quart.config import load_config
-
-    status = tmp_path / "admission_status.csv"
-    monkeypatch.setattr(adm, "STATUS_PATH", status)
+    from quart.research.admission import STATUS_PATH
 
     allowlist = load_config()["strategy"].get("live_allowlist", [])
-    if not status.exists():
-        seed_grandfathered(list(allowlist), path=status)
-
-    missing = [s for s in allowlist if not admission_ok(s, path=status)]
+    missing = [s for s in allowlist if not admission_ok(s, path=STATUS_PATH)]
     assert not missing, (
         f"以下白名单策略缺少准入门禁 PASS 记录: {missing} —— "
         f"请先运行 scripts/admission_gate.py --strategy <name>"
     )
+
+
+# ---------------------------------------------------------------- 治理分层
+
+
+def test_governance_lowvol_indz_is_paper_candidate_not_live():
+    """2026-09-01 治理修正：lowvol_indz 无正式准入证据，只能在 Paper 层。"""
+    from quart.config import load_config
+
+    strategy_cfg = load_config()["strategy"]
+    live = strategy_cfg.get("live_allowlist", [])
+    paper = strategy_cfg.get("paper_allowlist", [])
+    assert "lowvol_indz" not in live
+    assert "lowvol_indz" in paper
+
+
+def test_paper_candidates_have_ledger_record():
+    """Paper 候选必须已被评估并落档（含 FAIL），否则视为绕过治理流程。"""
+    from quart.config import load_config
+    from quart.research.admission import STATUS_PATH
+
+    df = load_status(STATUS_PATH)
+    assert not df.empty, "准入台账缺失：data/meta/admission_status.csv 必须随仓库提交"
+    recorded = set(df["strategy"])
+    paper = load_config()["strategy"].get("paper_allowlist", [])
+    missing = [s for s in paper if s not in recorded]
+    assert not missing, f"Paper 候选缺少准入台账评估记录: {missing}"
+
+
+def test_signal_tier_semantics():
+    """分层守卫：空 live 白名单不是全部放行；Paper 与未知策略各有明确出口。"""
+    from quart.pipeline import signal_tier
+
+    cfg = {"strategy": {"live_allowlist": ["a"], "paper_allowlist": ["b"]}}
+    assert signal_tier(cfg, "a") == "live"
+    assert signal_tier(cfg, "b") == "paper"
+    with pytest.raises(ValueError):
+        signal_tier(cfg, "c")
+
+    empty = {"strategy": {"live_allowlist": [], "paper_allowlist": []}}
+    with pytest.raises(ValueError):
+        signal_tier(empty, "lowvol_indz")

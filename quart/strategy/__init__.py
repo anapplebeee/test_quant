@@ -22,7 +22,7 @@ REGISTRY: dict[str, type[BaseStrategy]] = {
 }
 
 #: 非策略参数的配置键，传入策略前必须剥离
-_NON_PARAM_KEYS = {"name", "overrides", "live_allowlist"}
+_NON_PARAM_KEYS = {"name", "overrides", "live_allowlist", "paper_allowlist"}
 
 
 def resolve_params(name: str, params: dict) -> dict:

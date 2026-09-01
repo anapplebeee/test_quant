@@ -17,6 +17,7 @@ from api.strategy_api import (
     get_strategy_defaults,
     live_allowlist,
     live_signal_choices,
+    paper_allowlist,
     strategy_catalog,
     strategy_choices,
 )
@@ -31,7 +32,10 @@ def test_strategy_choices_covers_registry():
     assert "dual_ma" in choices
 
 
-def test_live_signal_choices_excludes_research_strategies():
+def test_live_signal_choices_is_live_union_paper():
+    """T+1 计划可选策略 = 正式准入 ∪ Paper 候选；其余一律研究态。"""
+    allowed = set(live_allowlist()) | set(paper_allowlist())
+    assert set(live_signal_choices()) == allowed
     assert live_signal_choices() == ["lowvol_indz"]
 
 
@@ -46,16 +50,24 @@ def test_catalog_defaults_consistent():
         assert isinstance(row["default_top_k"], int) and row["default_top_k"] > 0
 
 
-def test_catalog_marks_admitted_strategies():
-    """准入状态必须与 live_allowlist 严格对齐，防止前端口径漂移。"""
-    allowlist = set(live_allowlist())
+def test_catalog_marks_admission_tiers():
+    """准入分层必须与白名单严格对齐：✅准入/📝Paper候选/🔬研究。"""
+    live = set(live_allowlist())
+    paper = set(paper_allowlist())
     for row in strategy_catalog():
-        expected = "✅ 准入" if (not allowlist or row["name"] in allowlist) else "🔬 研究"
+        if row["name"] in live:
+            expected = "✅ 准入"
+        elif row["name"] in paper:
+            expected = "📝 Paper候选"
+        else:
+            expected = "🔬 研究"
         assert row["admitted"] == expected
-    admitted_names = {
-        row["name"] for row in strategy_catalog() if row["admitted"] == "✅ 准入"
+    t1_names = {
+        row["name"]
+        for row in strategy_catalog()
+        if row["admitted"] in ("✅ 准入", "📝 Paper候选")
     }
-    assert admitted_names == set(live_signal_choices())
+    assert t1_names == set(live_signal_choices())
 
 
 def test_defaults_lowvol_indz_uses_override():

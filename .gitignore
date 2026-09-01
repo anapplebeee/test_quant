@@ -3,7 +3,12 @@ __pycache__/
 .venv/
 .pytest_cache/
 *.egg-info/
-/data/
+/data/*
+# 治理例外：准入台账必须入库可审计（白名单晋级的唯一证据链）
+!/data/meta/
+/data/meta/*
+!/data/meta/admission_status.csv
+!/data/meta/admission_details/
 /logs/
 /reports/
 /state/

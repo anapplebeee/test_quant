@@ -53,6 +53,16 @@ STRATEGY_META: dict[str, dict[str, str]] = {
         "status": "候选",
         "desc": "行业内低波复合，采用低频调仓、分散持仓和排名缓冲控制成本。历史样本可用但尚未经过长期模拟盘验收。",
     },
+    "index_enhancement": {
+        "label": "指数增强",
+        "status": "研究",
+        "desc": "指数增强组合研究模板。尚无官方 PIT 行业/风格暴露底座，也未通过正式 OOS 准入门禁，仅限回测研究用途。",
+    },
+    "factor_portfolio": {
+        "label": "因子组合",
+        "status": "研究",
+        "desc": "多因子组合研究模板。尚无官方 PIT 因子暴露数据，也未通过正式 OOS 准入门禁，仅限回测研究用途。",
+    },
 }
 
 
@@ -70,11 +80,15 @@ def default_strategy_name() -> str:
 
 
 def live_signal_choices() -> list[str]:
-    """仅返回配置允许生成正式 T+1 计划的策略。"""
+    """可生成 T+1 交易计划的策略：正式准入（live）∪ Paper 候选。
+
+    live_allowlist 为空表示没有任何策略通过准入门禁——不是"全部放行"。
+    """
     from quart.config import load_config
 
-    allowed = set((load_config().get("strategy") or {}).get("live_allowlist") or [])
-    return [name for name in strategy_choices() if not allowed or name in allowed]
+    cfg = load_config().get("strategy") or {}
+    allowed = set(cfg.get("live_allowlist") or []) | set(cfg.get("paper_allowlist") or [])
+    return [name for name in strategy_choices() if name in allowed]
 
 
 def get_strategy_defaults(name: str) -> dict:
@@ -118,18 +132,24 @@ def strategy_factor_preview(name: str, table=None) -> dict:
 
 def strategy_catalog() -> list[dict]:
     """策略库表数据：REGISTRY ∩ META（防 META 漏配时缺行）。"""
-    allowlist = live_allowlist()
+    live = set(live_allowlist())
+    paper = set(paper_allowlist())
     out = []
     for name in strategy_choices():
         meta = STRATEGY_META.get(name, {})
         d = get_strategy_defaults(name)
-        admitted = not allowlist or name in allowlist
+        if name in live:
+            admitted = "✅ 准入"
+        elif name in paper:
+            admitted = "📝 Paper候选"
+        else:
+            admitted = "🔬 研究"
         out.append(
             {
                 "name": name,
                 "label": meta.get("label", name),
                 "status": meta.get("status", "研究"),
-                "admitted": "✅ 准入" if admitted else "🔬 研究",
+                "admitted": admitted,
                 "desc": meta.get("desc", ""),
                 "default_rebalance": d["rebalance_days"],
                 "default_top_k": d["top_k"],
@@ -139,10 +159,17 @@ def strategy_catalog() -> list[dict]:
 
 
 def live_allowlist() -> list[str]:
-    """正式信号策略白名单（config.strategy.live_allowlist）。"""
+    """正式实盘信号白名单（config.strategy.live_allowlist；空=无策略准入）。"""
     from quart.config import load_config
 
     return list((load_config().get("strategy") or {}).get("live_allowlist") or [])
+
+
+def paper_allowlist() -> list[str]:
+    """Paper 模拟盘候选白名单（config.strategy.paper_allowlist）。"""
+    from quart.config import load_config
+
+    return list((load_config().get("strategy") or {}).get("paper_allowlist") or [])
 
 
 def list_signal_reports() -> list[str]:
