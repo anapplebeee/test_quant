@@ -57,6 +57,17 @@ class RotateStrategy(BaseStrategy):
         return {"B": 1.0}
 
 
+class ContextCaptureStrategy(BaseStrategy):
+    name = "context_capture"
+
+    def prepare(self, md: MarketData) -> None:
+        self.contexts = []
+
+    def target_weights(self, i: int) -> dict[str, float]:
+        self.contexts.append(self._portfolio_context)
+        return {"A": 1.0} if i == 0 else {}
+
+
 def test_no_lookahead_first_trade_on_next_open():
     dates = pd.date_range("2024-01-01", periods=10)
     bars = make_bars({"600001": 10.0}, dates, step=0.5)
@@ -70,6 +81,23 @@ def test_no_lookahead_first_trade_on_next_open():
     assert t.price == pytest.approx(10.5)
     assert t.shares == 9400
     assert equity.iloc[-1] == pytest.approx(1300 + 9400 * 14.5)
+
+
+def test_engine_provides_close_time_portfolio_context_to_strategy():
+    dates = pd.date_range("2024-01-01", periods=5)
+    md = MarketData.from_bars(make_bars({"A": 10.0}, dates, step=0.0))
+    strategy = ContextCaptureStrategy()
+    BacktestEngine(
+        md, strategy, fees=ZERO_FEES, initial_cash=100_000, max_adv_participation=1.0,
+    ).run()
+
+    assert len(strategy.contexts) == len(dates)
+    first, after_fill = strategy.contexts[0], strategy.contexts[1]
+    assert first.equity == pytest.approx(100_000.0)
+    assert first.current_weights.empty
+    assert after_fill.current_weights["A"] > 0.9
+    assert after_fill.adv is not None
+    assert after_fill.max_adv_participation == 1.0
 
 
 def test_rotation_sells_then_buys_with_lots():

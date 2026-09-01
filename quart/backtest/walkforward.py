@@ -223,7 +223,14 @@ class _ScheduledStrategy:
                 item["strategy"].restore_state(state)
             self._last_owner = fold_idx
         local_i = global_i - int(item["context_lo"])
+        context = getattr(self, "_portfolio_context", None)
+        if context is not None and hasattr(item["strategy"], "set_portfolio_context"):
+            item["strategy"].set_portfolio_context(context)
         return item["strategy"].target_weights(local_i)
+
+    def set_portfolio_context(self, context) -> None:
+        """延迟转交至当日实际负责的 fold 子策略。"""
+        self._portfolio_context = context
 
     def sync_positions(self, positions: dict[str, int]) -> None:
         """把撮合后的真实持仓同步给当前活动的子策略（持仓记忆/缓冲带策略需要）。"""

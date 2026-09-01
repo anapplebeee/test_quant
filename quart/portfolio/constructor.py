@@ -420,9 +420,9 @@ def _positive_series(
     if value is None:
         raise PortfolioInfeasibleError(["启用 ADV 约束必须提供 adv"])
     series = _series(value, name).reindex(universe)
-    if ((~np.isfinite(series)) | (series <= 0)).any():
-        missing = sorted(series[(~np.isfinite(series)) | (series <= 0)].index)
-        raise PortfolioInfeasibleError([f"{name} 必须覆盖全部股票且为正: {missing}"])
+    if ((~np.isfinite(series)) | (series < 0)).any():
+        missing = sorted(series[(~np.isfinite(series)) | (series < 0)].index)
+        raise PortfolioInfeasibleError([f"{name} 必须覆盖全部股票且为非负: {missing}"])
     return series
 
 

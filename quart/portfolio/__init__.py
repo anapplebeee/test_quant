@@ -12,10 +12,12 @@ from quart.portfolio.constructor import (
     PortfolioConstructor,
     PortfolioInfeasibleError,
 )
+from quart.portfolio.context import PortfolioConstructionContext
 
 __all__ = [
     "ConstraintUsage",
     "PortfolioConstraints",
+    "PortfolioConstructionContext",
     "PortfolioConstructionInput",
     "PortfolioConstructionResult",
     "PortfolioConstructor",

@@ -6,6 +6,7 @@ import pytest
 
 import quart.strategy.factor_portfolio as factor_portfolio
 from quart.backtest.engine import MarketData
+from quart.portfolio import PortfolioConstructionContext
 from quart.strategy import build_strategy
 from quart.strategy.factor_portfolio import FactorPortfolioStrategy
 
@@ -87,3 +88,38 @@ def test_factor_portfolio_fails_when_requested_factor_is_unavailable(monkeypatch
 
     with pytest.raises(RuntimeError, match="不可用"):
         strategy.prepare(_market_data())
+
+
+def test_factor_portfolio_passes_real_account_and_adv_context_to_constructor(monkeypatch):
+    calls = []
+    original = factor_portfolio.PortfolioConstructor.construct
+
+    def spy(self, request, constraints):
+        calls.append((request, constraints))
+        return original(self, request, constraints)
+
+    monkeypatch.setattr(factor_portfolio.PortfolioConstructor, "construct", spy)
+    md = _market_data()
+    strategy = FactorPortfolioStrategy(
+        factor_names="vol20_neg,amp20_neg,lottery20_neg",
+        top_k=3,
+        rebalance_days=1,
+        max_weight_pct=0.4,
+    )
+    strategy.prepare(md)
+    strategy.set_portfolio_context(PortfolioConstructionContext(
+        date=md.dates[50],
+        current_weights=pd.Series({"S0": 0.25}),
+        equity=1_000_000.0,
+        tradable=md.symbols,
+        adv=pd.Series(100_000_000.0, index=md.symbols),
+        max_adv_participation=0.05,
+    ))
+
+    strategy.target_weights(50)
+
+    request, constraints = calls[0]
+    assert request.current_weights["S0"] == pytest.approx(0.25)
+    assert request.equity == 1_000_000.0
+    assert request.adv is not None
+    assert constraints.max_adv_participation == pytest.approx(0.05)

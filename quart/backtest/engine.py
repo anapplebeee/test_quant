@@ -33,6 +33,7 @@ from quart.execution.constraints import FLAT, limit_prices, price_limit_pct
 from quart.execution.fees import Fees
 from quart.execution.models import BUY, ExecutionContext
 from quart.execution.order_generator import generate_orders
+from quart.portfolio import PortfolioConstructionContext
 from quart.strategy.base import BaseStrategy
 
 MIN_ORDER_VALUE = 1000.0
@@ -215,6 +216,10 @@ class BacktestEngine:
                 carried_targets = None
 
             equity_values.append(portfolio.equity(md.close_val.iloc[i]))
+            self.strategy.sync_positions(portfolio.positions)
+            self.strategy.set_portfolio_context(
+                self._portfolio_context(portfolio, i, signal_i)
+            )
             raw = self.strategy.target_weights(signal_i)
             if raw and FLAT in raw:
                 carried_targets = {FLAT: 1.0}
@@ -333,6 +338,41 @@ class BacktestEngine:
         signal_i = self.signal_offset + i if signal_i is None else int(signal_i)
         lo = max(0, signal_i - ADV_WINDOW)
         return md.amounts.iloc[lo:signal_i].mean()
+
+    def _portfolio_context(
+        self,
+        portfolio: Portfolio,
+        i: int,
+        signal_i: int,
+    ) -> PortfolioConstructionContext:
+        """装配收盘时的账户快照，供 Constructor 约束真实换手与 ADV。
+
+        信号在 T 日收盘产生，因此 ADV 使用截至 T 日的最近五日成交额；实际
+        撮合仍在 T+1 开盘以执行日的历史 ADV 再做一次容量校验。
+        """
+        prices = self.md.close_val.iloc[i]
+        equity = portfolio.equity(prices)
+        current_weights = pd.Series(0.0, index=self.md.symbols, dtype="float64")
+        if equity > 0:
+            for symbol, shares in portfolio.positions.items():
+                price = prices.get(symbol, np.nan)
+                if shares > 0 and pd.notna(price) and float(price) > 0:
+                    current_weights.loc[symbol] = int(shares) * float(price) / equity
+        signal_md = self.signal_md
+        adv = None
+        if signal_md.amounts is not None:
+            lo = max(0, int(signal_i) - ADV_WINDOW + 1)
+            adv = signal_md.amounts.iloc[lo : int(signal_i) + 1].mean().reindex(self.md.symbols)
+        tradable = self.md.volumes.iloc[i]
+        tradable_symbols = tradable[tradable.fillna(0) > 0].index
+        return PortfolioConstructionContext(
+            date=self.md.dates[i],
+            current_weights=current_weights[current_weights > 0],
+            equity=float(equity),
+            tradable=tradable_symbols,
+            adv=adv,
+            max_adv_participation=self.max_adv_participation,
+        )
 
 
 __all__ = [

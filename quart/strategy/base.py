@@ -16,11 +16,14 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from copy import deepcopy
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pandas as pd
 
 from quart.data.market import MarketData
+
+if TYPE_CHECKING:
+    from quart.portfolio.context import PortfolioConstructionContext
 
 #: 参数契约条目: (类型, 默认值, 说明)
 ParamSpec = tuple[type | tuple[type, ...], Any, str]
@@ -135,6 +138,10 @@ class BaseStrategy(ABC):
     def construction_receipt(self) -> dict | None:
         """返回最近一次组合构建回执；非 Constructor 策略默认无回执。"""
         return None
+
+    def set_portfolio_context(self, context: PortfolioConstructionContext | None) -> None:
+        """接收当前账户权重与流动性快照；默认仅保存供子类选择性使用。"""
+        self._portfolio_context = context
 
     def _require_md(self) -> MarketData:
         if self._md is None:

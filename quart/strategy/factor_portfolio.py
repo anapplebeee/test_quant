@@ -14,6 +14,7 @@ import pandas as pd
 from quart.data.market import MarketData
 from quart.portfolio import (
     PortfolioConstraints,
+    PortfolioConstructionContext,
     PortfolioConstructionInput,
     PortfolioConstructionResult,
     PortfolioConstructor,
@@ -44,6 +45,7 @@ class FactorPortfolioStrategy(BaseStrategy):
         "liquidity_days": (int, 20, "流动性回看窗口"),
         "min_price": ((int, float, type(None)), None, "最低价过滤"),
         "risk_aversion": (float, 0.0, "协方差风险惩罚（>0 启用60日样本协方差）"),
+        "max_turnover": ((float, type(None)), None, "Constructor 单次换手硬上限"),
         "turnover_penalty": (float, 0.0, "目标函数换手成本惩罚"),
         "transaction_cost_bps": (float, 0.0, "目标函数预估双边成本（bps）"),
     }
@@ -60,6 +62,7 @@ class FactorPortfolioStrategy(BaseStrategy):
         self.liquidity_days = int(p.get("liquidity_days", 20))
         self.min_price = p.get("min_price")
         self.risk_aversion = float(p.get("risk_aversion", 0.0))
+        self.max_turnover = p.get("max_turnover")
         self.turnover_penalty = float(p.get("turnover_penalty", 0.0))
         self.transaction_cost_bps = float(p.get("transaction_cost_bps", 0.0))
         _validate_params(self)
@@ -96,15 +99,18 @@ class FactorPortfolioStrategy(BaseStrategy):
             return {}
 
         candidates = scores.nlargest(self.top_k)
+        context = getattr(self, "_portfolio_context", None)
+        if context is not None and not isinstance(context, PortfolioConstructionContext):
+            raise TypeError("factor_portfolio 收到无效 PortfolioConstructionContext")
+        tradable_symbols = candidates.index if context is None else context.tradable
         covariance = self._covariance_for(i, candidates.index)
         request = PortfolioConstructionInput(
             alphas=candidates,
-            # 当前权重、ADV 和不可交易持仓由后续组合运行时上下文接入；本策略
-            # 只交付 alpha → 目标权重，不得自行等权。
-            current_weights={},
-            equity=1.0,
-            tradable=candidates.index,
+            current_weights={} if context is None else context.current_weights,
+            equity=1.0 if context is None else context.equity,
+            tradable=tradable_symbols,
             covariance=covariance,
+            adv=None if context is None else context.adv,
             risk_aversion=self.risk_aversion,
             turnover_penalty=self.turnover_penalty,
             transaction_cost_bps=self.transaction_cost_bps,
@@ -113,6 +119,10 @@ class FactorPortfolioStrategy(BaseStrategy):
         constraints = PortfolioConstraints(
             max_weight=self.max_weight,
             min_cash_weight=self.min_cash_weight,
+            max_turnover=self.max_turnover,
+            max_adv_participation=(
+                None if context is None else context.max_adv_participation
+            ),
         )
         self.last_construction = PortfolioConstructor().construct(request, constraints)
         return {
@@ -199,6 +209,8 @@ def _validate_params(strategy: FactorPortfolioStrategy) -> None:
         raise ValueError("min_cash_weight 必须在 [0, 1)")
     if strategy.risk_aversion < 0 or strategy.turnover_penalty < 0:
         raise ValueError("risk_aversion 与 turnover_penalty 不能为负")
+    if strategy.max_turnover is not None and not 0 <= float(strategy.max_turnover) <= 1:
+        raise ValueError("max_turnover 必须在 [0, 1]")
     if strategy.transaction_cost_bps < 0:
         raise ValueError("transaction_cost_bps 不能为负")
 

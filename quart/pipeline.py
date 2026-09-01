@@ -302,22 +302,39 @@ def run_daily(
         cash_total = cash
         sellable_positions = positions
     strategy.sync_positions(positions)
-    raw_weights = strategy.target_weights(i)
-    force_flat = FLAT in raw_weights
-    raw_weights = {} if force_flat else dict(raw_weights)
     last_close = md.closes.iloc[i]
     equity = cash + sum(
         sh * last_close[sym]
         for sym, sh in positions.items()
         if sym in last_close.index and not pd.isna(last_close[sym])
     )
+    adv = md.amounts.iloc[max(0, i - 4):i + 1].mean() if md.amounts is not None else None
+    from quart.portfolio import PortfolioConstructionContext
+
+    tradable = md.volumes.iloc[i]
+    current_weights = {
+        symbol: int(shares) * float(last_close[symbol]) / equity
+        for symbol, shares in positions.items()
+        if equity > 0 and symbol in last_close.index and pd.notna(last_close[symbol])
+    }
+    strategy.set_portfolio_context(PortfolioConstructionContext(
+        date=md.dates[i],
+        current_weights=pd.Series(current_weights, dtype="float64"),
+        equity=float(equity),
+        tradable=tradable[tradable.fillna(0) > 0].index,
+        adv=adv,
+        max_adv_participation=cfg["backtest"].get("max_adv_participation", 0.05),
+    ))
+    raw_weights = strategy.target_weights(i)
+    portfolio_receipt = strategy.construction_receipt()
+    force_flat = FLAT in raw_weights
+    raw_weights = {} if force_flat else dict(raw_weights)
     # RISK-001：正式信号必须经过 Risk Engine（限额与状态都不可绕过）
     limits = limits_from_config(cfg)
     warnings: list[str] = []
     # 前一交易日收盘：涨跌停判断必须基于它，不能用当日收盘
     # （今收 vs 今收算出的涨跌停价永远不触发）
     prev_close = md.closes.iloc[i - 1] if i > 0 else last_close
-    adv = md.amounts.iloc[max(0, i - 5):i].mean() if md.amounts is not None else None
     date = md.dates[i]
     trade_date = intended_trade_date or next_trade_date(str(date.date()))
     risk_equity = cash_total + sum(
@@ -429,6 +446,7 @@ def run_daily(
                 "rule_book_version": rule_book_version,
                 "risk_state": risk_state.value,
                 "daily_loss": daily_loss.to_dict() if daily_loss else None,
+                "portfolio_construction": portfolio_receipt,
             },
         )
         run.put_text("report", report)
@@ -439,6 +457,8 @@ def run_daily(
         run.put_table("weights", pd.DataFrame(
             [{"symbol": s, "weight": w} for s, w in sorted(weights.items())]
         ))
+        if portfolio_receipt is not None:
+            run.put_json("portfolio_construction", portfolio_receipt)
         run.add_metrics(
             equity=float(equity),
             risk_equity=float(risk_equity),
