@@ -192,17 +192,28 @@ class SecurityMaster:
         return df[listed & not_delisted].reset_index(drop=True)
 
     def status_as_of(self, symbol: str, date: str | pd.Timestamp) -> dict[str, Any] | None:
-        """返回某证券在该日期生效的状态记录（含头不含尾），无则 None。"""
+        """返回某证券在该日期生效的状态记录（含头不含尾），无则 None。
+
+        同一日期可能有多个生效区间（如 listed 区间覆盖全历史，ST/delisted
+        区间叠加其上），取 ``status_effective_from`` 最晚者为当前状态。
+        """
         ts = pd.Timestamp(date)
         df = self.table[self.table["symbol"] == str(symbol).zfill(6)]
         if df.empty:
             return None
+        matched = []
         for _, r in df.iterrows():
             start_ok = pd.isna(r["status_effective_from"]) or r["status_effective_from"] <= ts
             end_ok = pd.isna(r["status_effective_to"]) or ts < r["status_effective_to"]
             if start_ok and end_ok:
-                return r.to_dict()
-        return None
+                matched.append(r)
+        if not matched:
+            return None
+        return max(
+            matched,
+            key=lambda r: (r["status_effective_from"]
+                           if pd.notna(r["status_effective_from"]) else pd.Timestamp.min),
+        ).to_dict()
 
     # ---------------- 版本（内容哈希） ----------------
 
@@ -228,9 +239,20 @@ class SecurityMaster:
         if missing_cols:
             problems.append(f"missing columns: {missing_cols}")
             return problems
-        if self.table["symbol"].duplicated().any():
-            dup = self.table[self.table["symbol"].duplicated()]["symbol"].unique()
-            problems.append(f"duplicated symbols (需拆分为状态区间行): {sorted(dup)[:10]}")
+        # 状态区间行设计：同一符号允许多行（listed/st/delisted 区间），
+        # 但同符号同状态区间不得重叠
+        if {"symbol", "status", "status_effective_from", "status_effective_to"}.issubset(self.table.columns):
+            for (sym, status), g in self.table.groupby(["symbol", "status"]):
+                intervals = g[["status_effective_from", "status_effective_to"]].sort_values(
+                    "status_effective_from"
+                )
+                prev_to = None
+                for _, r in intervals.iterrows():
+                    if pd.notna(r["status_effective_from"]) and prev_to is not None:
+                        if pd.isna(prev_to) or r["status_effective_from"] < prev_to:
+                            problems.append(f"overlapping {status} intervals: {sym}")
+                            break
+                    prev_to = r["status_effective_to"]
         bad = self.table["listed_at"].notna() & self.table["delisted_at"].notna() & (
             self.table["listed_at"] > self.table["delisted_at"]
         )
@@ -265,6 +287,52 @@ class SecurityMaster:
 def load_master_version(path: Path | None = None) -> str:
     """读取主数据文件并返回版本哈希（供快照 PIT 元数据调用）。"""
     return SecurityMaster.load(path).version()
+
+
+def is_st_at(master: SecurityMaster, symbol: str, date: str | pd.Timestamp) -> bool:
+    """PIT 判定某证券在该日期是否处于 ST/风险警示状态（含头不含尾）。"""
+    rec = master.status_as_of(symbol, date)
+    return bool(rec and rec.get("status") == "st")
+
+
+def listing_age_days(master: SecurityMaster, symbol: str, date: str | pd.Timestamp) -> int | None:
+    """PIT 上市日龄（自然日）；上市日缺失或未上市返回 None。"""
+    ts = pd.Timestamp(date)
+    df = master.table[master.table["symbol"] == str(symbol).zfill(6)]
+    if df.empty or df["listed_at"].isna().all():
+        return None
+    listed = df["listed_at"].dropna().min()
+    if pd.isna(listed) or listed > ts:
+        return None
+    return int((ts - listed).days)
+
+
+def suspension_intervals(path: Path | None = None) -> pd.DataFrame:
+    """加载停牌区间表（data/meta/suspensions.parquet），无则空表。"""
+    p = path or (Path(data_root()) / "meta" / "suspensions.parquet")
+    if not p.exists():
+        return pd.DataFrame(columns=["snap_date", "symbol", "suspend_from", "resume_at", "reason"])
+    return pd.read_parquet(p)
+
+
+def is_suspended_at(symbol: str, date: str | pd.Timestamp,
+                    suspensions: pd.DataFrame | None = None) -> bool:
+    """PIT 判定该日期是否处于停牌区间（resume_at 空 = 尚未复牌）。"""
+    sus = suspension_intervals() if suspensions is None else suspensions
+    if sus.empty:
+        return False
+    g = sus[sus["symbol"] == str(symbol).zfill(6)]
+    ts = pd.Timestamp(date)
+    for _, r in g.iterrows():
+        frm = pd.to_datetime(r.get("suspend_from"), errors="coerce")
+        to = pd.to_datetime(r.get("resume_at"), errors="coerce")
+        snap = pd.to_datetime(r.get("snap_date"), errors="coerce")
+        start = frm if pd.notna(frm) else snap
+        if pd.isna(start):
+            continue
+        if start <= ts and (pd.isna(to) or ts < to):
+            return True
+    return False
 
 
 def source_mapping_summary() -> pd.DataFrame:
