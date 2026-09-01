@@ -33,6 +33,7 @@ SPEC: dict[str, tuple[type | tuple[type, ...], bool, str]] = {
     "backtest.transfer_fee_rate": ((int, float), True, "过户费"),
     "backtest.slippage_rate": ((int, float), True, "基础滑点"),
     "backtest.impact_coef": ((int, float), False, "冲击成本系数（按 ADV 参与率）"),
+    "backtest.execution_price_mode": ((str,), False, "回测成交价场景 open/vwap/close"),
     "backtest.max_adv_participation": ((int, float), False, "单笔最大 ADV 成交参与率"),
     "backtest.min_order_value": ((int, float), False, "最小委托名义额"),
     "strategy.name": ((str,), True, "默认策略名"),

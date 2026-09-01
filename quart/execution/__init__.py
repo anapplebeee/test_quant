@@ -17,12 +17,14 @@ from quart.execution.models import (
     RebalancePlan,
 )
 from quart.execution.order_generator import generate_orders
+from quart.execution.price_scenarios import PRICE_MODES, PriceScenarioResult, resolve_execution_prices
 from quart.execution.rule_resolver import ExecutionRuleResolver, ResolvedTradeRule
 
 __all__ = [
     "A_SHARE_LOT",
     "BUY",
     "FLAT",
+    "PRICE_MODES",
     "SELL",
     "BacktestExecutionModel",
     "ExecutionContext",
@@ -31,7 +33,9 @@ __all__ = [
     "Fees",
     "LiveExecutionModel",
     "OrderPlan",
+    "PriceScenarioResult",
     "RebalancePlan",
     "ResolvedTradeRule",
     "generate_orders",
+    "resolve_execution_prices",
 ]

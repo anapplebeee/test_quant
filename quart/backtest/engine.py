@@ -33,6 +33,7 @@ from quart.execution.constraints import FLAT, limit_prices, price_limit_pct
 from quart.execution.fees import Fees
 from quart.execution.models import BUY, ExecutionContext
 from quart.execution.order_generator import generate_orders
+from quart.execution.price_scenarios import PRICE_MODES, resolve_execution_prices
 from quart.portfolio import PortfolioConstructionContext
 from quart.strategy.base import BaseStrategy
 
@@ -96,6 +97,8 @@ class BacktestResult:
     pending_targets: dict[str, float] | None = None
     strategy_state: dict = field(default_factory=dict)
     rule_book_version: str | None = None
+    execution_price_mode: str = "open"
+    execution_price_fallbacks: int = 0
 
     @property
     def final_positions(self) -> dict[str, int]:
@@ -111,7 +114,7 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    """T+1 开盘撮合的日线回测引擎。
+    """T+1 成交场景撮合的日线回测引擎。
 
     Parameters
     ----------
@@ -134,6 +137,7 @@ class BacktestEngine:
         rule_book=None,
         security_master=None,
         max_adv_participation: float | None = None,
+        execution_price_mode: str | None = None,
     ):
         cfg = load_config()["backtest"]
         self.md = md
@@ -153,9 +157,18 @@ class BacktestEngine:
             if max_adv_participation is None
             else max_adv_participation
         )
+        self.execution_price_mode = str(
+            cfg.get("execution_price_mode", "open")
+            if execution_price_mode is None else execution_price_mode
+        ).lower()
+        if self.execution_price_mode not in PRICE_MODES:
+            raise ValueError(
+                f"execution_price_mode 必须为 {list(PRICE_MODES)}，收到 {self.execution_price_mode!r}"
+            )
         self.risk_pipeline = risk_pipeline
         self.trades: list[Trade] = []
         self.deferred_orders: list[dict] = []
+        self.execution_price_fallbacks = 0
         from quart.execution.backtest_model import BacktestExecutionModel
         from quart.execution.rule_resolver import ExecutionRuleResolver
 
@@ -168,6 +181,7 @@ class BacktestEngine:
         """清空运行态，使 `run()` 可重复调用（此前二次调用会重复追加 trades）。"""
         self.trades.clear()
         self.deferred_orders.clear()
+        self.execution_price_fallbacks = 0
 
     def run(self) -> pd.Series:
         """执行回测，返回净值曲线。"""
@@ -243,6 +257,8 @@ class BacktestEngine:
             pending_targets=carried_targets,
             strategy_state=self.strategy.serialize_state(),
             rule_book_version=self.rule_resolver.version,
+            execution_price_mode=self.execution_price_mode,
+            execution_price_fallbacks=self.execution_price_fallbacks,
         )
 
     # ---------------- 内部实现 ----------------
@@ -258,7 +274,9 @@ class BacktestEngine:
         md = self.md
         signal_i = self.signal_offset + i if signal_i is None else int(signal_i)
         prev_closes = self._previous_closes(i, signal_i)
-        open_row = md.opens.iloc[i]
+        scenario = resolve_execution_prices(md, i, self.execution_price_mode)
+        exec_prices = scenario.prices
+        self.execution_price_fallbacks += scenario.fallback_count
         adv = self._adv_row(i, signal_i)
 
         equity_mark = portfolio.cash + portfolio.market_value(prev_closes)
@@ -272,7 +290,7 @@ class BacktestEngine:
             cash=portfolio.cash,
             positions=portfolio.positions,
             mark_prices=prev_closes,
-            exec_prices=open_row,
+            exec_prices=exec_prices,
             prev_closes=prev_closes,
             fees=self.fees,
             adv=adv,

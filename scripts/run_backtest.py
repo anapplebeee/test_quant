@@ -163,6 +163,12 @@ def main() -> None:
         "FORMAL_PASS" if args.research_mode == "formal" else
         ("EXPLORATORY_PASS" if quality_gate.passed else "DEGRADED")
     )
+    parser.add_argument(
+        "--execution-price",
+        choices=("open", "vwap", "close"),
+        default=None,
+        help="T+1 成交价场景，默认使用 config.backtest.execution_price_mode",
+    )
     if not quality_gate.passed:
         console.print(
             f"[yellow]exploratory quality degraded: {len(quality_gate.issues)} issue(s); "
@@ -256,7 +262,8 @@ def main() -> None:
 
     fees = Fees.from_config().scaled(args.cost_multiplier)
     execution_meta = {
-        "price_model": "T+1 次日开盘价 + 不利方向滑点",
+        "price_model": "T+1 日内场景价 + 不利方向滑点",
+        "execution_price_mode": args.execution_price or cfg["backtest"].get("execution_price_mode", "open"),
         "commission_rate": fees.commission_rate,
         "commission_min": fees.commission_min,
         "stamp_tax_rate": fees.stamp_tax_rate,
@@ -288,6 +295,7 @@ def main() -> None:
             "no_regime": args.no_regime,
             "risk_enabled": not args.no_risk,
             "cost_multiplier": args.cost_multiplier,
+            "execution_price_mode": args.execution_price,
             "research_mode": args.research_mode,
             "universe": universe_meta,
             "execution": execution_meta,
@@ -305,6 +313,7 @@ def main() -> None:
             fees=fees,
             risk_pipeline=risk_pipeline,
             security_master=security_master,
+            execution_price_mode=args.execution_price,
         ).run_result()
     except Exception as exc:
         run.finish(status="failed", error=str(exc))
@@ -313,6 +322,8 @@ def main() -> None:
     equity = result.equity
     trades_df = result.trades
     deferred_df = result.deferred_orders
+    execution_meta["execution_price_mode"] = result.execution_price_mode
+    execution_meta["execution_price_fallbacks"] = result.execution_price_fallbacks
 
     bench_close = bench.set_index("date")["close"].reindex(equity.index).ffill()
     # 等权基准：与策略同股票池（已过滤板块/ST）的每日等权组合，衡量选股 alpha
@@ -336,6 +347,8 @@ def main() -> None:
         "execution": execution_meta,
         "rule_book_version": result.rule_book_version,
         "n_deferred_orders": len(deferred_df),
+        "execution_price_mode": result.execution_price_mode,
+        "execution_price_fallbacks": result.execution_price_fallbacks,
         "portfolio_construction": portfolio_receipt,
     })
 
@@ -384,6 +397,7 @@ def main() -> None:
            ("cagr", "sharpe", "max_drawdown", "total_return", "calmar", "bench_excess_cagr")},
         n_trades=len(trades_df),
         n_deferred_orders=len(deferred_df),
+        n_execution_price_fallbacks=result.execution_price_fallbacks,
         n_risk_violations=len(violations),
         n_enabled_factors=factor_receipt["enabled_count"],
         n_degraded_factors=factor_receipt["degraded_count"],

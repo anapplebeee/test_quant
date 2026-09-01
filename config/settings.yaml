@@ -26,6 +26,8 @@ backtest:
   transfer_fee_rate: 0.00001
   slippage_rate: 0.001
   impact_coef: 0.10
+  # 日频执行价场景：open（默认）| vwap | close。后两者仅是 T+1 日内回测假设。
+  execution_price_mode: open
   # 单笔回测/信号计划最多占近 5 日平均成交额的比例；超过部分保留为剩余意图。
   max_adv_participation: 0.05
   min_order_value: 1000.0
