@@ -89,6 +89,8 @@ def generate_orders(
     prev_close: pd.Series | None = None,
     sellable_positions: dict[str, int] | None = None,
     trade_date: str | pd.Timestamp | None = None,
+    adv: pd.Series | None = None,
+    max_adv_participation: float | None = None,
 ) -> tuple[list[OrderPlan], float]:
     """生成次日委托计划。
 
@@ -131,6 +133,8 @@ def generate_orders(
         exec_prices=latest_close,
         prev_closes=prev_close,
         fees=fees,
+        adv=adv,
+        max_adv_participation=max_adv_participation,
         lot_size=A_SHARE_LOT,
         rule_resolver=rule_resolver,
         # 实盘不留现金垫：委托计划要如实反映目标仓位，由人判断是否留余地
@@ -313,6 +317,7 @@ def run_daily(
     # 前一交易日收盘：涨跌停判断必须基于它，不能用当日收盘
     # （今收 vs 今收算出的涨跌停价永远不触发）
     prev_close = md.closes.iloc[i - 1] if i > 0 else last_close
+    adv = md.amounts.iloc[max(0, i - 5):i].mean() if md.amounts is not None else None
     date = md.dates[i]
     trade_date = intended_trade_date or next_trade_date(str(date.date()))
     risk_equity = cash_total + sum(
@@ -348,6 +353,8 @@ def run_daily(
             prev_close=prev_close,
             sellable_positions=sellable_positions,
             trade_date=trade_date,
+            adv=adv,
+            max_adv_participation=cfg["backtest"].get("max_adv_participation", 0.05),
         )
         if risk_state is RiskState.REDUCING:
             buys = [o for o in orders if o.side == BUY]

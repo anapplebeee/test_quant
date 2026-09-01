@@ -33,6 +33,7 @@ SPEC: dict[str, tuple[type | tuple[type, ...], bool, str]] = {
     "backtest.transfer_fee_rate": ((int, float), True, "过户费"),
     "backtest.slippage_rate": ((int, float), True, "基础滑点"),
     "backtest.impact_coef": ((int, float), False, "冲击成本系数（按 ADV 参与率）"),
+    "backtest.max_adv_participation": ((int, float), False, "单笔最大 ADV 成交参与率"),
     "backtest.min_order_value": ((int, float), False, "最小委托名义额"),
     "strategy.name": ((str,), True, "默认策略名"),
     "strategy.live_allowlist": ((list,), False, "允许生成正式交易计划的策略白名单"),
@@ -125,4 +126,4 @@ def ensure_valid(cfg: dict, strict: bool = False) -> dict:
     return cfg
 
 
-__all__ = ["ConfigError", "SPEC", "ensure_valid", "validate_config"]
+__all__ = ["SPEC", "ConfigError", "ensure_valid", "validate_config"]

@@ -53,6 +53,9 @@ class ExecutionContext:
         费用与滑点模型。
     adv:
         近 N 日平均成交额，用于冲击成本；None 时跳过。
+    max_adv_participation:
+        单笔可成交额占 ADV 的上限。None 表示不做容量裁剪（仅用于兼容历史
+        合成测试）；正式回测和每日信号由配置传入正值。
     tradable:
         可交易掩码（停牌/无行情=False）；None 表示不限制。
     lot_size:
@@ -80,6 +83,7 @@ class ExecutionContext:
     sellable_positions: dict[str, int] | None = None
     fees: Fees = field(default_factory=Fees)
     adv: pd.Series | None = None
+    max_adv_participation: float | None = None
     tradable: pd.Series | None = None
     lot_size: int = A_SHARE_LOT
     min_order_value: float = 1000.0
@@ -108,6 +112,7 @@ class OrderPlan:
     amount: float = 0.0
     blocked_reason: str | None = None
     deferred_shares: int = 0
+    deferred_reason: str | None = None
 
     @property
     def action(self) -> str:
@@ -172,6 +177,8 @@ class RebalancePlan:
     buy_notional: float = 0.0
     total_fee: float = 0.0
     notes: list[str] = field(default_factory=list)
+    #: 是否存在因 ADV 容量约束形成的剩余意图；回测引擎据此在下一日继续执行。
+    has_capacity_deferral: bool = False
 
     @property
     def filled(self) -> list[OrderPlan]:

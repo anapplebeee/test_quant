@@ -264,6 +264,8 @@ def main() -> None:
         "slippage_rate": fees.slippage_rate,
         "impact_coef": fees.impact_coef,
         "impact_model": "base + coef × sqrt(min(order/ADV5, 1))",
+        "max_adv_participation": cfg["backtest"].get("max_adv_participation", 0.05),
+        "capacity_model": "filled_notional <= ADV5 × max_adv_participation；超额延期",
         "lot_size": 100,
         "limit_rule": "按交易日与板块涨跌停规则拒单",
         "suspension_rule": "无开盘行情/不可交易时拒单，持仓继续估值",
@@ -310,6 +312,7 @@ def main() -> None:
 
     equity = result.equity
     trades_df = result.trades
+    deferred_df = result.deferred_orders
 
     bench_close = bench.set_index("date")["close"].reindex(equity.index).ffill()
     # 等权基准：与策略同股票池（已过滤板块/ST）的每日等权组合，衡量选股 alpha
@@ -331,6 +334,7 @@ def main() -> None:
         "universe": universe_meta,
         "execution": execution_meta,
         "rule_book_version": result.rule_book_version,
+        "n_deferred_orders": len(deferred_df),
     })
 
     console.print(Panel(
@@ -357,6 +361,8 @@ def main() -> None:
     equity_frame.to_csv(out_dir / f"equity_{args.strategy}_{stamp}.csv")
     if not trades_df.empty:
         trades_df.to_csv(out_dir / f"trades_{args.strategy}_{stamp}.csv", index=False)
+    if not deferred_df.empty:
+        deferred_df.to_csv(out_dir / f"deferred_{args.strategy}_{stamp}.csv", index=False)
     with open(out_dir / f"summary_{args.strategy}_{stamp}.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     console.print(f"[green]结果已保存到 {out_dir}/[/green]")
@@ -365,12 +371,15 @@ def main() -> None:
     run.put_table("equity", equity_frame.rename_axis("date").reset_index())
     if not trades_df.empty:
         run.put_table("trades", trades_df)
+    if not deferred_df.empty:
+        run.put_table("deferred_orders", deferred_df)
     run.put_json("summary", summary)
     run.put_json("factor_receipt", factor_receipt)
     run.add_metrics(
         **{k: summary.get(k) for k in
            ("cagr", "sharpe", "max_drawdown", "total_return", "calmar", "bench_excess_cagr")},
         n_trades=len(trades_df),
+        n_deferred_orders=len(deferred_df),
         n_risk_violations=len(violations),
         n_enabled_factors=factor_receipt["enabled_count"],
         n_degraded_factors=factor_receipt["degraded_count"],

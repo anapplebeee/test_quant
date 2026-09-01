@@ -62,6 +62,33 @@ def _lot_size(ctx: ExecutionContext, symbol: str) -> int:
         return int(ctx.lot_size)
 
 
+def _capacity_shares(
+    ctx: ExecutionContext,
+    symbol: str,
+    requested_shares: int,
+    base_price: float,
+    lot: int,
+) -> tuple[int, int]:
+    """按 ADV 参与率返回（可成交数量，容量延期数量）。
+
+    ADV 缺失时不虚构流动性：调用方可通过 QualityGate 或 Artifact 识别该
+    降级，而合成测试可保持历史行为。启用容量后，即使只允许不足一手的金额
+    也不会假设成交，必须等待到至少一手的可成交容量。
+    """
+    requested = max(0, int(requested_shares))
+    participation = ctx.max_adv_participation
+    if requested <= 0 or participation is None:
+        return requested, 0
+    if not 0 < float(participation) <= 1:
+        raise ValueError("max_adv_participation 必须在 (0, 1] 内")
+    adv = _adv(ctx, symbol)
+    if adv <= 0 or not math.isfinite(base_price) or base_price <= 0:
+        return requested, 0
+    capacity_lots = math.floor((adv * float(participation)) / (base_price * lot))
+    allowed = min(requested, max(0, int(capacity_lots)) * lot)
+    return allowed, requested - allowed
+
+
 def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePlan:
     """把目标权重转换为委托计划。纯函数，不修改入参。"""
     bind_context = getattr(model, "bind_context", None)
@@ -87,6 +114,7 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
     sell_proceeds = 0.0
     buy_notional = 0.0
     total_fee = 0.0
+    has_capacity_deferral = False
 
     # ---------------- 卖腿 ----------------
     # 先卖后买：A 股卖出资金当日可用于买入，且先卖能释放预算避免买不起。
@@ -137,7 +165,9 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
 
         sell_shares = min(requested_sell_shares, sellable)
         deferred_shares = requested_sell_shares - sell_shares
+        deferred_reasons: list[str] = []
         if deferred_shares > 0:
+            deferred_reasons.append("T+1/冻结约束")
             notes.append(
                 f"{sym}: 计划卖出 {requested_sell_shares} 股，其中 {deferred_shares} 股受 T+1/冻结约束延期"
             )
@@ -152,11 +182,36 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
                         base_price,
                         blocked_reason="T+1/冻结导致当日无可卖数量",
                         deferred_shares=deferred_shares,
+                        deferred_reason="T+1/冻结约束",
                     )
                 )
             continue
         # 清仓分支不检查 position_notional：一字板/停牌股也应尽力挂单卖出
         if not is_flat and not math.isfinite(position_notional):
+            continue
+
+        sell_shares, capacity_deferred = _capacity_shares(ctx, sym, sell_shares, base_price, lot)
+        if capacity_deferred > 0:
+            has_capacity_deferral = True
+            deferred_shares += capacity_deferred
+            deferred_reasons.append("ADV容量约束")
+            notes.append(
+                f"{sym}: ADV 容量限制，本日最多成交 {sell_shares} 股，"
+                f"剩余 {capacity_deferred} 股保留为后续执行意图"
+            )
+        if sell_shares <= 0:
+            skipped.append(
+                OrderPlan(
+                    sym,
+                    SELL,
+                    0,
+                    ref_price,
+                    base_price,
+                    blocked_reason="ADV 容量不足一手，卖出延期",
+                    deferred_shares=deferred_shares,
+                    deferred_reason="; ".join(deferred_reasons) or "ADV容量约束",
+                )
+            )
             continue
 
         order_notional = sell_shares * base_price
@@ -188,6 +243,7 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
                 fee=fee,
                 amount=amount,
                 deferred_shares=deferred_shares,
+                deferred_reason="; ".join(deferred_reasons) or None,
             )
         )
 
@@ -205,6 +261,7 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
             buy_notional=0.0,
             total_fee=total_fee,
             notes=notes,
+            has_capacity_deferral=has_capacity_deferral,
         )
 
     # ---------------- 买腿 ----------------
@@ -239,24 +296,50 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
                 notes.append(f"{sym}: 可用资金不足，买入计划被裁剪")
             continue
 
-        order_notional = min(budget, delta)
+        # 先以基准价按现金预算做整手取整，再由 ADV 容量裁剪。成交价和冲击
+        # 成本只对最终可成交数量计算，避免部分成交仍按整笔目标收费。
+        if not math.isfinite(budget):
+            continue
+        unit_cost = base_price
+        if ctx.reserve_fees:
+            unit_cost = base_price * (1 + fees.commission_rate + fees.transfer_fee_rate)
+        requested_buy_shares = int(math.floor(budget / (unit_cost * lot)) * lot)
+        if requested_buy_shares < lot:
+            if delta >= max(ctx.min_order_value, lot * base_price):
+                notes.append(f"{sym}: 可用资金不足一手，买入计划被裁剪")
+            continue
+
+        shares_to_buy, capacity_deferred = _capacity_shares(
+            ctx, sym, requested_buy_shares, base_price, lot
+        )
+        if capacity_deferred > 0:
+            has_capacity_deferral = True
+            notes.append(
+                f"{sym}: ADV 容量限制，本日最多成交 {shares_to_buy} 股，"
+                f"剩余 {capacity_deferred} 股保留为后续执行意图"
+            )
+        if shares_to_buy < lot:
+            skipped.append(
+                OrderPlan(
+                    sym,
+                    BUY,
+                    0,
+                    ref_price,
+                    base_price,
+                    weight,
+                    blocked_reason="ADV 容量不足一手，买入延期",
+                    deferred_shares=capacity_deferred,
+                    deferred_reason="ADV容量约束",
+                )
+            )
+            continue
+
+        order_notional = shares_to_buy * base_price
         px = model.exec_price(
             sym, BUY, base_price, order_notional,
             _slip_notional(ctx, order_notional, position_notional), _adv(ctx, sym),
         )
-        if not math.isfinite(px) or px <= 0 or not math.isfinite(budget):
-            continue
-        if budget < max(ctx.min_order_value, lot * px):
-            continue
-
-        unit_cost = px
-        if ctx.reserve_fees:
-            unit_cost = px * (1 + fees.commission_rate + fees.transfer_fee_rate)
-        shares_to_buy = math.floor(budget / (unit_cost * lot)) * lot
-        shares_to_buy = int(shares_to_buy)
-        if shares_to_buy < lot:
-            if delta >= max(ctx.min_order_value, lot * px):
-                notes.append(f"{sym}: 可用资金不足一手，买入计划被裁剪")
+        if not math.isfinite(px) or px <= 0:
             continue
 
         amount = shares_to_buy * px
@@ -284,6 +367,8 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
                 weight=weight,
                 fee=fee,
                 amount=amount,
+                deferred_shares=capacity_deferred,
+                deferred_reason="ADV容量约束" if capacity_deferred else None,
             )
         )
 
@@ -296,6 +381,7 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
         buy_notional=buy_notional,
         total_fee=total_fee,
         notes=notes,
+        has_capacity_deferral=has_capacity_deferral,
     )
 
 

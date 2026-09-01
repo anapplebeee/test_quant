@@ -86,6 +86,7 @@ class BacktestResult:
 
     equity: pd.Series
     trades: pd.DataFrame
+    deferred_orders: pd.DataFrame
     strategy: str
     params: dict
     initial_cash: float
@@ -131,6 +132,7 @@ class BacktestEngine:
         signal_offset: int = 0,
         rule_book=None,
         security_master=None,
+        max_adv_participation: float | None = None,
     ):
         cfg = load_config()["backtest"]
         self.md = md
@@ -145,8 +147,14 @@ class BacktestEngine:
         self.fees = fees or Fees.from_config()
         self.initial_cash = initial_cash if initial_cash is not None else cfg["initial_cash"]
         self.min_order_value = cfg.get("min_order_value", MIN_ORDER_VALUE)
+        self.max_adv_participation = (
+            cfg.get("max_adv_participation", 0.05)
+            if max_adv_participation is None
+            else max_adv_participation
+        )
         self.risk_pipeline = risk_pipeline
         self.trades: list[Trade] = []
+        self.deferred_orders: list[dict] = []
         from quart.execution.backtest_model import BacktestExecutionModel
         from quart.execution.rule_resolver import ExecutionRuleResolver
 
@@ -158,6 +166,7 @@ class BacktestEngine:
     def reset(self) -> None:
         """清空运行态，使 `run()` 可重复调用（此前二次调用会重复追加 trades）。"""
         self.trades.clear()
+        self.deferred_orders.clear()
 
     def run(self) -> pd.Series:
         """执行回测，返回净值曲线。"""
@@ -181,19 +190,26 @@ class BacktestEngine:
             positions={str(k): int(v) for k, v in (initial_positions or {}).items() if int(v) > 0},
         )
         equity_values: list[float] = []
-        carried_targets = dict(pending_targets) if pending_targets else None
+        carried_targets = dict(pending_targets) if pending_targets is not None else None
 
         for i in range(len(dates)):
             signal_i = self.signal_offset + i
             if carried_targets is not None and (i > 0 or signal_i > 0):
                 was_flat = bool(carried_targets.get(FLAT))
-                portfolio.cash = self._rebalance(portfolio, carried_targets, i, signal_i)
+                portfolio.cash, capacity_deferred = self._rebalance(
+                    portfolio, carried_targets, i, signal_i
+                )
                 # 每次撮合后同步策略真实持仓（换手缓冲带/持仓惯性策略需要）
                 self.strategy.sync_positions(portfolio.positions)
                 if was_flat and portfolio.positions:
                     # 清仓未完成时（跌停/停牌），保持 FLAT 意图隔日继续挂单，
                     # 且不调用 target_weights——策略在空仓态不应再产出选股
                     carried_targets = {FLAT: 1.0}
+                    equity_values.append(portfolio.equity(md.close_val.iloc[i]))
+                    continue
+                if capacity_deferred:
+                    # 不因当日容量裁剪而丢失原始调仓目标；下一交易日继续以当时
+                    # 组合市值计算剩余差额，直到目标达成或再次被规则拒绝。
                     equity_values.append(portfolio.equity(md.close_val.iloc[i]))
                     continue
                 carried_targets = None
@@ -209,9 +225,11 @@ class BacktestEngine:
 
         equity = pd.Series(equity_values, index=dates, name="equity")
         trades_df = pd.DataFrame([t.__dict__ for t in self.trades])
+        deferred_df = pd.DataFrame(self.deferred_orders)
         return BacktestResult(
             equity=equity,
             trades=trades_df,
+            deferred_orders=deferred_df,
             strategy=getattr(self.strategy, "name", "unknown"),
             params=dict(getattr(self.strategy, "params", {})),
             initial_cash=float(starting_cash),
@@ -230,8 +248,8 @@ class BacktestEngine:
         targets: dict[str, float],
         i: int,
         signal_i: int | None = None,
-    ) -> float:
-        """在 T+1 开盘执行 target weights，返回执行后的现金。"""
+    ) -> tuple[float, bool]:
+        """在 T+1 开盘执行 target weights，返回（现金，是否有容量剩余意图）。"""
         md = self.md
         signal_i = self.signal_offset + i if signal_i is None else int(signal_i)
         prev_closes = self._previous_closes(i, signal_i)
@@ -253,6 +271,7 @@ class BacktestEngine:
             prev_closes=prev_closes,
             fees=self.fees,
             adv=adv,
+            max_adv_participation=self.max_adv_participation,
             min_order_value=self.min_order_value,
             cash_buffer=LEGACY_CASH_BUFFER,
             rule_resolver=self.rule_resolver,
@@ -272,7 +291,20 @@ class BacktestEngine:
                     fee=round(o.fee, 2),
                 )
             )
-        return plan.ending_cash
+        for order in [*plan.orders, *plan.skipped]:
+            if order.deferred_shares <= 0:
+                continue
+            self.deferred_orders.append(
+                {
+                    "date": md.dates[i],
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "deferred_shares": order.deferred_shares,
+                    "deferred_reason": order.deferred_reason,
+                    "blocked_reason": order.blocked_reason,
+                }
+            )
+        return plan.ending_cash, plan.has_capacity_deferral
 
     def _apply_risk(
         self,
