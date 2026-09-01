@@ -19,7 +19,7 @@ def _safe(fn, default):
     """组件内所有 api 调用的统一降级：异常 → 默认值，绝不向上抛。"""
     try:
         return fn()
-    except Exception as exc:  # noqa: BLE001 - UI 层必须吞掉所有异常
+    except Exception as exc:
         return default(f"{type(exc).__name__}: {exc}") if callable(default) else default
 
 
@@ -32,7 +32,8 @@ def render_artifacts_panel(open: bool = False) -> None:
 
         runs_tbl = gr.Dataframe(
             value=_safe(artifacts_api.runs_table, lambda e: None),
-            interactive=False, max_height=280, wrap=True,
+            interactive=False, max_height=320, wrap=True,
+            show_search="filter", pinned_columns=2, buttons=["fullscreen", "copy"],
         )
         refresh_runs = gr.Button("🔄 刷新运行列表", size="sm")
 

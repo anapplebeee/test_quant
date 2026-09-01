@@ -7,13 +7,14 @@ API 层读空并静默返回空。
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 
+import numpy as np
 import pandas as pd
-
-from common import degraded, reports_dir, safe_path, valid_name
 
 # 策略中文名：单一数据源 → frontend/pages 同源；新增策略只需改 REGISTRY + STRATEGY_META。
 from api.strategy_api import STRATEGY_META
+from common import degraded, reports_dir, safe_path, valid_name
 
 
 def _warn(where: str, exc: BaseException) -> None:
@@ -71,10 +72,8 @@ def scan_summaries(limit: int | None = None) -> pd.DataFrame:
         ctime = m.group(3) if m else ""
         run_date = f"{cdate[:4]}-{cdate[4:6]}-{cdate[6:8]}" if len(cdate) == 8 else ""
         run_dt = None
-        try:
+        with suppress(Exception):
             run_dt = pd.to_datetime(f"{cdate}{ ctime}", format="%Y%m%d%H%M%S")
-        except Exception:
-            pass
         # 策略中文名：来自 STRATEGY_META 的 label 字段；找不到则回退英文 key
         strategy_zh = STRATEGY_META.get(strategy_key, {}).get("label", strategy_key)
         label = f"{strategy_zh} · {cdate} {ctime[:2]}:{ctime[2:4]}" if cdate else name
@@ -129,6 +128,150 @@ def get_equity_curve(name: str) -> pd.DataFrame | None:
     return None
 
 
+def get_benchmark_comparison(name: str) -> pd.DataFrame | None:
+    """返回归一化策略、配置基准与超额净值，兼容未固化基准的旧回测。
+
+    新旧回测都以策略首个有效净值日归一到 1。基准仅在真实覆盖日期内参与，
+    不向回测开始日前反向填充，避免制造虚假的同期对照。
+    """
+    frame = get_equity_curve(name)
+    if frame is None or frame.empty or "date" not in frame.columns:
+        return None
+    value_columns = [c for c in frame.columns if c != "date"]
+    if not value_columns:
+        return None
+    value_column = "equity" if "equity" in value_columns else value_columns[0]
+    try:
+        strategy = pd.Series(
+            pd.to_numeric(frame[value_column], errors="coerce").to_numpy(),
+            index=pd.to_datetime(frame["date"], errors="coerce"),
+            name="strategy",
+        ).dropna().sort_index()
+    except Exception as exc:
+        _warn("benchmark_comparison_strategy", exc)
+        return None
+    if strategy.empty or float(strategy.iloc[0]) <= 0:
+        return None
+
+    benchmark = _benchmark_series().reindex(strategy.index).ffill()
+    first_valid = benchmark.first_valid_index()
+    if first_valid is None:
+        return None
+    benchmark = benchmark.loc[first_valid:]
+    strategy = strategy.reindex(benchmark.index).dropna()
+    benchmark = benchmark.reindex(strategy.index).dropna()
+    strategy = strategy.reindex(benchmark.index)
+    if len(strategy) < 2 or float(benchmark.iloc[0]) <= 0:
+        return None
+
+    strategy_nav = strategy / float(strategy.iloc[0])
+    benchmark_nav = benchmark / float(benchmark.iloc[0])
+    result = pd.DataFrame({
+        "date": strategy_nav.index,
+        "strategy_nav": strategy_nav.to_numpy(),
+        "benchmark_nav": benchmark_nav.to_numpy(),
+    })
+    result["excess_nav"] = result["strategy_nav"] / result["benchmark_nav"]
+    return result.reset_index(drop=True)
+
+
+def get_performance_diagnostics(name: str) -> dict | None:
+    """从已落盘净值补算页面诊断指标，不要求重新回测。"""
+    comparison = get_benchmark_comparison(name)
+    if comparison is None or len(comparison) < 3:
+        return None
+
+    from quart.backtest.metrics import TRADING_DAYS
+
+    strategy = pd.Series(
+        comparison["strategy_nav"].astype(float).to_numpy(),
+        index=pd.to_datetime(comparison["date"]),
+    )
+    benchmark = pd.Series(
+        comparison["benchmark_nav"].astype(float).to_numpy(), index=strategy.index
+    )
+    returns = strategy.pct_change(fill_method=None).dropna()
+    benchmark_returns = benchmark.pct_change(fill_method=None).reindex(returns.index)
+    excess = (returns - benchmark_returns).dropna()
+    if returns.empty:
+        return None
+
+    downside = returns.clip(upper=0.0)
+    downside_deviation = float(np.sqrt(np.mean(np.square(downside))) * np.sqrt(TRADING_DAYS))
+    sortino = None
+    if downside_deviation > 1e-12:
+        sortino = float(returns.mean() * TRADING_DAYS / downside_deviation)
+
+    tracking_error = None
+    information_ratio = None
+    if len(excess) > 1 and float(excess.std(ddof=1)) > 1e-12:
+        tracking_error = float(excess.std(ddof=1) * np.sqrt(TRADING_DAYS))
+        information_ratio = float(excess.mean() / excess.std(ddof=1) * np.sqrt(TRADING_DAYS))
+
+    drawdown = strategy / strategy.cummax() - 1.0
+    underwater = drawdown < -1e-12
+    groups = (~underwater).cumsum()
+    max_drawdown_duration = int(underwater.groupby(groups).sum().max()) if underwater.any() else 0
+    current_drawdown_duration = 0
+    if bool(underwater.iloc[-1]):
+        current_drawdown_duration = int(underwater.groupby(groups).sum().iloc[-1])
+
+    trough = drawdown.idxmin()
+    peak = strategy.loc[:trough].idxmax()
+    peak_value = float(strategy.loc[peak])
+    recovered = strategy.loc[trough:][strategy.loc[trough:] >= peak_value]
+    recovery_date = recovered.index[0] if not recovered.empty else None
+    peak_pos = int(strategy.index.get_loc(peak))
+    recovery_days = (
+        int(strategy.index.get_loc(recovery_date)) - peak_pos if recovery_date is not None else None
+    )
+
+    q05 = float(returns.quantile(0.05))
+    tail = returns[returns <= q05]
+    return {
+        "sortino": sortino,
+        "downside_vol": downside_deviation,
+        "tracking_error": tracking_error,
+        "information_ratio": information_ratio,
+        "skew": float(returns.skew()) if len(returns) > 2 else None,
+        "kurtosis": float(returns.kurt()) if len(returns) > 3 else None,
+        "cvar_95": float(tail.mean()) if not tail.empty else None,
+        "worst_day": float(returns.min()),
+        "max_drawdown_duration": max_drawdown_duration,
+        "current_drawdown_duration": current_drawdown_duration,
+        "drawdown_peak_date": str(peak.date()),
+        "drawdown_trough_date": str(trough.date()),
+        "drawdown_recovery_date": str(recovery_date.date()) if recovery_date is not None else None,
+        "drawdown_recovery_days": recovery_days,
+    }
+
+
+def get_execution_assumptions(name: str | None = None) -> dict:
+    """返回回测执行口径；新 run 优先读固化值，旧 run 回退当前配置并明确标记。"""
+    from quart.config import load_config
+
+    cfg = load_config()
+    summary = get_backtest_summary(name) if name else None
+    persisted = (summary or {}).get("execution")
+    execution = dict(persisted or {})
+    bcfg = cfg.get("backtest", {})
+    dcfg = cfg.get("data", {})
+    execution.setdefault("price_model", "T+1 次日开盘价 + 不利方向滑点")
+    execution.setdefault("commission_rate", bcfg.get("commission_rate", 0.0))
+    execution.setdefault("commission_min", bcfg.get("commission_min", 0.0))
+    execution.setdefault("stamp_tax_rate", bcfg.get("stamp_tax_rate", 0.0))
+    execution.setdefault("transfer_fee_rate", bcfg.get("transfer_fee_rate", 0.0))
+    execution.setdefault("slippage_rate", bcfg.get("slippage_rate", 0.0))
+    execution.setdefault("impact_coef", bcfg.get("impact_coef", 0.0))
+    execution.setdefault("impact_model", "base + coef × sqrt(min(order/ADV5, 1))")
+    execution.setdefault("price_adjust", dcfg.get("adjust", "unknown"))
+    execution.setdefault("lot_size", 100)
+    execution.setdefault("limit_rule", "按交易日与板块涨跌停规则拒单")
+    execution.setdefault("suspension_rule", "无开盘行情/不可交易时拒单，持仓继续估值")
+    execution["source"] = "run" if persisted else "current_config_fallback"
+    return execution
+
+
 def get_trades(name: str) -> pd.DataFrame | None:
     """获取交易记录"""
     if not valid_name(name):
@@ -137,14 +280,17 @@ def get_trades(name: str) -> pd.DataFrame | None:
     if path is None:
         return None
     try:
-        df = pd.read_csv(path, parse_dates=["date"])
+        df = pd.read_csv(path, parse_dates=["date"], dtype={"symbol": str})
         df = df.sort_values("date", ascending=False)
+        df["symbol"] = (
+            df["symbol"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(6)
+        )
 
         try:
             from common import load_stock_names
 
             stock_names = load_stock_names()
-            df["名称"] = df["symbol"].apply(lambda x: f"{int(x):06d}").map(stock_names).fillna("-")
+            df["名称"] = df["symbol"].map(stock_names).fillna("-")
         except Exception as e:
             _warn("trades_names", e)
             df["名称"] = "-"
@@ -222,7 +368,7 @@ def get_cost_breakdown(name: str) -> dict | None:
         "cost_pct_init": float(total_cost / init_cash) if init_cash else 0.0,
         "turnover_2way": turnover_2way,
         "turnover_x": float(turnover_2way / init_cash) if init_cash else 0.0,
-        "n_trades": int(len(df)),
+        "n_trades": len(df),
         "n_buy": int((df["side"] == "BUY").sum()),
         "n_sell": int((df["side"] == "SELL").sum()),
         "slip_matched": matched,

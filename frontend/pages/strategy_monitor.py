@@ -18,7 +18,7 @@ from api.strategy_api import (
     strategy_choices as _strategy_choices,
 )
 from api.task_api import TASKS, get_task_artifacts, task_queue
-from frontend.theme import metric_card, page_header
+from frontend.theme import metric_card, metric_grid, page_header
 
 # ---------- 任务执行（流式+队列） ----------
 
@@ -259,16 +259,19 @@ def render():
 
             def _holdings_cards(summary) -> str:
                 if not summary:
-                    return "<div class='info-card'>*当前无持仓，或账本未初始化*</div>"
-                return (
-                    metric_card("现金", f"{summary['cash']:,.0f} CNY", "green")
-                    + metric_card("持仓市值", f"{summary['equity']:,.0f} CNY", "blue")
-                    + metric_card("账户总值", f"{summary['total']:,.0f} CNY", "purple")
-                )
+                    return "<div class='info-card'>当前无持仓，或账本未初始化。</div>"
+                return metric_grid([
+                    metric_card("现金", f"{summary['cash']:,.0f} CNY", "green"),
+                    metric_card("持仓市值", f"{summary['equity']:,.0f} CNY", "blue"),
+                    metric_card("账户总值", f"{summary['total']:,.0f} CNY", "purple"),
+                ])
 
             with gr.Row():
                 holdings_cards = gr.HTML(value=_holdings_cards(summary))
-            holdings_table = gr.Dataframe(value=pos_df, interactive=False)
+            holdings_table = gr.Dataframe(
+                value=pos_df, interactive=False, show_search="filter",
+                pinned_columns=1, buttons=["fullscreen", "copy"],
+            )
 
             gr.Markdown("### 🛡️ 风控规则")
             gr.Markdown("""

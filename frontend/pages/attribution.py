@@ -10,15 +10,19 @@ from api.portfolio_api import (
     latest_monthly_returns,
     portfolio_factor_exposure,
 )
-from frontend.theme import page_header
+from frontend.theme import page_header, section_header
 
 
 def render():
     """渲染归因分析 Tab。"""
     with gr.Tab("🧩 归因分析"):
-        gr.HTML(page_header("🧩 归因分析", "行业归因 / 收益时序 / 持仓因子暴露"))
+        gr.HTML(page_header(
+            "🧩 归因分析",
+            "从行业交易、收益时序与当前持仓风格三个视角解释策略结果。",
+            "ATTRIBUTION",
+        ))
 
-        gr.Markdown("### 🏭 行业交易分布")
+        gr.HTML(section_header("行业交易分布", "按最新回测成交额汇总买卖方向。", "INDUSTRY"))
         industry = latest_industry_trade_summary()
         if industry.empty:
             gr.Info("暂无同时包含交易记录和行业映射的回测制品")
@@ -38,7 +42,7 @@ def render():
             )
             gr.Plot(value=figure)
 
-        gr.Markdown("### 📅 月度收益热力图")
+        gr.HTML(section_header("月度收益热力图", "识别年度稳定性、季节性与收益集中月份。", "RETURN PATTERN"))
         monthly = latest_monthly_returns()
         if monthly.empty:
             gr.Info("暂无带日期索引的回测净值制品")
@@ -55,7 +59,11 @@ def render():
             )
             gr.Plot(value=monthly_figure)
 
-        gr.Markdown("### 📊 持仓因子暴露（真实行情计算）")
+        gr.HTML(section_header(
+            "持仓因子暴露",
+            "基于当前真实持仓计算；这是可解释风格代理，并非完整 Barra 风险模型。",
+            "STYLE EXPOSURE",
+        ))
         gr.Markdown(
             "*持仓等权是当前持仓股票的等权参照；主动暴露 = 市值加权组合 − 持仓等权。"
             "它不是全市场 Barra 风险模型。价值等基本面因子缺数据时明确显示 N/A。*"
@@ -64,7 +72,10 @@ def render():
         if exposure.empty:
             gr.Info("当前无持仓，或持仓行情不足 25 个交易日")
         else:
-            gr.Dataframe(value=exposure, interactive=False)
+            gr.Dataframe(
+                value=exposure, interactive=False, show_search="filter",
+                pinned_columns=1, buttons=["fullscreen", "copy"],
+            )
             valid = exposure.dropna(subset=["主动暴露"])
             if not valid.empty:
                 exposure_figure = go.Figure()

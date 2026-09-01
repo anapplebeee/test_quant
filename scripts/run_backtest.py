@@ -201,6 +201,22 @@ def main() -> None:
             float(cfg["risk"]["max_position_pct"]), collect=violations
         )
 
+    fees = Fees.from_config().scaled(args.cost_multiplier)
+    execution_meta = {
+        "price_model": "T+1 次日开盘价 + 不利方向滑点",
+        "commission_rate": fees.commission_rate,
+        "commission_min": fees.commission_min,
+        "stamp_tax_rate": fees.stamp_tax_rate,
+        "transfer_fee_rate": fees.transfer_fee_rate,
+        "slippage_rate": fees.slippage_rate,
+        "impact_coef": fees.impact_coef,
+        "impact_model": "base + coef × sqrt(min(order/ADV5, 1))",
+        "lot_size": 100,
+        "limit_rule": "按交易日与板块涨跌停规则拒单",
+        "suspension_rule": "无开盘行情/不可交易时拒单，持仓继续估值",
+        "price_adjust": data_cfg.get("adjust", "unknown"),
+    }
+
     # 产出同时写 artifacts/（可追溯：run_id + 参数 + 数据版本 + 指纹）
     # 与 reports/（兼容现有 api/frontend）
     run = ArtifactStore().create_run(
@@ -214,11 +230,11 @@ def main() -> None:
             "cost_multiplier": args.cost_multiplier,
             "research_mode": args.research_mode,
             "universe": universe_meta,
+            "execution": execution_meta,
         },
     )
 
     try:
-        fees = Fees.from_config().scaled(args.cost_multiplier)
         result = BacktestEngine(md, strategy, fees=fees, risk_pipeline=risk_pipeline).run_result()
     except Exception as exc:
         run.finish(status="failed", error=str(exc))
@@ -231,6 +247,13 @@ def main() -> None:
     # 等权基准：与策略同股票池（已过滤板块/ST）的每日等权组合，衡量选股 alpha
     ew_bench = equal_weight_benchmark(equity, bars)
     summary = summarize(equity, benchmark=bench_close, benchmark2=ew_bench, benchmark2_name="bench2")
+    summary.update({
+        "initial_cash": result.initial_cash,
+        "benchmark": cfg["benchmark"],
+        "research_mode": args.research_mode,
+        "universe": universe_meta,
+        "execution": execution_meta,
+    })
 
     console.print(Panel(
         f"策略: {args.strategy}  | 交易笔数: {len(trades_df)} | "
@@ -245,7 +268,15 @@ def main() -> None:
     out_dir = Path(args.save_dir)
     out_dir.mkdir(exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    equity.to_frame("equity").to_csv(out_dir / f"equity_{args.strategy}_{stamp}.csv")
+    equity_frame = equity.to_frame("equity")
+    bench_valid = bench_close.dropna()
+    if not bench_valid.empty and float(bench_valid.iloc[0]) > 0:
+        base = float(equity.iloc[0])
+        equity_frame["benchmark"] = bench_close / float(bench_valid.iloc[0]) * base
+        equity_frame["excess_nav"] = (
+            equity / float(equity.iloc[0])
+        ) / (bench_close / float(bench_valid.iloc[0]))
+    equity_frame.to_csv(out_dir / f"equity_{args.strategy}_{stamp}.csv")
     if not trades_df.empty:
         trades_df.to_csv(out_dir / f"trades_{args.strategy}_{stamp}.csv", index=False)
     with open(out_dir / f"summary_{args.strategy}_{stamp}.json", "w", encoding="utf-8") as f:
@@ -253,7 +284,7 @@ def main() -> None:
     console.print(f"[green]结果已保存到 {out_dir}/[/green]")
 
     # 制品：供回溯与可复现性校验
-    run.put_table("equity", equity.rename_axis("date").to_frame("equity").reset_index())
+    run.put_table("equity", equity_frame.rename_axis("date").reset_index())
     if not trades_df.empty:
         run.put_table("trades", trades_df)
     run.put_json("summary", summary)

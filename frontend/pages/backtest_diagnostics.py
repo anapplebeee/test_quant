@@ -12,7 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from api.artifacts_api import latest_wfa, read_table
-from frontend.theme import page_header
+from frontend.theme import page_header, section_header
 
 
 def _latest_wfa() -> tuple[pd.DataFrame | None, dict | None]:
@@ -37,7 +37,11 @@ def render():
     wfa, metadata = _latest_wfa()
 
     with gr.Tab("🔍 回测诊断"):
-        gr.HTML(page_header("🔍 回测诊断", "Walk-Forward / 过拟合检验 / 参数稳健性"))
+        gr.HTML(page_header(
+            "🔍 回测诊断",
+            "用逐折样本外表现、衰减比与参数一致率判断策略是否在挑选历史噪声。",
+            "OUT-OF-SAMPLE",
+        ))
 
         if wfa is None or wfa.empty:
             gr.Markdown(
@@ -51,11 +55,12 @@ def render():
             )
             return
 
-        gr.Markdown(
-            f"### 🚶 Walk-Forward 检验\n"
-            f"> ✅ **运行制品**：`{metadata['run_id']}` · 数据指纹 `{metadata['fingerprint']}`"
-            "（样本外/样本内夏普比，越接近 1 越稳健）"
-        )
+        gr.HTML(section_header(
+            "最新 Walk-Forward 结果",
+            f"运行制品 {metadata['run_id']} · 数据指纹 {metadata['fingerprint']}",
+            "LATEST VERIFIED RUN",
+        ))
+        gr.Markdown("衰减比为样本外/样本内指标之比，需结合逐折成交数与参数一致率共同判断。")
 
         table = pd.DataFrame(
             {
@@ -72,7 +77,10 @@ def render():
             }
         )
         table["衰减比"] = wfa.apply(_decay_ratio, axis=1).round(2)
-        gr.Dataframe(value=table, interactive=False)
+        gr.Dataframe(
+            value=table, interactive=False, show_search="filter",
+            pinned_columns=1, buttons=["fullscreen", "copy"],
+        )
 
         # 逐折 OOS 夏普柱状图（红 = 负值，符合 A 股红涨绿跌习惯）
         oos = wfa["oos_sharpe"].astype(float)
@@ -90,7 +98,7 @@ def render():
         # 过拟合诊断
         ratios = wfa.apply(_decay_ratio, axis=1).dropna()
         if not ratios.empty:
-            gr.Markdown("### 📊 过拟合诊断")
+            gr.HTML(section_header("过拟合诊断", "仅对样本内夏普为正且样本外有成交的折计算衰减。"))
             gr.Markdown(
                 f"- **平均衰减比 (OOS/IS 夏普)**：**{ratios.mean():.2f}**"
                 f"（≥0.8 稳健；0.4~0.8 存在过拟合；<0.4 基本在挑噪声）\n"

@@ -160,7 +160,7 @@ def failed_runs(limit: int = 20) -> pd.DataFrame:
 # 放 UI 层会无法测试（frontend 依赖 gradio）。前端组件只负责绑定。
 
 #: 展示时优先呈现的列
-_SHOW_COLS = ("task", "created_at", "status", "data_symbols", "data_last_date")
+_SHOW_COLS = ("run_id", "task", "created_at", "status", "data_symbols", "data_last_date")
 
 
 def runs_table(limit: int = 100) -> pd.DataFrame:
@@ -214,7 +214,7 @@ def run_detail_md(run_id: str) -> str:
             elif isinstance(v, float):
                 v = f"{v:.4f}"
             parts.append(f"- `{k}`: {v}")
-        lines += ["", "**指标**"] + parts
+        lines += ["", "**指标**", *parts]
 
     if d.get("artifacts"):
         lines += ["", "**产出**"]

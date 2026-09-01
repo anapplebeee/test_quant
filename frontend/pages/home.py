@@ -18,7 +18,7 @@ from api.data_api import get_freshness, get_next_trade_date
 from api.manual_trading_api import get_account_summary
 from api.research_api import latest_sweep_headlines
 from api.strategy_api import strategy_catalog
-from frontend.theme import info_card, metric_card, status_badge
+from frontend.theme import info_card, metric_card, page_header, section_header, status_badge
 
 
 def _fmt_pct(v, digits: int = 1) -> str:
@@ -232,6 +232,11 @@ def _sweep_table() -> pd.DataFrame:
 def render():
     """渲染首页 Tab（交易日工作台）"""
     with gr.Tab("🏠 首页"):
+        gr.HTML(page_header(
+            "交易与研究工作台",
+            "先确认交易日、数据新鲜度和账户状态，再进入研究、回测、信号与执行流程。",
+            "DAILY WORKSPACE",
+        ))
         # ===== 工作台状态区 =====
         status_html = gr.HTML(value=_today_status_card())
 
@@ -247,13 +252,20 @@ def render():
 
         # ---- 辅助函数（必须在组件前定义，否则 Gradio build 阶段找不到）----
         def _home_fmt(df: pd.DataFrame) -> pd.DataFrame:
+            visible = ["运行", "日期", "区间", "CAGR", "夏普", "最大回撤", "波动", "卡玛"]
+            if df is None or df.empty:
+                return pd.DataFrame(columns=visible)
             df = df.copy()
             for col in ("CAGR", "最大回撤", "波动"):
-                df[col] = df[col].apply(lambda v: f"{v*100:.2f}%" if pd.notna(v) else "")
+                if col in df:
+                    df[col] = df[col].apply(lambda v: f"{v*100:.2f}%" if pd.notna(v) else "")
             for col in ("夏普", "卡玛"):
-                df[col] = df[col].apply(lambda v: f"{v:.2f}" if pd.notna(v) else "")
-            keep = ["label", "run_date", "区间", "CAGR", "夏普", "最大回撤", "波动", "卡玛", "name"]
-            return df[[c for c in keep if c in df.columns]]
+                if col in df:
+                    df[col] = df[col].apply(lambda v: f"{v:.2f}" if pd.notna(v) else "")
+            keep = ["label", "run_date", "区间", "CAGR", "夏普", "最大回撤", "波动", "卡玛"]
+            return df[[c for c in keep if c in df.columns]].rename(
+                columns={"label": "运行", "run_date": "日期"}
+            )
 
         def _home_filter(kw: str, st: str, full: pd.DataFrame):
             f = full.copy()
@@ -298,7 +310,8 @@ def render():
                 value=_home_fmt(full_df),
                 interactive=False, max_height=300, wrap=True,
                 datatype=["str"] * len(_home_fmt(full_df).columns),
-                label="点击行查看详情（按时间倒序）",
+                label="运行列表 · 点击行查看详情",
+                show_search="filter", pinned_columns=1, buttons=["fullscreen", "copy"],
             )
 
             home_search.change(_home_filter, [home_search, home_strat, home_df_state], [home_table, home_filtered_state])
@@ -362,11 +375,11 @@ def render():
                 "?.click();"
             )
             return (
-                f'<div class="info-card" style="cursor: pointer; text-align: center; padding: 0.8rem;" '
+                f'<div class="quick-nav-card" '
                 f'onclick="{js}">'
-                f'<div style="font-size: 1.3rem; margin-bottom: 0.25rem;">{emoji}</div>'
-                f'<div style="font-weight: 600; color: #333;">{label}</div>'
-                f'<div style="font-size: 0.8rem; color: #666;">{desc}</div></div>'
+                f'<div class="quick-nav-icon">{emoji}</div>'
+                f'<div class="quick-nav-label">{label}</div>'
+                f'<div class="quick-nav-detail">{desc}</div></div>'
             )
 
         nav_entries = [
@@ -378,9 +391,5 @@ def render():
             ("风险管理", "🛡️", "VaR/CVaR/集中度", "风险管理"),
         ]
         cards = "".join(_nav(*e) for e in nav_entries)
-        gr.Markdown(f"""
-        <div style="margin-top: 1.5rem;">
-            <div style="font-weight: 600; margin-bottom: 0.5rem; color: #333;">⚡ 功能区快捷入口</div>
-            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.8rem;">{cards}</div>
-        </div>
-        """)
+        gr.HTML(section_header("功能区快捷入口", "按日常工作流进入对应模块。", "NAVIGATION"))
+        gr.HTML(f'<div class="quick-nav-grid">{cards}</div>')

@@ -25,7 +25,7 @@ from frontend.pages import (
     risk_management,
     strategy_monitor,
 )
-from frontend.theme import CUSTOM_CSS, soft_theme
+from frontend.theme import CUSTOM_CSS, app_footer, platform_shell, soft_theme
 
 
 def create_app() -> gr.Blocks:
@@ -47,9 +47,15 @@ def create_app() -> gr.Blocks:
         glossary,
     ]
 
-    with gr.Blocks(title="Quart 量化研究平台") as app:
-        for module in page_modules:
-            module.render()
+    with gr.Blocks(
+        title="Quart 量化研究平台",
+        fill_width=True,
+    ) as app:
+        gr.HTML(platform_shell())
+        with gr.Tabs(elem_id="platform-tabs"):
+            for module in page_modules:
+                module.render()
+        gr.HTML(app_footer())
 
     return app
 
@@ -73,6 +79,7 @@ if __name__ == "__main__":
         auth=auth_tuple,
         share=False,
         show_error=True,
+        footer_links=[],
         css=CUSTOM_CSS,
         theme=soft_theme(),
     )
