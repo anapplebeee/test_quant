@@ -184,9 +184,12 @@ def render():
         def _poll_data_version(seen_val: int):
             changed, cur = data_bus.poll(seen_val)
             if not changed:
-                return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), seen_val
-            refreshed = _refresh_overview()
-            return *refreshed, get_index_coverage(), cur
+                # outputs 共 8 个（含 seen_state），skip 数量必须一致
+                return (*[gr.skip()] * 7, cur)
+            # _refresh_overview 返回 8 组件（含本联动未订阅的 m5/freshness_md），
+            # 按订阅顺序重排：m1-m4, board_md, universe_df, coverage_df, seen_state
+            m1c, m2c, m3c, m4c, _m5, board_c, _fresh, universe = _refresh_overview()
+            return m1c, m2c, m3c, m4c, board_c, universe, get_index_coverage(), cur
 
         gr.Timer(5).tick(
             _poll_data_version,

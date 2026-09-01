@@ -115,7 +115,8 @@ def render():
         def _poll_data_version(seen_val: int, plan_date_val: str, sig_sel: str | None):
             changed, cur = data_bus.poll(seen_val)
             if not changed:
-                return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), seen_val
+                # outputs 共 8 个（含 seen_state），skip 数量必须一致
+                return (*[gr.skip()] * 7, cur)
             f, sel_update, sel_val = _plan_snapshot(plan_date_val)
             md, ords = plan_view(sel_val)
             c, v, txt = signal_snapshot()

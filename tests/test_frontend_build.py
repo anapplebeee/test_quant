@@ -101,6 +101,49 @@ def test_all_pages_build(ui_stubs):
     assert not failed, "页面构建失败:\n  " + "\n  ".join(failed)
 
 
+def test_poll_data_version_return_count_matches_outputs(ui_stubs, monkeypatch):
+    """跨页联动 _poll_data_version 的返回值数量必须与 tick outputs 一致。
+
+    真实事故（2026-09-01）：data_overview / daily_signal 的未变化分支
+    少 1 个 gr.skip()，Timer 每 5 秒报一次 "didn't return enough output
+    values (needed: 8, returned: 7)"。MagicMock 构建无法发现长度错位，
+    这里注册 tick 后以「数据未变化」路径直接调用回调，逐页断言数量。
+
+    变化分支会触发真实数据扫描，不在本测试范围（依赖运行环境数据）。
+    """
+    import data_bus
+
+    # 数据未变化 → 走 gr.skip() 快捷分支（最高频路径，即本次事故点）
+    monkeypatch.setattr(data_bus, "poll", lambda _seen: (False, 0), raising=False)
+
+    tick_calls: list[tuple[object, int]] = []
+
+    def _record_tick(fn, inputs=None, outputs=None, **_kw):
+        if getattr(fn, "__name__", "") == "_poll_data_version":
+            tick_calls.append((fn, len(outputs or [])))
+        return MagicMock()
+
+    ui_stubs.Timer.return_value.tick.side_effect = _record_tick
+
+    for name in ("home", "strategy_monitor", "manual_trading",
+                 "data_overview", "daily_signal", "backtest"):
+        _import_page(name).render()
+
+    assert len(tick_calls) >= 6, (
+        f"6 个联动页面都应注册 _poll_data_version tick，实际 {len(tick_calls)}"
+    )
+    mismatches = []
+    for fn, n_outputs in tick_calls:
+        n_args = fn.__code__.co_argcount
+        result = fn(*([0] * n_args))
+        if len(result) != n_outputs:
+            mismatches.append(
+                f"{fn.__module__}._poll_data_version: 返回 {len(result)} 个值, "
+                f"outputs 有 {n_outputs} 个组件"
+            )
+    assert not mismatches, "输出/返回数量错位:\n  " + "\n  ".join(mismatches)
+
+
 def test_daily_signal_snapshot_reads_path_entries(tmp_path, ui_stubs, monkeypatch):
     """信号目录非空时也必须能构建日期快照（UI-001 后统一走 strategy_api）。"""
     import api.strategy_api as strategy_api

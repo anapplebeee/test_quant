@@ -403,9 +403,12 @@ def render():
             """刷新列表：重新扫描报告目录，重建筛选项 + 加载最新一个。"""
             new_full = scan_summaries()
             if new_full.empty:
+                # 与 outputs[strat_filter, table, df_state, filtered_state,
+                # summary_md, equity_plot, dd_plot, trades_table] 一一对应；
+                # 空列表时 filtered_state 与 df_state 同源（全量即过滤结果）
                 return (
                     gr.update(choices=["全部"], value="全部"),
-                    _fmt(new_full), new_full,
+                    _fmt(new_full), new_full, new_full,
                     "暂无回测结果", None, None, None,
                 )
             fdf = _apply_filter(new_full, "", "全部")
