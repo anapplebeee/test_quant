@@ -7,6 +7,7 @@ import pytest
 import quart.strategy.factor_portfolio as factor_portfolio
 from quart.backtest.engine import MarketData
 from quart.portfolio import PortfolioConstructionContext
+from quart.risk.exposure import ExposureSnapshot
 from quart.strategy import build_strategy
 from quart.strategy.factor_portfolio import FactorPortfolioStrategy
 
@@ -123,3 +124,46 @@ def test_factor_portfolio_passes_real_account_and_adv_context_to_constructor(mon
     assert request.equity == 1_000_000.0
     assert request.adv is not None
     assert constraints.max_adv_participation == pytest.approx(0.05)
+
+
+def test_factor_portfolio_uses_pit_exposure_snapshot_when_limits_requested():
+    md = _market_data()
+    snapshot = ExposureSnapshot(
+        as_of=md.dates[50],
+        available_at=md.dates[50],
+        benchmark_weights=pd.Series(1 / len(md.symbols), index=md.symbols),
+        market_caps=pd.Series(range(10, 10 + len(md.symbols)), index=md.symbols, dtype=float),
+        source="test_pit",
+        version="v1",
+    )
+    strategy = FactorPortfolioStrategy(
+        factor_names="vol20_neg,amp20_neg,lottery20_neg",
+        top_k=3,
+        rebalance_days=1,
+        max_weight_pct=0.4,
+        market_cap_active_bound=10.0,
+    )
+    strategy.prepare(md)
+    strategy.set_portfolio_context(PortfolioConstructionContext(
+        date=md.dates[50], current_weights=pd.Series(dtype=float), equity=1.0,
+        tradable=md.symbols, exposure_snapshot=snapshot,
+    ))
+
+    strategy.target_weights(50)
+
+    assert strategy.last_construction is not None
+    assert "market_cap.active" in strategy.last_construction.constraint_usage
+
+
+def test_factor_portfolio_fails_closed_without_pit_exposure_snapshot():
+    md = _market_data()
+    strategy = FactorPortfolioStrategy(
+        factor_names="vol20_neg", market_cap_active_bound=0.2,
+    )
+    strategy.prepare(md)
+    strategy.set_portfolio_context(PortfolioConstructionContext(
+        date=md.dates[50], current_weights=pd.Series(dtype=float), equity=1.0, tradable=md.symbols,
+    ))
+
+    with pytest.raises(RuntimeError, match="ExposureSnapshot"):
+        strategy.target_weights(50)

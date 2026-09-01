@@ -355,6 +355,9 @@ def build_factor_receipt(
             "min_cash_weight": effective.get("min_cash_weight"),
             "risk_aversion": effective.get("risk_aversion"),
             "turnover_penalty": effective.get("turnover_penalty"),
+            "industry_active_bound": effective.get("industry_active_bound"),
+            "market_cap_active_bound": effective.get("market_cap_active_bound"),
+            "style_active_bounds": effective.get("style_active_bounds"),
         }
         formula = "mean(zscore(factor_i)) → PortfolioConstructor"
         is_factor_strategy = True

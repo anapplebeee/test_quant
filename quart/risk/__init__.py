@@ -17,6 +17,13 @@ from quart.risk.engine import (
     limits_from_config,
     require_risk_engine,
 )
+from quart.risk.exposure import (
+    ExposureDataError,
+    ExposureInputs,
+    ExposureLimits,
+    ExposureSnapshot,
+    parse_style_bounds,
+)
 from quart.risk.store import RiskRepository
 
 __all__ = [
@@ -27,6 +34,10 @@ __all__ = [
     "DailyLossStore",
     "DecisionRecorder",
     "EvaluationContext",
+    "ExposureDataError",
+    "ExposureInputs",
+    "ExposureLimits",
+    "ExposureSnapshot",
     "LotSizeRule",
     "PortfolioSnapshot",
     "PositionLimitRule",
@@ -39,5 +50,6 @@ __all__ = [
     "StateGateRule",
     "evaluate_weights",
     "limits_from_config",
+    "parse_style_bounds",
     "require_risk_engine",
 ]

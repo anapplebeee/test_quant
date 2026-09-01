@@ -7,8 +7,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from quart.risk.exposure import ExposureSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +25,8 @@ class PortfolioConstructionContext:
     tradable: pd.Index
     adv: pd.Series | None = None
     max_adv_participation: float | None = None
+    #: 仅在需要行业/市值/风格约束时由数据层注入；未提供时策略必须 fail-closed。
+    exposure_snapshot: ExposureSnapshot | None = None
 
 
 __all__ = ["PortfolioConstructionContext"]

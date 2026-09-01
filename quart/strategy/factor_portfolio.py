@@ -20,6 +20,7 @@ from quart.portfolio import (
     PortfolioConstructor,
 )
 from quart.research.factor_audit import FACTOR_SPECS, FactorInputs
+from quart.risk.exposure import ExposureLimits, parse_style_bounds
 from quart.strategy.base import BaseStrategy
 from quart.strategy.filters import apply_liquidity
 
@@ -46,6 +47,9 @@ class FactorPortfolioStrategy(BaseStrategy):
         "min_price": ((int, float, type(None)), None, "最低价过滤"),
         "risk_aversion": (float, 0.0, "协方差风险惩罚（>0 启用60日样本协方差）"),
         "max_turnover": ((float, type(None)), None, "Constructor 单次换手硬上限"),
+        "industry_active_bound": ((float, type(None)), None, "相对基准的行业主动权重上限"),
+        "market_cap_active_bound": ((float, type(None)), None, "相对基准的市值 log-z 主动暴露上限"),
+        "style_active_bounds": (str, "", "风格主动暴露上限，如 momentum=0.15,size=0.2"),
         "turnover_penalty": (float, 0.0, "目标函数换手成本惩罚"),
         "transaction_cost_bps": (float, 0.0, "目标函数预估双边成本（bps）"),
     }
@@ -63,6 +67,14 @@ class FactorPortfolioStrategy(BaseStrategy):
         self.min_price = p.get("min_price")
         self.risk_aversion = float(p.get("risk_aversion", 0.0))
         self.max_turnover = p.get("max_turnover")
+        self.industry_active_bound = p.get("industry_active_bound")
+        self.market_cap_active_bound = p.get("market_cap_active_bound")
+        self.style_active_bounds = parse_style_bounds(p.get("style_active_bounds"))
+        self.exposure_limits = ExposureLimits(
+            industry_active_bounds=self.industry_active_bound,
+            market_cap_active_bound=self.market_cap_active_bound,
+            style_active_bounds=self.style_active_bounds,
+        )
         self.turnover_penalty = float(p.get("turnover_penalty", 0.0))
         self.transaction_cost_bps = float(p.get("transaction_cost_bps", 0.0))
         _validate_params(self)
@@ -104,13 +116,20 @@ class FactorPortfolioStrategy(BaseStrategy):
             raise TypeError("factor_portfolio 收到无效 PortfolioConstructionContext")
         tradable_symbols = candidates.index if context is None else context.tradable
         covariance = self._covariance_for(i, candidates.index)
+        exposure_inputs = self._resolve_exposures(context, candidates.index)
         request = PortfolioConstructionInput(
             alphas=candidates,
             current_weights={} if context is None else context.current_weights,
+            benchmark_weights=(
+                {} if exposure_inputs is None else exposure_inputs.benchmark_weights
+            ),
             equity=1.0 if context is None else context.equity,
             tradable=tradable_symbols,
             covariance=covariance,
             adv=None if context is None else context.adv,
+            industries=None if exposure_inputs is None else exposure_inputs.industries,
+            market_caps=None if exposure_inputs is None else exposure_inputs.market_caps,
+            style_exposures=None if exposure_inputs is None else exposure_inputs.style_exposures,
             risk_aversion=self.risk_aversion,
             turnover_penalty=self.turnover_penalty,
             transaction_cost_bps=self.transaction_cost_bps,
@@ -123,6 +142,9 @@ class FactorPortfolioStrategy(BaseStrategy):
             max_adv_participation=(
                 None if context is None else context.max_adv_participation
             ),
+            industry_active_bounds=self.exposure_limits.industry_active_bounds,
+            market_cap_active_bound=self.exposure_limits.market_cap_active_bound,
+            style_active_bounds=self.exposure_limits.style_active_bounds,
         )
         self.last_construction = PortfolioConstructor().construct(request, constraints)
         return {
@@ -176,6 +198,18 @@ class FactorPortfolioStrategy(BaseStrategy):
             raise RuntimeError("factor_portfolio 无法得到完整有限的协方差矩阵")
         return covariance
 
+    def _resolve_exposures(self, context, candidates: pd.Index):
+        if not self.exposure_limits.enabled:
+            return None
+        if context is None or context.exposure_snapshot is None:
+            raise RuntimeError(
+                "factor_portfolio 已启用行业/市值/风格暴露约束，但没有 PIT ExposureSnapshot"
+            )
+        symbols = candidates.union(context.current_weights.index)
+        return context.exposure_snapshot.resolve(
+            context.date, symbols, self.exposure_limits,
+        )
+
 
 def _parse_factor_names(raw: str) -> tuple[str, ...]:
     names = tuple(name.strip() for name in raw.split(",") if name.strip())
@@ -211,6 +245,10 @@ def _validate_params(strategy: FactorPortfolioStrategy) -> None:
         raise ValueError("risk_aversion 与 turnover_penalty 不能为负")
     if strategy.max_turnover is not None and not 0 <= float(strategy.max_turnover) <= 1:
         raise ValueError("max_turnover 必须在 [0, 1]")
+    if strategy.industry_active_bound is not None and float(strategy.industry_active_bound) < 0:
+        raise ValueError("industry_active_bound 不能为负")
+    if strategy.market_cap_active_bound is not None and float(strategy.market_cap_active_bound) < 0:
+        raise ValueError("market_cap_active_bound 不能为负")
     if strategy.transaction_cost_bps < 0:
         raise ValueError("transaction_cost_bps 不能为负")
 
