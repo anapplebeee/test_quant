@@ -51,6 +51,7 @@ FACTOR_SPECS = (
     FactorSpec("amihud20_neg", "流动性", "20 日 Amihud 冲击成本代理（负向）"),
     FactorSpec("vwap_pos20_neg", "量价", "收盘价相对 20 日 VWAP 位置（负向）"),
     FactorSpec("rel_ind_rev20", "行业相对", "20 日行业内相对收益反转"),
+    FactorSpec("rel_ind_mom20", "行业相对", "20 日行业内相对收益动量（行业中性动量，N1 候选）", is_new=True),
     FactorSpec("downside_semivol20_neg", "尾部风险", "20 日下行半方差（负向）", is_new=True),
     FactorSpec("downside_semivol60_neg", "尾部风险", "60 日下行半方差（负向）", is_new=True),
     FactorSpec("tail_loss60", "尾部风险", "60 日收益 10% 分位数（越高尾损越小）", is_new=True),
@@ -206,6 +207,8 @@ class FactorInputs:
             value = -((close - vwap) / vwap.replace(0, np.nan))
         elif name == "rel_ind_rev20":
             value = self._relative_industry_reversal()
+        elif name == "rel_ind_mom20":
+            value = self._relative_industry_momentum()
         elif name == "downside_semivol20_neg":
             value = -np.sqrt(ret.clip(upper=0).pow(2).rolling(20).mean())
         elif name == "downside_semivol60_neg":
@@ -264,6 +267,27 @@ class FactorInputs:
         broadcast = industry_return.reindex(columns=groups.values)
         broadcast.columns = relative_return.columns
         return -(relative_return - broadcast)
+
+    def _relative_industry_momentum(self) -> pd.DataFrame | None:
+        """行业中性动量：个股 20 日收益减其所属行业（申万一级/统计聚类）
+        等权平均 20 日收益。与 ``rel_ind_rev20`` 互为反方向；A 股实证通常
+        显示行业内反转更稳定（ICIR 更高），故本因子方向需以单因子检验定夺。
+        """
+        try:
+            from quart.strategy.industries import load_industry_series
+
+            mapping = load_industry_series("first")
+        except (FileNotFoundError, ValueError):
+            return None
+        relative_return = self.close.pct_change(20, fill_method=None)
+        groups = pd.Series(
+            [mapping.get(symbol, "UNKNOWN") for symbol in relative_return.columns],
+            index=relative_return.columns,
+        )
+        industry_return = relative_return.T.groupby(groups).mean().T
+        broadcast = industry_return.reindex(columns=groups.values)
+        broadcast.columns = relative_return.columns
+        return relative_return - broadcast
 
 
 def _sample_positions(
