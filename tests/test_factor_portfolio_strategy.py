@@ -167,3 +167,20 @@ def test_factor_portfolio_fails_closed_without_pit_exposure_snapshot():
 
     with pytest.raises(RuntimeError, match="ExposureSnapshot"):
         strategy.target_weights(50)
+
+
+def test_factor_portfolio_skips_symbols_without_valid_price():
+    """退市/停牌标的残留 alpha 值但当日无有效价格 → 不得进入候选。"""
+    md = _market_data()
+    # 把 S3 在第 50 日的收盘价置为 NaN（模拟退市/停牌无行情）
+    md.close_val.iloc[50, md.symbols.get_loc("S3")] = np.nan
+    strategy = FactorPortfolioStrategy(
+        factor_names="vol20_neg,amp20_neg,lottery20_neg",
+        top_k=3,
+        rebalance_days=1,
+        max_weight_pct=0.4,
+    )
+    strategy.prepare(md)
+    weights = strategy.target_weights(50)
+    assert "S3" not in weights
+    assert set(weights) <= set(md.symbols) - {"S3"}

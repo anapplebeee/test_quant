@@ -106,6 +106,11 @@ class FactorPortfolioStrategy(BaseStrategy):
         scores = self.alpha_panel.iloc[i].dropna()
         tradable = md.volumes.iloc[i]
         scores = scores.loc[scores.index.intersection(tradable[tradable.fillna(0) > 0].index)]
+        # 防御：退市/停牌/无行情标的即使残留 alpha 面板值（如数据源写入
+        # 退市股"幽灵行情"）也不得进入候选，避免 Constructor 对不可估值标的
+        # 建仓或触发 Infeasible。
+        prices = md.close_val.iloc[i].reindex(scores.index)
+        scores = scores[prices.fillna(0) > 0]
         scores = apply_liquidity(
             scores, md, i, self.min_avg_amount, self.liquidity_days, self.min_price,
         )

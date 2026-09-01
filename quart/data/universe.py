@@ -130,14 +130,39 @@ def filter_boards(
 def filter_st(codes: list[str], exclude_st: bool = True) -> list[str]:
     if not exclude_st:
         return codes
-    from quart.data.source_akshare import fetch_stock_list
-
-    name_map = dict(fetch_stock_list().values.tolist())
+    name_map = _stock_name_map()
     kept = [c for c in codes if "ST" not in name_map.get(c, "").upper() and "退" not in name_map.get(c, "")]
     dropped = len(codes) - len(kept)
     if dropped:
         logger.info("dropped {} ST/delisting names", dropped)
     return kept
+
+
+def _stock_name_map() -> dict[str, str]:
+    """股票代码 → 名称映射：本地快照优先（离线可用），网络兜底。
+
+    修复（RESEARCH 2026-09）：旧实现每次回测都调
+    ``fetch_stock_list()`` → 东财 ``stock_info_a_code_name`` 网络接口，
+    接口慢/断网时回测会长时间阻塞在过滤阶段。本地
+    ``data/stock_names.parquet`` 即该接口的快照（5551 只），优先读取。
+    """
+    path = data_root() / "stock_names.parquet"
+    if path.exists():
+        try:
+            df = pd.read_parquet(path)
+            if "code" in df.columns and "name" in df.columns:
+                return dict(
+                    zip(
+                        df["code"].astype(str).str.zfill(6),
+                        df["name"].astype(str),
+                        strict=False,
+                    )
+                )
+        except Exception as exc:
+            logger.warning("local stock_names unreadable, fallback to network: {}", exc)
+    from quart.data.source_akshare import fetch_stock_list
+
+    return dict(fetch_stock_list().values.tolist())
 
 
 def get_list_dates(force_refresh: bool = False) -> pd.Series:
@@ -172,14 +197,19 @@ def filter_for_simulation(
     exclude_chinext: bool = True,
     exclude_st: bool = True,
     min_list_days: int = 0,
+    exclude_delisted: bool = True,
 ) -> pd.DataFrame:
     """在模拟（回测/信号）路径上对行情截面统一剔除板块与 ST。
 
     数据下载层保留全市场原始数据，仅在模拟时按配置过滤，避免污染底层数据。
 
     min_list_days > 0 时剔除上市不满 N 个自然日的次新股行：次新股无涨跌幅
-    限制、筹码结构特殊，且部分回测起始日才“出现”的股票实为早已上市
+    限制、筹码结构特殊，且部分回测起始日才"出现"的股票实为早已上市
     （历史数据缺失），须用全历史首日而非窗口内首日判断。
+
+    exclude_delisted=True 时按退市清单剔除退市日（含）之后的行情——防数据源
+    把退市股"幽灵行情"写回 daily 分区的幸存者偏差（见 quart/data/delisted.py）。
+    清单缺失时告警并降级为不过滤，不阻断流程。
     """
     if bars.empty:
         return bars
@@ -191,6 +221,10 @@ def filter_for_simulation(
         except Exception as exc:  # 取不到股票名列表时降级为只做板块过滤
             logger.warning("ST filter skipped in simulation: {}", exc)
     out = bars[bars["symbol"].isin(codes)]
+    if exclude_delisted and not out.empty:
+        from quart.data.delisted import filter_delisted_bars
+
+        out = filter_delisted_bars(out)
     if min_list_days > 0 and not out.empty:
         try:
             ld = get_list_dates()
