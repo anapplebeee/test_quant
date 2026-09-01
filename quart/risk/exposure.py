@@ -99,8 +99,11 @@ class ExposureSnapshot:
         if not str(self.source).strip() or not str(self.version).strip():
             raise ExposureDataError("暴露快照必须记录 source 与 version")
 
-        index = pd.Index(sorted({str(symbol) for symbol in symbols}, key=str))
-        benchmark = _weights(self.benchmark_weights, index, "benchmark_weights")
+        benchmark = _benchmark_weights(self.benchmark_weights)
+        index = pd.Index(
+            sorted({str(symbol) for symbol in symbols}.union(benchmark[benchmark > 0].index), key=str)
+        )
+        benchmark = benchmark.reindex(index, fill_value=0.0)
         industries = None
         market_caps = None
         styles = None
@@ -145,16 +148,15 @@ def parse_style_bounds(raw: str | Mapping[str, float] | None) -> dict[str, float
     return dict(sorted(parsed.items()))
 
 
-def _weights(value: pd.Series, index: pd.Index, name: str) -> pd.Series:
+def _benchmark_weights(value: pd.Series) -> pd.Series:
     series = pd.Series(value, dtype="float64").copy()
     series.index = series.index.map(str)
-    series = series.reindex(index)
     if not np.isfinite(series).all() or (series < 0).any():
         missing = sorted(series[(~np.isfinite(series)) | (series < 0)].index)
-        raise ExposureDataError(f"{name} 必须覆盖全部股票且为有限非负数: {missing}")
+        raise ExposureDataError(f"benchmark_weights 必须为有限非负数: {missing}")
     if float(series.sum()) > 1.0 + 1e-10:
-        raise ExposureDataError(f"{name} 总权重超过 100%")
-    return series
+        raise ExposureDataError("benchmark_weights 总权重超过 100%")
+    return series.sort_index()
 
 
 def _categories(value: pd.Series | None, index: pd.Index, name: str) -> pd.Series:
