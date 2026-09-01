@@ -30,6 +30,7 @@ from quart.data.universe import filter_for_simulation
 from quart.execution.fees import Fees
 from quart.risk.rules import make_weight_validator
 from quart.strategy import build_strategy
+from common import reports_dir
 
 console = Console()
 
@@ -53,7 +54,7 @@ def main() -> None:
     parser.add_argument("--strategy", default="lowvol_indz")
     parser.add_argument("--start", default="2020-01-01")
     parser.add_argument("--end", default=None)
-    parser.add_argument("--save", default="reports/strategy_optimization.json",
+    parser.add_argument("--save", default=str(reports_dir() / "strategy_optimization.json"),
                         help="实验数据 JSON 输出路径（不带扩展名时自动补 .json）")
     args = parser.parse_args()
 

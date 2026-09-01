@@ -263,6 +263,7 @@ def render():
                 kw = kw.lower()
                 mask = (
                     f["label"].str.lower().str.contains(kw, na=False)
+                    | f["name"].str.lower().str.contains(kw, na=False)
                     | f["区间"].str.lower().str.contains(kw, na=False)
                 )
                 f = f[mask]
