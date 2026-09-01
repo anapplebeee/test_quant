@@ -17,6 +17,11 @@ from quart.execution.models import (
     RebalancePlan,
 )
 from quart.execution.order_generator import generate_orders
+from quart.execution.paper_calibration import (
+    PaperExecutionCalibration,
+    calibrate_paper_account,
+    calibrate_paper_execution,
+)
 from quart.execution.price_scenarios import PRICE_MODES, PriceScenarioResult, resolve_execution_prices
 from quart.execution.rule_resolver import ExecutionRuleResolver, ResolvedTradeRule
 
@@ -33,9 +38,12 @@ __all__ = [
     "Fees",
     "LiveExecutionModel",
     "OrderPlan",
+    "PaperExecutionCalibration",
     "PriceScenarioResult",
     "RebalancePlan",
     "ResolvedTradeRule",
+    "calibrate_paper_account",
+    "calibrate_paper_execution",
     "generate_orders",
     "resolve_execution_prices",
 ]
