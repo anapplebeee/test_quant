@@ -4,6 +4,11 @@
 """
 from __future__ import annotations
 
+from quart.execution.attribution import (
+    ExecutionAttributionSummary,
+    attribute_execution,
+    attribute_paper_account,
+)
 from quart.execution.backtest_model import BacktestExecutionModel
 from quart.execution.constraints import A_SHARE_LOT, FLAT
 from quart.execution.fees import Fees
@@ -32,6 +37,7 @@ __all__ = [
     "PRICE_MODES",
     "SELL",
     "BacktestExecutionModel",
+    "ExecutionAttributionSummary",
     "ExecutionContext",
     "ExecutionModel",
     "ExecutionRuleResolver",
@@ -42,6 +48,8 @@ __all__ = [
     "PriceScenarioResult",
     "RebalancePlan",
     "ResolvedTradeRule",
+    "attribute_execution",
+    "attribute_paper_account",
     "calibrate_paper_account",
     "calibrate_paper_execution",
     "generate_orders",
