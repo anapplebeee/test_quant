@@ -369,28 +369,38 @@ def get_cost_breakdown(name: str) -> dict | None:
     # 滑点成本：成交价 vs 当日开盘价的偏离（买入为正偏离、卖出为负偏离）
     from quart.data.store import BarStore
 
-    opens_cache: dict[str, pd.Series | None] = {}
     slip_cost = 0.0
     matched = 0
     try:
-        bars = BarStore().load(symbols=[str(s).zfill(6) for s in df["symbol"].unique()])
+        syms = [str(s).zfill(6) for s in df["symbol"].unique()]
+        min_s = pd.Timestamp(df["date"].min()).strftime("%Y-%m-%d")
+        max_s = pd.Timestamp(df["date"].max()).strftime("%Y-%m-%d")
+        # 仅取成交涉及个股在成交区间内的 open 列：duckdb 列投影 + symbol IN 下推 +
+        # 日期谓词裁剪，替代原 load(symbols=全部成交股) 加载全市场全历史（启动主耗时）。
+        bars = BarStore()._query_partitioned(
+            start=min_s, end=max_s, include_index=False,
+            columns=["date", "symbol", "open"], symbols=syms,
+        )
         if not bars.empty:
+            bars = bars.copy()
+            bars["symbol"] = bars["symbol"].astype(str).str.zfill(6)
             bars["date"] = pd.to_datetime(bars["date"])
-            for code, grp0 in bars.groupby("symbol"):
-                opens_cache[str(code)] = grp0.set_index("date")["open"]
+            bars = bars[["symbol", "date", "open"]]
+
+            tmp = df.copy()
+            tmp["code"] = tmp["symbol"].astype(str).str.zfill(6)
+            tmp["date"] = pd.to_datetime(tmp["date"])
+            # 向量化关联：逐笔 (symbol,date) 取开盘价算滑点，替代原 Python 双层循环。
+            merged = tmp.merge(
+                bars, left_on=["code", "date"], right_on=["symbol", "date"], how="left",
+            )
+            openv = merged["open"]
+            # 与原逻辑一致：开盘价缺失 / 非正 的成交不参与滑点累计
+            valid = openv.notna() & (openv > 0)
+            slip_cost = float(((merged["price"] - openv).abs() * merged["shares"])[valid].sum())
+            matched = int(valid.sum())
     except Exception:
         pass
-    for sym, grp in df.groupby("symbol"):
-        code = str(sym).zfill(6)
-        op = opens_cache.get(code)
-        if op is None:
-            continue
-        for _, row in grp.iterrows():
-            o = op.get(row["date"])
-            if o is None or pd.isna(o) or o <= 0:
-                continue
-            slip_cost += abs(row["price"] - o) * row["shares"]
-            matched += 1
 
     total_cost = total_fee + slip_cost
     # 初始资金：优先取 summary 里的区间首值（缺失时退回 100 万默认）

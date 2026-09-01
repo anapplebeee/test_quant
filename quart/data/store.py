@@ -192,9 +192,10 @@ class BarStore:
         end: str | None = None,
         include_index: bool = False,
         exclude_symbols: list[str] | None = None,
+        columns: list[str] | None = None,
     ) -> pd.DataFrame:
         if symbols is not None:
-            df = self._load_symbols(list(symbols), start, end, include_index)
+            df = self._load_symbols(list(symbols), start, end, include_index, columns)
             if exclude_symbols:
                 df = df[~df["symbol"].isin(set(exclude_symbols))]
             return df
@@ -216,8 +217,14 @@ class BarStore:
             return EMPTY_BARS.copy()
         return self._query_files(files, start, end)
 
-    def _query_partitioned(self, start, end, include_index: bool) -> pd.DataFrame:
-        """分区查询：用目录通配符 + hive_partitioning 让 DuckDB 裁剪年份。"""
+    def _query_partitioned(
+        self, start, end, include_index: bool, columns=None, symbols=None,
+    ) -> pd.DataFrame:
+        """分区查询：用目录通配符 + hive_partitioning 让 DuckDB 裁剪年份。
+
+        columns / symbols 为可选下推参数：仅投影需要的列、仅过滤指定个股，
+        避免为单点查询（如某笔成交的开盘价）加载全市场全历史。
+        """
         globs = self._partition_globs(start, end, include_index)
         if not globs:
             return EMPTY_BARS.copy()
@@ -234,14 +241,18 @@ class BarStore:
             return EMPTY_BARS.copy()
 
         listing = ", ".join(f"'{g}'" for g in globs)
+        select = ", ".join(columns) if columns else "*"
         conds = ["date IS NOT NULL"]
         if start:
             conds.append(f"date >= DATE '{start}'")
         if end:
             conds.append(f"date <= DATE '{end}'")
+        if symbols:
+            syms = ", ".join(f"'{s}'" for s in symbols)
+            conds.append(f"symbol IN ({syms})")
         where = "WHERE " + " AND ".join(conds)
         query = (
-            f"SELECT * FROM read_parquet([{listing}], hive_partitioning=true) "
+            f"SELECT {select} FROM read_parquet([{listing}], hive_partitioning=true) "
             f"{where} ORDER BY date, symbol"
         )
         df = duckdb.sql(query).df()
@@ -349,6 +360,7 @@ class BarStore:
         start: str | None,
         end: str | None,
         include_index: bool,
+        columns: list[str] | None = None,
     ) -> pd.DataFrame:
         frames: list[pd.DataFrame] = []
         missing: list[str] = []
@@ -365,7 +377,7 @@ class BarStore:
             if not paths:
                 missing.append(sym)
                 continue
-            frames.extend(pd.read_parquet(p) for p in paths)
+            frames.extend(pd.read_parquet(p, columns=columns) for p in paths)
         if missing:
             logger.warning("symbols not in store: {}", sorted(missing)[:20])
         if not frames:
