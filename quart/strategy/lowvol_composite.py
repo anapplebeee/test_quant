@@ -68,6 +68,17 @@ class LowVolCompositeStrategy(BaseStrategy):
         "size_weight": (float, 0.0, "小市值因子权重（z(-ln 流通市值)）"),
         "turnover_weight": (float, 0.0, "低换手率因子权重（z(-20 日换手)）"),
         "value_weight": (float, 0.0, "价值因子权重（z(1/PE_TTM)，仅盈利为正）"),
+        "event_crowding_weight": (float, 0.0, "涨停/放量追涨拥挤因子权重（研究，0=关闭）"),
+        "event_crowding_only": (bool, False, "仅使用事件拥挤分选股（研究候选）"),
+        "event_orthogonalize": (bool, True, "事件因子是否对低波复合分截面正交化"),
+        "event_max_limit_hits_20d": (
+            (int, type(None)), None, "近20日允许的最多涨停次数（研究，None=关闭）"
+        ),
+        "limit_breadth_timing": (bool, False, "涨停广度低迷时降低仓位（研究，默认关闭）"),
+        "limit_breadth_window": (int, 120, "涨停广度历史分位窗口"),
+        "limit_breadth_quantile": (float, 0.5, "低仓位触发分位数"),
+        "limit_breadth_floor": (float, 0.5, "低广度状态最低仓位"),
+        "candidate_quality_weight": (float, 0.0, "ROE稳定/盈利加速/利润弹性候选权重（研究）"),
     }
 
     def __init__(self, **params):
@@ -81,6 +92,8 @@ class LowVolCompositeStrategy(BaseStrategy):
             if self.params.get("use_regime_filter", False) else 0,
             int(self.params.get("liquidity_days", 20))
             if self.params.get("min_avg_amount") else 0,
+            int(self.params.get("limit_breadth_window", 120))
+            if self.params.get("limit_breadth_timing", False) else 0,
         ) + 1
 
     @staticmethod
@@ -178,6 +191,11 @@ class LowVolCompositeStrategy(BaseStrategy):
         self._held = {symbol for symbol, shares in positions.items() if int(shares) > 0}
 
     VG_FACTORS = ("roe_improve", "profit_yoy", "ep", "bp")
+    CANDIDATE_QUALITY_FACTORS = (
+        "roe_stability",
+        "profit_accel",
+        "earnings_surprise_proxy",
+    )
 
     def _build_vg_score(self, md: MarketData) -> pd.DataFrame | None:
         """PIT 价值成长合成分：各因子截面 z 等权均值（仅限有财务覆盖的符号）。"""
@@ -204,6 +222,40 @@ class LowVolCompositeStrategy(BaseStrategy):
             warnings.simplefilter("ignore", RuntimeWarning)  # 全 NaN 截面的 nanmean
             arr = np.nanmean(np.stack([z.to_numpy() for z in zs]), axis=0)
         return pd.DataFrame(arr, index=zs[0].index, columns=zs[0].columns).astype("float32")
+
+    def _build_candidate_quality_score(self, md: MarketData) -> pd.DataFrame | None:
+        """构建 RESEARCH-002 财报质量候选；缺覆盖股票按中性处理。"""
+        import warnings
+
+        from quart.config import PROJECT_ROOT
+        from quart.research.value_growth import pit_panels
+
+        path = PROJECT_ROOT / "data" / "factors" / "financials.parquet"
+        if not path.exists():
+            return None
+        try:
+            financials = pd.read_parquet(path)
+            panels = pit_panels(
+                financials,
+                md.close_val,
+                factors=self.CANDIDATE_QUALITY_FACTORS,
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        zs = [
+            self._z(panels[name].reindex(columns=md.close_val.columns))
+            for name in self.CANDIDATE_QUALITY_FACTORS
+            if name in panels
+        ]
+        zs = [panel for panel in zs if bool(panel.notna().to_numpy().any())]
+        if not zs:
+            return None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            values = np.nanmean(np.stack([panel.to_numpy() for panel in zs]), axis=0)
+        return pd.DataFrame(
+            values, index=zs[0].index, columns=zs[0].columns, dtype="float32"
+        )
 
     def prepare(self, md: MarketData) -> None:
         super().prepare(md)
@@ -233,6 +285,22 @@ class LowVolCompositeStrategy(BaseStrategy):
         self.size_weight = max(0.0, float(p.get("size_weight", 0.0)))
         self.turnover_weight = max(0.0, float(p.get("turnover_weight", 0.0)))
         self.value_weight = max(0.0, float(p.get("value_weight", 0.0)))
+        self.event_crowding_weight = max(0.0, float(p.get("event_crowding_weight", 0.0)))
+        self.event_crowding_only = bool(p.get("event_crowding_only", False))
+        self.event_orthogonalize = bool(p.get("event_orthogonalize", True))
+        event_max_hits = p.get("event_max_limit_hits_20d")
+        self.event_max_limit_hits_20d = (
+            None if event_max_hits is None else max(0, int(event_max_hits))
+        )
+        self.limit_breadth_timing = bool(p.get("limit_breadth_timing", False))
+        self.limit_breadth_window = max(20, int(p.get("limit_breadth_window", 120)))
+        self.limit_breadth_quantile = min(
+            0.9, max(0.1, float(p.get("limit_breadth_quantile", 0.5)))
+        )
+        self.limit_breadth_floor = min(1.0, max(0.0, float(p.get("limit_breadth_floor", 0.5))))
+        self.candidate_quality_weight = min(
+            1.0, max(0.0, float(p.get("candidate_quality_weight", 0.0)))
+        )
 
         c = md.close_val.astype("float32")
         ret1 = c.pct_change(fill_method=None)
@@ -292,6 +360,51 @@ class LowVolCompositeStrategy(BaseStrategy):
 
         comp = (weighted / total_weight).where(complete).astype("float32")
 
+        # RESEARCH-002 个股事件拥挤：对近期涨停/接近涨停且放量的股票降权。
+        # 默认关闭；开启时可先对基础低波分正交化，防止只是 lottery20 的换名。
+        self.event_crowding_score = None
+        self.event_eligible = None
+        self.limit_breadth_exposure = None
+        need_stock_events = (
+            self.event_crowding_weight > 0
+            or self.event_crowding_only
+            or self.event_max_limit_hits_20d is not None
+        )
+        if need_stock_events:
+            from quart.research.event_factors import limit_event_panels, neutralize_against
+
+            event_panels = limit_event_panels(md)
+            if self.event_crowding_weight > 0 or self.event_crowding_only:
+                raw_event = event_panels["speculative_crowding20_neg"]
+                event_score = self._z(raw_event.reindex_like(comp))
+                if self.event_orthogonalize and not self.event_crowding_only:
+                    event_score = neutralize_against(event_score, comp)
+                    event_score = self._z(event_score)
+                self.event_crowding_score = event_score
+                if self.event_crowding_only:
+                    comp = event_score
+                else:
+                    comp = (
+                        comp + self.event_crowding_weight * event_score.fillna(0.0)
+                    ) / (1.0 + self.event_crowding_weight)
+            if self.event_max_limit_hits_20d is not None:
+                # 因子为 -count，>= -max 等价于过去 20 日涨停次数不超过 max。
+                hit_score = event_panels["limit_hit_count20_neg"].reindex_like(comp)
+                self.event_eligible = hit_score.ge(-self.event_max_limit_hits_20d)
+        if self.limit_breadth_timing:
+            from quart.research.event_factors import market_limit_sentiment
+
+            breadth = market_limit_sentiment(md)["limit_up_breadth"]
+            threshold = breadth.shift(1).rolling(
+                self.limit_breadth_window,
+                min_periods=max(20, self.limit_breadth_window // 2),
+            ).quantile(self.limit_breadth_quantile)
+            self.limit_breadth_exposure = pd.Series(
+                np.where(breadth.gt(threshold) | threshold.isna(), 1.0, self.limit_breadth_floor),
+                index=md.dates,
+                dtype="float32",
+            )
+
         # 多因子合成：叠加 PIT 价值成长（正交来源），缺失财务数据 = 中性 0
         self.vg_weight = float(p.get("vg_weight", 0.0))
         if self.vg_weight > 0:
@@ -303,6 +416,18 @@ class LowVolCompositeStrategy(BaseStrategy):
                 ).astype("float32")
         else:
             self.vg_score = None
+
+        # 财报候选与既有 vg_score 分开，便于独立归因和一键回滚。真实披露
+        # 时间优先；当前文件缺 published_at 的股票仍是 provisional 口径。
+        self.candidate_quality_score = None
+        if self.candidate_quality_weight > 0:
+            quality = self._build_candidate_quality_score(md)
+            if quality is not None:
+                self.candidate_quality_score = quality
+                comp = (
+                    (1.0 - self.candidate_quality_weight) * comp
+                    + self.candidate_quality_weight * quality.reindex_like(comp).fillna(0.0)
+                ).astype("float32")
 
         if self.industry_z:
             comp = self._group_z(comp)
@@ -322,6 +447,7 @@ class LowVolCompositeStrategy(BaseStrategy):
             20,
             self.regime_days if self.use_regime else 0,
             self.liquidity_days if self.min_avg_amount else 0,
+            self.limit_breadth_window if self.limit_breadth_timing else 0,
         ) + 1
         self.regime_flat = (
             regime_flat_series(md.benchmark_close, self.regime_ma, self.regime_band)
@@ -352,11 +478,15 @@ class LowVolCompositeStrategy(BaseStrategy):
             return {FLAT: 1.0}
         if self.use_regime and self.timing_exposure is not None:
             exposure = float(self.timing_exposure.iloc[i])
-            if exposure <= 0:
-                self._held = set()
-                return {FLAT: 1.0}
+        if self.limit_breadth_exposure is not None:
+            exposure *= float(self.limit_breadth_exposure.iloc[i])
+        if exposure <= 0:
+            self._held = set()
+            return {FLAT: 1.0}
 
         scores = self.composite.iloc[i]
+        if self.event_eligible is not None:
+            scores = scores.where(self.event_eligible.iloc[i])
         if self.selection == "bounce":
             quiet = self.composite.iloc[i] >= self.composite.iloc[i].median(skipna=True)
             scores = scores.where(quiet)

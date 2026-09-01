@@ -14,13 +14,71 @@
 - vg_score：四者截面排名等权合成，值越大越"又好又便宜"。
 
 口径警示（与 R2 原文一致的风险点）：
-- financials.date 是**报告期**而非披露日，构建时统一回退 disclosure_lag_days
-  （默认120天）避免前视；
+- financials.date 是**报告期**而非披露日；真实披露时间优先，缺失时回退
+  disclosure_lag_days（默认120天）避免前视；
 - eps 为报告期累计口径（非 TTM），ep 因子有季节性，仅作排序用不作绝对估值。
 """
 from __future__ import annotations
 
 import pandas as pd
+
+PUBLICATION_COLUMNS = ("published_at", "announcement_date", "disclosure_date")
+
+
+def resolve_usable_at(
+    financials: pd.DataFrame,
+    disclosure_lag_days: int = 120,
+) -> pd.Series:
+    """解析财报首次可用时间：真实披露时间优先，保守时滞兜底。
+
+    ``date`` 是报告期而不是披露日。若供应商提供 published_at/
+    announcement_date/disclosure_date，则使用真实时间；缺失或早于报告期的
+    异常记录回退为报告期 + ``disclosure_lag_days``。
+    """
+    report_date = pd.to_datetime(financials["date"], errors="coerce")
+    fallback = report_date + pd.to_timedelta(int(disclosure_lag_days), unit="D")
+    publication = pd.Series(pd.NaT, index=financials.index, dtype="datetime64[ns]")
+    for column in PUBLICATION_COLUMNS:
+        if column in financials:
+            candidate = pd.to_datetime(financials[column], errors="coerce", format="mixed")
+            publication = publication.where(publication.notna(), candidate)
+    valid = publication.notna() & report_date.notna() & (publication >= report_date)
+    return publication.where(valid, fallback)
+
+
+def _add_quality_candidates(financials: pd.DataFrame) -> pd.DataFrame:
+    """在季频长表上计算只依赖历史报告期的质量候选。"""
+    fin = financials.sort_values(["symbol", "date"]).copy()
+    for column in ("roe", "profit_yoy", "rev_yoy", "gross_margin"):
+        if column not in fin:
+            fin[column] = pd.NA
+        fin[column] = pd.to_numeric(fin[column], errors="coerce")
+    grouped = fin.groupby("symbol", group_keys=False)
+    fin["roe_stability"] = grouped["roe"].transform(
+        lambda values: -values.rolling(8, min_periods=4).std()
+    )
+    fin["profit_accel"] = grouped["profit_yoy"].diff()
+    fin["margin_accel"] = grouped["gross_margin"].diff()
+    # 没有分析师一致预期时，用净利增速相对营收增速衡量利润弹性；名称明确
+    # 标注 proxy，避免把它误称为标准化意外盈余（SUE）。
+    fin["earnings_surprise_proxy"] = fin["profit_yoy"] - fin["rev_yoy"]
+    return fin
+
+
+def _normalize_financials(financials: pd.DataFrame) -> pd.DataFrame:
+    """统一供应商常见的整数/字符串证券代码口径。"""
+    fin = financials.copy()
+    if "symbol" not in fin:
+        raise ValueError("financial data missing symbol column")
+
+    def _symbol(value) -> str:
+        text = str(value)
+        if text.endswith(".0") and text[:-2].isdigit():
+            text = text[:-2]
+        return text.zfill(6) if text.isdigit() else text
+
+    fin["symbol"] = fin["symbol"].map(_symbol)
+    return fin
 
 
 def build_value_growth(
@@ -36,18 +94,19 @@ def build_value_growth(
                     见 quart/data/factors.py。
         closes: 收盘价宽表面板（index=date, columns=symbol）。
         as_of: 因子日期。
-        disclosure_lag_days: 报告期→可用的最短披露时滞。
+        disclosure_lag_days: 缺真实披露时间时的保守兜底时滞。
 
     Returns:
         DataFrame(index=symbol)，列：
         roe / roe_prev / roe_improve / profit_yoy / ep / bp / vg_score
     """
     as_of_ts = pd.Timestamp(as_of)
-    usable_before = as_of_ts - pd.Timedelta(days=disclosure_lag_days)
-    fin = financials.copy()
+    fin = _normalize_financials(financials)
     fin["date"] = pd.to_datetime(fin["date"], errors="coerce")
     fin = fin.dropna(subset=["date"])
-    fin = fin[fin["date"] <= usable_before]
+    fin["usable_at"] = resolve_usable_at(fin, disclosure_lag_days)
+    fin = _add_quality_candidates(fin)
+    fin = fin[fin["usable_at"] <= as_of_ts]
     if fin.empty:
         return pd.DataFrame()
 
@@ -77,6 +136,12 @@ def build_value_growth(
                 if prev is not None
                 else pd.NA,
                 "profit_yoy": pd.to_numeric(latest.get("profit_yoy"), errors="coerce"),
+                "roe_stability": pd.to_numeric(latest.get("roe_stability"), errors="coerce"),
+                "profit_accel": pd.to_numeric(latest.get("profit_accel"), errors="coerce"),
+                "margin_accel": pd.to_numeric(latest.get("margin_accel"), errors="coerce"),
+                "earnings_surprise_proxy": pd.to_numeric(
+                    latest.get("earnings_surprise_proxy"), errors="coerce"
+                ),
                 "ep": (eps / px) * 100.0 if pd.notna(eps) else pd.NA,  # % 口径
                 "bp": (bps / px) * 100.0 if pd.notna(bps) else pd.NA,
                 "report_date": latest["date"],
@@ -105,7 +170,7 @@ def pit_panels(
 ) -> dict[str, pd.DataFrame]:
     """构建 PIT 价值成长因子的宽表面板（date × symbol），供策略层合成使用。
 
-    与 :func:`pit_features` 同一披露时滞口径（报告期 + lag 才可用），
+    与 :func:`pit_features` 同一可用时点口径（真实披露优先、lag 兜底），
     但输出为逐日截面面板而非长表 —— 策略在 prepare() 阶段一次构建，
     target_weights() 逐日取行，无逐日 merge 开销。
 
@@ -113,7 +178,7 @@ def pit_panels(
         financials: 财务快照长表（symbol,date,eps,bps,roe,profit_yoy）。
         closes: 收盘价宽表（index=date, columns=symbol），用于 ep/bp 定价。
         factors: 需要的因子列。
-        disclosure_lag_days: 报告期→可用最短时滞（防前视）。
+        disclosure_lag_days: 缺真实披露时间时的兜底时滞（防前视）。
 
     Returns:
         {factor_name: DataFrame(index=date, columns=symbol)}，仅含有数据的
@@ -121,13 +186,14 @@ def pit_panels(
     """
     if financials.empty or closes.empty:
         return {}
-    fin = financials.copy()
+    fin = _normalize_financials(financials)
     fin["date"] = pd.to_datetime(fin["date"], errors="coerce")
     fin = fin.dropna(subset=["date"]).sort_values(["symbol", "date"])
-    for col in ("eps", "bps", "roe", "profit_yoy"):
+    for col in ("eps", "bps", "roe", "profit_yoy", "rev_yoy", "gross_margin"):
         if col in fin:
             fin[col] = pd.to_numeric(fin[col], errors="coerce")
-    fin["usable_at"] = fin["date"] + pd.Timedelta(days=disclosure_lag_days)
+    fin["usable_at"] = resolve_usable_at(fin, disclosure_lag_days)
+    fin = _add_quality_candidates(fin)
     fin["roe_improve"] = fin.groupby("symbol")["roe"].diff()
 
     idx = pd.DatetimeIndex(closes.index)
@@ -138,7 +204,11 @@ def pit_panels(
         m = pd.merge_asof(
             left,
             g.rename(columns={"usable_at": "datetime"})
-            [["datetime", "eps", "bps", "roe", "roe_improve", "profit_yoy"]]
+            [[
+                "datetime", "eps", "bps", "roe", "roe_improve", "profit_yoy",
+                "roe_stability", "profit_accel", "margin_accel",
+                "earnings_surprise_proxy",
+            ]]
             .sort_values("datetime"),
             on="datetime",
             direction="backward",
@@ -163,7 +233,7 @@ def pit_features(
     """构建与训练特征索引对齐的 PIT（point-in-time）价值成长特征长表。
 
     对 (datetime, instrument) 索引中的每个 (date, symbol)，只使用
-    `date - disclosure_lag_days` 之前发布的最新报告期数据 —— 训练与
+    `date` 时点之前已实际披露（或已过保守兜底日）的最新报告期数据 —— 训练与
     实盘看到的完全一致，无前视。
 
     Args:
@@ -180,17 +250,22 @@ def pit_features(
     dates = feature_index.get_level_values(0)
     symbols = feature_index.get_level_values(1)
 
-    fin = financials.copy()
+    fin = _normalize_financials(financials)
     fin["date"] = pd.to_datetime(fin["date"], errors="coerce")
     fin = fin.dropna(subset=["date"]).sort_values(["symbol", "date"])
-    fin["usable_at"] = fin["date"] + pd.Timedelta(days=disclosure_lag_days)
+    fin["usable_at"] = resolve_usable_at(fin, disclosure_lag_days)
+    fin = _add_quality_candidates(fin)
     # 相邻报告期改善项（PIT 安全：改善只用历史报告期之间）
     fin["roe_improve"] = fin.groupby("symbol")["roe"].diff()
     fin["vg_ep"] = fin["eps"]
     fin["vg_bp"] = fin["bps"]
 
     feats = fin[
-        ["symbol", "usable_at", "roe", "roe_improve", "profit_yoy", "vg_ep", "vg_bp"]
+        [
+            "symbol", "usable_at", "roe", "roe_improve", "profit_yoy",
+            "roe_stability", "profit_accel", "earnings_surprise_proxy",
+            "vg_ep", "vg_bp",
+        ]
     ].rename(columns={"symbol": "instrument", "usable_at": "datetime"})
     feats = feats.dropna(subset=["datetime"])
 
@@ -208,5 +283,15 @@ def pit_features(
     merged = merged.set_index(["datetime", "instrument"]).reindex(feature_index)
     # ep/bp 用当期 EPS/BPS 直接作特征（绝对量纲），截面 rank 留给模型/归一化层
     return merged[
-        ["roe", "roe_improve", "profit_yoy", "vg_ep", "vg_bp"]
-    ].rename(columns={"roe": "vg_roe"})
+        [
+            "roe", "roe_improve", "profit_yoy", "roe_stability",
+            "profit_accel", "earnings_surprise_proxy", "vg_ep", "vg_bp",
+        ]
+    ].rename(
+        columns={
+            "roe": "vg_roe",
+            "roe_stability": "vg_roe_stability",
+            "profit_accel": "vg_profit_accel",
+            "earnings_surprise_proxy": "vg_earnings_surprise_proxy",
+        }
+    )

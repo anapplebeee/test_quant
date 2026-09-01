@@ -105,6 +105,69 @@ def test_optional_robust_factors_are_disabled_until_research_admission():
     assert not candidate.composite.empty
 
 
+def test_event_limit_hit_exclusion_is_disabled_by_default_and_pit_when_enabled():
+    dates = pd.bdate_range("2024-01-02", periods=45)
+    symbols = ["600000", "600001"]
+    close = pd.DataFrame(10.0, index=dates, columns=symbols)
+    close.loc[dates[15], "600000"] = 11.0
+    open_ = close.shift(1).fillna(close.iloc[0])
+    volume = pd.DataFrame(1_000_000.0, index=dates, columns=symbols)
+    md = MarketData(
+        open_, close * 1.01, close * 0.99, close, volume, amounts=volume * close * 100
+    )
+
+    baseline = LowVolCompositeStrategy()
+    baseline.prepare(md)
+    assert baseline.event_eligible is None
+
+    candidate = LowVolCompositeStrategy(event_max_limit_hits_20d=0)
+    candidate.prepare(md)
+    assert not bool(candidate.event_eligible.loc[dates[25], "600000"])
+    assert bool(candidate.event_eligible.loc[dates[25], "600001"])
+
+
+def test_limit_breadth_timing_uses_only_past_threshold_and_scales_exposure():
+    dates = pd.bdate_range("2024-01-02", periods=90)
+    symbols = [f"{600000 + index:06d}" for index in range(8)]
+    close = pd.DataFrame(10.0, index=dates, columns=symbols)
+    # 前半段周期性制造涨停，后半段不涨停，使低广度状态可识别。
+    for position in range(5, 45, 5):
+        close.loc[dates[position], symbols[:4]] = 11.0
+        close.loc[dates[position + 1], symbols[:4]] = 10.0
+    open_ = close.shift(1).fillna(close.iloc[0])
+    volume = pd.DataFrame(1_000_000.0, index=dates, columns=symbols)
+    md = MarketData(
+        open_, close * 1.01, close * 0.99, close, volume, amounts=volume * close * 100
+    )
+    strategy = LowVolCompositeStrategy(
+        top_k=2,
+        rebalance_days=1,
+        max_weight_pct=1.0,
+        limit_breadth_timing=True,
+        limit_breadth_window=20,
+        limit_breadth_floor=0.5,
+    )
+    strategy.prepare(md)
+
+    assert strategy.limit_breadth_exposure.loc[dates[-1]] == 0.5
+    strategy.composite.iloc[-1] = np.arange(len(symbols), dtype=float)
+    strategy.reversal = None
+    weights = strategy.target_weights(len(dates) - 1)
+    assert weights and sum(weights.values()) == 0.5
+
+
+def test_event_only_candidate_uses_event_score_without_changing_default():
+    md = make_md(n_days=80)
+    baseline = LowVolCompositeStrategy()
+    baseline.prepare(md)
+    assert baseline.event_crowding_score is None
+
+    candidate = LowVolCompositeStrategy(event_crowding_only=True, event_orthogonalize=True)
+    candidate.prepare(md)
+    assert candidate.event_crowding_score is not None
+    pd.testing.assert_frame_equal(candidate.composite, candidate.event_crowding_score)
+
+
 def test_returns_empty_before_warmup():
     md = make_md()
     strat = LowVolCompositeStrategy(top_k=1, rebalance_days=5, use_regime_filter=False)

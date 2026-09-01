@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 
 from quart.data.market import MarketData
-from quart.execution.constraints import LIMIT_TOLERANCE, price_limit_pct
+from quart.execution.constraints import LIMIT_TOLERANCE
+from quart.research.event_factors import limit_event_panels, price_limit_panel
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,18 @@ FACTOR_SPECS = (
     FactorSpec("turn20_neg", "流动性", "20 日平均换手率（负向，低换手）", is_new=True),
     FactorSpec("ep_ttm", "价值", "市盈率倒数（仅盈利为正）", is_new=True),
     FactorSpec("bp", "价值", "市净率倒数（仅净资产为正）", is_new=True),
+    FactorSpec("roe_stability", "财报质量", "过去八期 ROE 稳定性（负标准差）", is_new=True),
+    FactorSpec("profit_accel", "财报质量", "净利润同比增速的报告期边际变化", is_new=True),
+    FactorSpec(
+        "earnings_surprise_proxy", "财报事件",
+        "净利润同比增速减营收同比增速（非分析师 SUE）", is_new=True,
+    ),
+    FactorSpec("limit_hit_count20_neg", "事件拥挤", "20 日收盘涨停次数（负向）", is_new=True),
+    FactorSpec("near_limit_count20_neg", "事件拥挤", "20 日接近涨停次数（负向）", is_new=True),
+    FactorSpec(
+        "speculative_crowding20_neg", "事件拥挤",
+        "接近涨停程度 × 相对成交额的 20 日拥挤度（负向）", is_new=True,
+    ),
 )
 
 
@@ -68,11 +81,11 @@ def rank_correlation(left: pd.Series, right: pd.Series) -> float:
     joined = pd.concat([left.rename("left"), right.rename("right")], axis=1).dropna()
     if len(joined) < 2:
         return float("nan")
-    return float(
-        joined["left"].rank(method="average").corr(
-            joined["right"].rank(method="average")
-        )
-    )
+    left_rank = joined["left"].rank(method="average")
+    right_rank = joined["right"].rank(method="average")
+    if left_rank.nunique() < 2 or right_rank.nunique() < 2:
+        return float("nan")
+    return float(left_rank.corr(right_rank))
 
 
 class FactorInputs:
@@ -122,6 +135,24 @@ class FactorInputs:
             }
         except (FileNotFoundError, ValueError):
             return None
+
+    @cached_property
+    def financial_candidate_frames(self) -> dict[str, pd.DataFrame] | None:
+        """季频财报候选宽表；真实披露时间优先，缺失时用 120 天保守时滞。"""
+        from quart.config import data_root
+        from quart.research.value_growth import pit_panels
+
+        path = data_root() / "factors" / "financials.parquet"
+        if not path.exists():
+            return None
+        financials = pd.read_parquet(path)
+        factors = ("roe_stability", "profit_accel", "earnings_surprise_proxy")
+        panels = pit_panels(financials, self.close, factors=factors)
+        return panels or None
+
+    @cached_property
+    def price_event_frames(self) -> dict[str, pd.DataFrame]:
+        return limit_event_panels(self.market)
 
     def compute(self, name: str) -> pd.DataFrame | None:
         ret = self.returns
@@ -194,6 +225,13 @@ class FactorInputs:
             else:
                 pb = frames["pb"]
                 value = (1.0 / pb).where(pb > 0)
+        elif name in ("roe_stability", "profit_accel", "earnings_surprise_proxy"):
+            frames = self.financial_candidate_frames
+            if frames is None or name not in frames:
+                return None
+            value = frames[name].reindex(index=close.index, columns=close.columns)
+        elif name in self.price_event_frames:
+            value = self.price_event_frames[name]
         else:
             raise KeyError(f"unknown factor: {name}")
 
@@ -355,13 +393,21 @@ def run_factor_audit(
     min_cross_section: int = 100,
     warmup: int = 260,
     factor_names: list[str] | None = None,
+    evaluation_start: str | pd.Timestamp | None = None,
+    evaluation_end: str | pd.Timestamp | None = None,
 ) -> FactorAuditResult:
     """Evaluate factors against a close-T to open-T+1 executable return label."""
     if horizon < 1:
         raise ValueError("horizon must be positive")
     positions = _sample_positions(market.dates, sample, horizon, warmup)
+    if evaluation_start is not None:
+        start_ts = pd.Timestamp(evaluation_start)
+        positions = [i for i in positions if market.dates[i] >= start_ts]
+    if evaluation_end is not None:
+        end_ts = pd.Timestamp(evaluation_end)
+        positions = [i for i in positions if market.dates[i] <= end_ts]
     if not positions:
-        raise ValueError("not enough history for requested warmup/horizon")
+        raise ValueError("not enough history for requested warmup/horizon/evaluation range")
 
     specs = [spec for spec in FACTOR_SPECS if factor_names is None or spec.name in factor_names]
     unknown = set(factor_names or []) - {spec.name for spec in FACTOR_SPECS}
@@ -374,13 +420,11 @@ def run_factor_audit(
     amount = market.amounts if market.amounts is not None else market.volumes * np.nan
     average_amount = amount.rolling(20).mean()
     eligible = average_amount >= float(min_amount)
-    limit_pct = pd.Series(
-        [price_limit_pct(str(symbol)) for symbol in market.symbols],
-        index=market.symbols,
-        dtype="float64",
+    limit_pct = price_limit_panel(market.dates, market.symbols).astype("float64")
+    entry_limit = market.close_val.mul(1.0 + limit_pct.shift(-1))
+    exit_limit = market.close_val.shift(-horizon).mul(
+        1.0 - limit_pct.shift(-(horizon + 1))
     )
-    entry_limit = market.close_val.mul(1.0 + limit_pct, axis=1)
-    exit_limit = market.close_val.shift(-horizon).mul(1.0 - limit_pct, axis=1)
     executable = (
         (market.volumes.shift(-1).fillna(0) > 0)
         & (market.volumes.shift(-(horizon + 1)).fillna(0) > 0)
@@ -518,6 +562,12 @@ def run_factor_audit(
         "data_last_date": str(market.dates.max().date()),
         "evaluation_first_date": str(market.dates[positions[0]].date()),
         "evaluation_last_date": str(market.dates[positions[-1]].date()),
+        "evaluation_requested_start": (
+            None if evaluation_start is None else str(pd.Timestamp(evaluation_start).date())
+        ),
+        "evaluation_requested_end": (
+            None if evaluation_end is None else str(pd.Timestamp(evaluation_end).date())
+        ),
         "symbols": len(market.symbols),
         "sample": sample,
         "sample_points": len(positions),
@@ -530,7 +580,7 @@ def run_factor_audit(
         "factor_count": len(summary),
         "research_status": "provisional",
         "provisional_reason": (
-            "DATA-001 content-hash snapshot, PIT universe, and historical RuleBook are not complete; "
+            "PIT universe/security-status history and actual disclosure timestamps are not complete; "
             "this result must not change the live allowlist or admission status"
         ),
         "baseline_definition": (

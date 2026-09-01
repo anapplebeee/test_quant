@@ -5,8 +5,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scripts.mine_factors import build_financial_factors, build_limit_up_factors, evaluate_factors
 from quart.data.market import MarketData
+from quart.research.event_factors import market_limit_sentiment
+from scripts.mine_factors import (
+    build_financial_factors,
+    build_limit_up_factors,
+    evaluate_factors,
+    evaluate_market_signals,
+)
 
 
 def _md(n: int = 200, n_syms: int = 6, seed: int = 5) -> MarketData:
@@ -53,60 +59,79 @@ def test_financial_factors_build_shapes():
     md = _md(n=250)
     fin = _financials(md)
     factors = build_financial_factors(fin, md.close_val)
-    assert "roe_stab" in factors
+    assert "roe_stability" in factors
     assert "profit_accel" in factors
-    assert "surprise" in factors
+    assert "earnings_surprise_proxy" in factors
     for f in factors.values():
         assert f.shape[0] == len(md), "因子面板应与行情对齐"
         assert f.shape[1] == len(md.symbols)
 
 
 def test_financial_factors_no_lookahead():
-    """财报因子必须做披露时滞：报告期 + 120 天才可用。"""
+    """有真实披露时间时必须优先使用，披露前不得看到新一期数据。"""
     md = _md(n=500)
-    # 只给最后一天的报告期数据 → 前 120 天应为 NaN
+    reports = pd.date_range("2021-03-31", periods=6, freq="QE")
+    disclosed_at = [
+        pd.Timestamp("2021-05-01"),
+        pd.Timestamp("2021-08-01"),
+        pd.Timestamp("2021-11-01"),
+        pd.Timestamp("2022-04-01"),
+        pd.Timestamp("2022-08-01"),
+        md.dates[300],
+    ]
     fin = pd.DataFrame({
-        "symbol": [md.symbols[0]], "date": [md.dates[-1]],
-        "roe": [15.0], "profit_yoy": [10.0], "rev_yoy": [5.0],
-        "eps": [1.0], "bps": [4.0],
+        "symbol": md.symbols[0], "date": reports,
+        "published_at": disclosed_at,
+        "roe": [10.0, 11.0, 10.5, 11.5, 12.0, 30.0],
+        "profit_yoy": [5.0, 6.0, 7.0, 9.0, 10.0, 40.0],
+        "rev_yoy": [3.0, 3.5, 4.0, 4.5, 5.0, 8.0],
+        "eps": 1.0, "bps": 4.0,
     })
     factors = build_financial_factors(fin, md.close_val)
-    # 最后 120 天内应无值（报告期在最后一天 + 120 天披露滞后 > 数据末尾）
-    for name, f in factors.items():
-        assert f.iloc[:-1].notna().sum().sum() == 0, f"{name} 存在前视"
+    assert factors, "测试必须实际生成因子，不能以空字典虚假通过"
+    before = md.dates[299]
+    after = md.dates[300]
+    assert factors["profit_accel"].loc[before, md.symbols[0]] == pytest.approx(1.0)
+    assert factors["profit_accel"].loc[after, md.symbols[0]] == pytest.approx(30.0)
 
 
 def test_limit_up_factors_build():
     md = _md(n=150)
     factors = build_limit_up_factors(md)
-    assert "limit_up_density" in factors
-    assert "limit_up_density_smooth" in factors
-    assert "limit_up_next" in factors
-    # 密度是每日标量扩成的截面
-    assert factors["limit_up_density"].shape == (len(md), len(md.symbols))
-    # 密度值应 >= 0
-    assert (factors["limit_up_density"].fillna(0) >= 0).all().all()
+    assert set(factors) == {
+        "limit_hit_count20_neg",
+        "near_limit_count20_neg",
+        "speculative_crowding20_neg",
+    }
+    assert all(panel.shape == (len(md), len(md.symbols)) for panel in factors.values())
 
 
-def test_limit_up_density_is_nonnegative_int_like():
+def test_limit_up_market_sentiment_is_time_series_not_fake_cross_section():
+    md = _md(n=200)
+    sentiment = market_limit_sentiment(md)
+    assert {"limit_up_count", "limit_up_breadth", "limit_heat_z"} <= set(sentiment)
+    assert len(sentiment) == len(md)
+    assert not isinstance(sentiment["limit_up_breadth"], pd.DataFrame)
+
+
+def test_limit_up_candidates_are_past_looking():
     md = _md(n=200)
     factors = build_limit_up_factors(md)
-    density = factors["limit_up_density"]
-    # 每行的值应一致（截面复制），且为非负
-    for i in range(0, len(md), 20):
-        row = density.iloc[i].dropna()
-        if not row.empty:
-            assert (row.values == row.values[0]).all(), "密度应每行相同"
-            assert row.values[0] >= 0
+    cutoff = md.dates[120]
+    changed = _md(n=200)
+    changed.close_val.loc[changed.dates[121]:] *= 2.0
+    changed.closes.loc[changed.dates[121]:] *= 2.0
+    changed_factors = build_limit_up_factors(changed)
+    for name in factors:
+        pd.testing.assert_series_equal(
+            factors[name].loc[cutoff], changed_factors[name].loc[cutoff], check_names=False
+        )
 
 
-def test_limit_up_next_only_on_prior_limit_days():
+def test_market_signal_evaluation_is_separate_from_cross_section():
     md = _md(n=200)
-    factors = build_limit_up_factors(md)
-    lu_next = factors["limit_up_next"]
-    # 涨停次日收益列应只在前一日涨停时有值，否则 NaN
-    # （合成数据几乎不会涨停，所以大部分应为 NaN/0）
-    assert lu_next.notna().sum().sum() >= 0
+    result = evaluate_market_signals(market_limit_sentiment(md), md)
+    assert isinstance(result, pd.DataFrame)
 
 
 def test_evaluate_factors_returns_summary():
@@ -121,6 +146,18 @@ def test_evaluate_factors_returns_summary():
     # 空结果可接受（样本不足 300 只），但不崩溃即通过
     if not result.empty:
         assert {"ic", "icir", "pos%", "ls_bp", "n"} <= set(result.columns)
+
+
+def test_evaluate_factors_aligns_symbol_labels():
+    md = _md(n=200)
+    factor = pd.DataFrame(
+        np.random.default_rng(7).normal(size=(len(md), len(md.symbols))),
+        index=md.dates,
+        columns=[int(symbol) for symbol in md.symbols],
+    )
+    # 财务供应商常把代码读成整数；研究入口必须安全对齐并返回空结果，不能崩溃。
+    result = evaluate_factors({"supplier_codes": factor}, md, [120, 130])
+    assert result.empty
 
 
 def test_roe_stab_higher_for_stable_company():
@@ -140,7 +177,7 @@ def test_roe_stab_higher_for_stable_company():
         for i, d in enumerate(dates)
     ])
     factors = build_financial_factors(fin, md.close_val)
-    stab = factors["roe_stab"]
+    stab = factors["roe_stability"]
     # 稳定公司的 roe_stab（负标准差）应大于波动公司（更接近 0）
     last = stab.index[-1]
     stable_val = stab.loc[last, stable]

@@ -28,6 +28,9 @@ def main() -> None:
     parser.add_argument("--min-amount", type=float, default=20_000_000)
     parser.add_argument("--min-cross-section", type=int, default=100)
     parser.add_argument("--warmup", type=int, default=260, help="评估前预热交易日数")
+    parser.add_argument("--evaluation-start", default=None, help="只统计该日及之后的样本（仍保留前置预热）")
+    parser.add_argument("--evaluation-end", default=None, help="只统计该日及之前的样本")
+    parser.add_argument("--factor", action="append", default=[], help="只审计指定因子，可重复")
     args = parser.parse_args()
 
     params = vars(args)
@@ -52,6 +55,9 @@ def main() -> None:
             min_amount=args.min_amount,
             min_cross_section=args.min_cross_section,
             warmup=args.warmup,
+            factor_names=args.factor or None,
+            evaluation_start=args.evaluation_start,
+            evaluation_end=args.evaluation_end,
         )
 
         writer.put_table("summary", result.summary)
@@ -91,8 +97,8 @@ def main() -> None:
             )
         console.print(table)
         console.print(
-            "[yellow]PROVISIONAL[/yellow] 当前结果仅供研究：缺少 DATA-001 快照、PIT 股票池和历史 RuleBook，"
-            "不得改变正式准入或 live allowlist。"
+            "[yellow]PROVISIONAL[/yellow] 当前结果仅供研究：行情/指数快照已记录，但逐日 PIT 股票池、"
+            "历史证券状态和财报实际披露时间仍不完整；不得改变正式准入或 live allowlist。"
         )
         console.print(f"[green]artifact[/green] {manifest.run_id}")
     except Exception as exc:
