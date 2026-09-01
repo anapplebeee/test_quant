@@ -497,32 +497,52 @@ class BarStore:
         else:
             today = pd.Timestamp(dt.datetime.now(CN_TZ).date())
 
-        latest = None
-        # 分区布局下先看最新年份目录，命中即提前返回（避免扫全部历史）
-        candidates: list[Path] = []
         if self._partitioned:
-            for d in (self.daily_dir, self.index_dir):
-                years = self._partition_years(d)
-                for y in reversed(years):
-                    candidates.extend((d / f"{PARTITION_PREFIX}{y}").glob("*.parquet"))
+            # 分区布局：全局最新 bar 必在 daily/index 各自最新年份分区，
+            # 用 duckdb 一次扫描取 max(date)，避免逐文件 read_parquet 扫全历史（原 68s 卡点）。
+            latest = self._freshness_latest_partitioned()
         else:
+            latest = None
+            candidates: list[Path] = []
             for d in (self.daily_dir, self.index_dir):
                 candidates.extend(d.glob("*.parquet"))
+            for p in candidates:
+                try:
+                    mx = pd.read_parquet(p, columns=["date"])["date"].max()
+                except Exception:
+                    continue
+                if latest is None or mx > latest:
+                    latest = mx
 
-        # 只看最近一批文件：freshness 关心的是"最新到哪天"，
-        # 扫到足够新的日期即可停机
-        for p in candidates:
-            try:
-                mx = pd.read_parquet(p, columns=["date"])["date"].max()
-            except Exception:
-                continue
-            if latest is None or mx > latest:
-                latest = mx
-            if latest is not None and (today - pd.Timestamp(latest).normalize()).days <= 0:
-                break
         if latest is None:
             return None
         return int((today - pd.Timestamp(latest).normalize()).days)
+
+    def _freshness_latest_partitioned(self) -> "pd.Timestamp | None":
+        """分区布局下全局最新 bar 日期：只扫 daily/index 各自最新年份分区。
+
+        数据按 date 追加写入并按年分区，全局最大 date 必落在最新年份分区内，
+        因此无需扫描历史年份即可获得准确 freshness。
+        """
+        import duckdb
+
+        latest: "pd.Timestamp | None" = None
+        for d in (self.daily_dir, self.index_dir):
+            years = self._partition_years(d)
+            if not years:
+                continue
+            pattern = (d / f"{PARTITION_PREFIX}{years[-1]}" / "*.parquet").as_posix()
+            try:
+                row = duckdb.sql(
+                    f"SELECT max(date) FROM read_parquet('{pattern}') WHERE date IS NOT NULL"
+                ).fetchone()
+                if row and row[0] is not None:
+                    ts = pd.Timestamp(row[0])
+                    if latest is None or ts > latest:
+                        latest = ts
+            except Exception as exc:
+                logger.debug("freshness partitioned scan failed for {}: {}", d, exc)
+        return latest
 
     # ---------------- 迁移 ----------------
 
