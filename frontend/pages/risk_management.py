@@ -134,6 +134,8 @@ def render():
     with gr.Tab("🛡️ 风险管理"):
         gr.HTML(page_header("🛡️ 风险管理",
                             "VaR/CVaR · 集中度 · 流动性 — 所有指标附方法论注释"))
+        gr.Button("🔄 刷新本页（重算风险指标）", size="sm").click(
+            js="() => location.reload()")
 
         positions, cash = _get_holdings()
 
@@ -214,7 +216,7 @@ def render():
                 # 用实际权重加权组合收益
                 aligned = ret_df[[c for c in pos_df["code"] if c in ret_df.columns]]
                 if aligned.empty:
-                    gr.Info("持仓历史数据不足60天，无法计算VaR")
+                    gr.Markdown("> ⚠️ 持仓历史数据不足60天，无法计算VaR")
                 else:
                     w = pos_df.set_index("code").loc[aligned.columns, "value"]
                     w = w / w.sum()
@@ -234,7 +236,7 @@ def render():
                     ]))
                     gr.Plot(value=_build_var_chart(portfolio_ret))
             else:
-                gr.Info("持仓历史数据不足60天，无法计算VaR")
+                gr.Markdown("> ⚠️ 持仓历史数据不足60天，无法计算VaR")
 
             # ---- 流动性 ----
             gr.Markdown("### 💧 流动性风险")
@@ -276,8 +278,8 @@ def render():
                             continue
 
             if liq_skipped:
-                gr.Info(
-                    f"ℹ️ {len(liq_skipped)} 只持仓因数据不完整未纳入流动性测算: "
+                gr.Markdown(
+                    f"> ℹ️ {len(liq_skipped)} 只持仓因数据不完整未纳入流动性测算: "
                     + ", ".join(liq_skipped[:8])
                     + ("…" if len(liq_skipped) > 8 else "")
                 )
@@ -287,15 +289,15 @@ def render():
                 gr.Dataframe(value=liq_df, interactive=False)
                 n_bad = sum(1 for r in liq_rows if float(r["变现天数"]) > 3)
                 if n_bad:
-                    gr.Warning(f"⚠️ {n_bad} 只持仓变现天数 > 3 天，存在流动性风险")
+                    gr.Markdown(f"> ⚠️ {n_bad} 只持仓变现天数 > 3 天，存在流动性风险")
                 elif liq_skipped:
                     # 已测部分虽达标，但存在未测算持仓，不能给出"全部良好"结论
-                    gr.Warning(
-                        f"⚠️ 已测算持仓变现天数均 < 3 天，但 {len(liq_skipped)} 只"
+                    gr.Markdown(
+                        f"> ⚠️ 已测算持仓变现天数均 < 3 天，但 {len(liq_skipped)} 只"
                         "未能测算，结论不完整"
                     )
                 else:
-                    gr.Success("✅ 所有持仓变现天数 < 3 天，流动性良好")
+                    gr.Markdown("> ✅ 所有持仓变现天数 < 3 天，流动性良好")
 
         # ================= 空仓：显示方法论 =================
         else:

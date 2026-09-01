@@ -50,4 +50,21 @@ def get_config_snapshot() -> dict:
     }
 
 
-__all__ = ["get_config_snapshot"]
+_BENCHMARK_LABELS = {
+    "000300": "沪深300",
+    "000905": "中证500",
+    "000852": "中证1000",
+    "000016": "上证50",
+    "399006": "创业板指",
+}
+
+
+def get_benchmark_label() -> str:
+    """当前生效基准的展示名（配置代码 → 中文名，未知代码原样返回）。"""
+    from quart.config import load_config
+
+    code = str(load_config().get("benchmark", "000300"))
+    return _BENCHMARK_LABELS.get(code, code)
+
+
+__all__ = ["get_benchmark_label", "get_config_snapshot"]

@@ -270,3 +270,18 @@ def get_latest_ml_scores(limit: int = 50) -> pd.DataFrame | None:
     except Exception as exc:
         degraded("get_latest_ml_scores", exc)
         return None
+
+
+def get_quality_gate_status() -> dict | None:
+    """最近一次质量门禁结果（data/meta/last_quality_gate.json）。
+
+    UI-001：前端不直调 quart.data.quality_gate，统一经 api 层。
+    无记录返回 None；读取失败降级为 None。
+    """
+    try:
+        from quart.data.quality_gate import load_quality_gate
+
+        return load_quality_gate()
+    except Exception as exc:
+        degraded("get_quality_gate_status", exc)
+        return None

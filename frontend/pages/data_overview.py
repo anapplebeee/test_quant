@@ -9,6 +9,7 @@ import plotly.express as px
 import data_bus
 from api.data_api import (
     get_index_coverage,
+    get_quality_gate_status,
     get_stock_data,
     get_stock_list,
     get_stock_names,
@@ -45,9 +46,7 @@ def _freshness_text(stats: dict) -> str:
 
 def _quality_gate_text() -> str:
     """显示最近一次正式/信号 Preflight，避免质量状态只藏在日志里。"""
-    from quart.data.quality_gate import load_quality_gate
-
-    status = load_quality_gate()
+    status = get_quality_gate_status()
     if status is None:
         return "> ⚠️ **质量门禁**：尚无运行记录。正式回测或每日信号将在启动前执行 Preflight。"
     if status.get("passed"):

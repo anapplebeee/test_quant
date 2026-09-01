@@ -86,9 +86,11 @@ def on_run_task(task_id: str, strategy: str = ""):
         elif not my_done:
             idle_ticks = 0
 
-    # 任务完成后：显示产出文件清单
-    artifacts = get_task_artifacts(task_id)
-    yield (task_queue.get_output(task_id, tail=40),
+    # 任务完成后：显示产出文件清单（按本次提交实例取输出与产出窗口）
+    my_task = task_queue.tasks.get(instance_id)
+    since = my_task.started_at if my_task else None
+    artifacts = get_task_artifacts(task_id, since=since)
+    yield (task_queue.get_output(instance_id, tail=40),
            task_queue.get_status_summary(),
            "🏁 队列空闲",
            artifacts)

@@ -21,11 +21,13 @@ def render():
             "从行业交易、收益时序与当前持仓风格三个视角解释策略结果。",
             "ATTRIBUTION",
         ))
+        gr.Button("🔄 刷新本页（重新加载最新制品）", size="sm").click(
+            js="() => location.reload()")
 
         gr.HTML(section_header("行业交易分布", "按最新回测成交额汇总买卖方向。", "INDUSTRY"))
         industry = latest_industry_trade_summary()
         if industry.empty:
-            gr.Info("暂无同时包含交易记录和行业映射的回测制品")
+            gr.Markdown("> ⚠️ 暂无同时包含交易记录和行业映射的回测制品")
         else:
             figure = go.Figure()
             figure.add_trace(go.Bar(
@@ -45,7 +47,7 @@ def render():
         gr.HTML(section_header("月度收益热力图", "识别年度稳定性、季节性与收益集中月份。", "RETURN PATTERN"))
         monthly = latest_monthly_returns()
         if monthly.empty:
-            gr.Info("暂无带日期索引的回测净值制品")
+            gr.Markdown("> ⚠️ 暂无带日期索引的回测净值制品")
         else:
             monthly_figure = px.imshow(
                 monthly,
@@ -70,7 +72,7 @@ def render():
         )
         exposure = portfolio_factor_exposure()
         if exposure.empty:
-            gr.Info("当前无持仓，或持仓行情不足 25 个交易日")
+            gr.Markdown("> ⚠️ 当前无持仓，或持仓行情不足 25 个交易日")
         else:
             gr.Dataframe(
                 value=exposure, interactive=False, show_search="filter",

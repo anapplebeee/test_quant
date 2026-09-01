@@ -21,6 +21,8 @@ def render():
 
     with gr.Tab("📖 参数词典"):
         gr.HTML(page_header("📖 量化参数词典", "所有关键参数的含义、计算方法和经验取值"))
+        gr.Button("🔄 刷新本页（重新读取 settings.yaml）", size="sm").click(
+            js="() => location.reload()")
         gr.Markdown(
             f"> 当前生效值来自 `config/settings.yaml`，默认策略 `{s.get('name')}`（"
             f"与回测中心/信号生成同源，2026-08-31 起不再硬编码）"

@@ -14,6 +14,7 @@ import pandas as pd
 
 import data_bus
 from api.backtest_api import get_backtest_summary, get_window_stats, scan_summaries
+from api.config_api import get_benchmark_label
 from api.data_api import get_freshness, get_next_trade_date
 from api.manual_trading_api import get_account_summary
 from api.research_api import latest_sweep_headlines
@@ -44,7 +45,7 @@ def _color_by_sign(v) -> str:
 def _today_status_card() -> str:
     """生成顶部工作台状态卡：日期、交易日状态、数据新鲜度、账户。"""
     today = date.today()
-    weekday_cn = ["周二", "周三", "周四", "周五", "周六", "周日", "周一"]
+    weekday_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     wd_label = weekday_cn[today.weekday()]
     date_str = today.strftime("%Y-%m-%d")
 
@@ -161,7 +162,7 @@ def _summary_html(name: str | None) -> str:
             </div>
             <div>
                 <div style="font-size: 0.85rem; color: #666; margin-bottom: 0.25rem;">基准</div>
-                <div style="font-size: 1rem; color: #333;">沪深300</div>
+                <div style="font-size: 1rem; color: #333;">{get_benchmark_label()}</div>
             </div>
         </div>
     </div>

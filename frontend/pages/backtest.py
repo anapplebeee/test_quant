@@ -42,7 +42,7 @@ try:
 except Exception:
     STRATEGY_CHOICES = [
         "momentum_rotation", "momentum_path", "lowvol_composite", "dual_ma",
-        "ml_rank", "lowvol_indz",
+        "ml_rank", "lowvol_indz", "index_enhancement", "factor_portfolio",
     ]
     DEFAULT_STRATEGY = "lowvol_indz"
 if DEFAULT_STRATEGY not in STRATEGY_CHOICES:

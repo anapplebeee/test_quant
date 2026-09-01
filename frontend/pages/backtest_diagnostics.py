@@ -42,6 +42,8 @@ def render():
             "用逐折样本外表现、衰减比与参数一致率判断策略是否在挑选历史噪声。",
             "OUT-OF-SAMPLE",
         ))
+        gr.Button("🔄 刷新本页（重新加载最新 WFA）", size="sm").click(
+            js="() => location.reload()")
 
         if wfa is None or wfa.empty:
             gr.Markdown(
@@ -67,7 +69,7 @@ def render():
                 "折": wfa["fold"],
                 "训练段": wfa["train"],
                 "验证段": wfa["test"],
-                "最优top_k": wfa.get("best_top_k", wfa.get("best_top_k", "-")),
+                "最优top_k": wfa.get("best_top_k", "-"),
                 "最优调仓(日)": wfa.get("best_rebalance_days", "-"),
                 "IS夏普": wfa["is_sharpe"].round(3),
                 "OOS夏普": wfa["oos_sharpe"].round(3),
