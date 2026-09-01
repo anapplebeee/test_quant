@@ -73,6 +73,15 @@ FACTOR_SPECS = (
         "speculative_crowding20_neg", "事件拥挤",
         "接近涨停程度 × 相对成交额的 20 日拥挤度（负向）", is_new=True,
     ),
+    FactorSpec(
+        "crowding_liq20_neg", "事件拥挤·容量化",
+        "拥挤度 ÷ ADV 横截面分位（下限截断）——同等热度下流动性差者扣分更重，"
+        "Top 篮子自动偏向高 ADV 股票（RESEARCH-002 容量复盘的正向解）", is_new=True,
+    ),
+    FactorSpec(
+        "sector_heat20_neg", "板块拥挤",
+        "个股投机热度聚合到一级行业的板块拥挤反向（板块层容量结构）", is_new=True,
+    ),
 )
 
 

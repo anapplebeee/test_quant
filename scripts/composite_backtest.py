@@ -39,7 +39,7 @@ from quart.research.factor_audit import FACTOR_SPECS, FactorInputs
 
 console = Console()
 
-COMPOSITE_3 = ("speculative_crowding20_neg", "vwap_pos20_neg", "rel_ind_rev20")
+COMPOSITE_3 = ("crowding_liq20_neg", "vwap_pos20_neg", "rel_ind_rev20")
 COMPOSITE_4 = (*COMPOSITE_3, "vol20_neg")
 
 
@@ -201,8 +201,7 @@ def main() -> None:
             portfolios[label] = rets
             turnovers[label] = float(turns.mean() * ppy) if not turns.empty else np.nan
 
-        # 基准：按同一调仓节奏的开盘到开盘
-        bench_open = market.opens[[]] if market.opens.empty else None
+        # 基准：按同一调仓节奏的收盘到收盘（近似开盘节奏，仅作参照）
         bench_close = market.benchmark_close if hasattr(market, "benchmark_close") else None
         if bench_close is not None:
             b = bench_close.reindex(portfolios["composite3(拥挤+VWAP+行业反转)"].index).pct_change().fillna(0)

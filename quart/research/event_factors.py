@@ -27,6 +27,8 @@ PRICE_EVENT_FACTORS = (
     "limit_hit_count20_neg",
     "near_limit_count20_neg",
     "speculative_crowding20_neg",
+    "crowding_liq20_neg",
+    "sector_heat20_neg",
 )
 
 
@@ -107,11 +109,73 @@ def limit_event_panels(
         * np.log1p(amount_shock.fillna(0.0))
     ).where(tradable, 0.0)
 
-    return {
+    panels = {
         "limit_hit_count20_neg": (-hit.astype("float32").rolling(lookback).sum()).astype("float32"),
         "near_limit_count20_neg": (-near.astype("float32").rolling(lookback).sum()).astype("float32"),
         "speculative_crowding20_neg": (-heat.rolling(lookback).mean()).astype("float32"),
+        **liquidity_adjacent_crowding(heat, market.amounts, lookback=lookback),
     }
+    try:
+        from quart.strategy.industries import load_industry_series
+
+        sector = sector_heat_panel(heat, load_industry_series("first"))
+    except (FileNotFoundError, ValueError):
+        sector = None
+    if sector is not None:
+        panels["sector_heat20_neg"] = sector
+    return panels
+
+
+def liquidity_adjacent_crowding(
+    heat: pd.DataFrame,
+    amounts: pd.DataFrame | None,
+    *,
+    lookback: int = 20,
+    floor_quantile: float = 0.2,
+) -> dict[str, pd.DataFrame]:
+    """容量化拥挤反向：同等投机热度下，流动性越差的股票扣分越重。
+
+    RESEARCH-002 复盘指出的容量死刑：纯事件拥挤因子的 Top 篮子集中在
+    小票（10% ADV 容量代理仅 ~700 万元），2 倍成本下 CAGR 转负。本算子把
+    "可投资容量"直接编码进因子值——热度除以 ADV 横截面分位（下限截断），
+    使"最不拥挤"的选股结果自动偏向高 ADV 股票，Top 篮子容量成倍放大，
+    同时保留"追涨透支 → 未来负收益"的核心信息。
+    """
+    if not 0 < floor_quantile <= 1:
+        raise ValueError("floor_quantile must be in (0, 1]")
+    if amounts is None:
+        # 无成交额数据时退化为原始拥挤（不加容量权重），保持时点安全。
+        return {}
+    adv = amounts.rolling(lookback, min_periods=lookback // 2).mean()
+    adv_quantile = adv.rank(axis=1, pct=True)
+    # 下限截断：最低分位的股票最多放大 floor_quantile 倍扣分，避免极小
+    # 流动性股票的因子值被噪声主导。
+    liq_weight = adv_quantile.clip(lower=floor_quantile)
+    adjusted = (-heat.div(liq_weight)).rolling(lookback).mean()
+    return {"crowding_liq20_neg": adjusted.astype("float32")}
+
+
+def sector_heat_panel(
+    heat: pd.DataFrame,
+    industry_mapping: pd.Series,
+) -> pd.DataFrame | None:
+    """板块层拥挤：个股投机热度聚合到一级行业后 broadcast 回板块内个股。
+
+    RESEARCH-002 复盘的方向之一：个股层容量小，板块层的容量与换手结构
+    完全不同。板块平均热度捕捉的是"资金在板块层面的聚集"，与个股自身
+    拥挤（heat）相关性低，可作为独立的横截面维度审计。返回负向面板
+    （高板块热度 → 未来跑输），无法获得行业映射时返回 None。
+    """
+    if heat.empty or industry_mapping is None or len(industry_mapping) == 0:
+        return None
+    groups = pd.Series(
+        [industry_mapping.get(symbol, "UNKNOWN") for symbol in heat.columns],
+        index=heat.columns,
+    )
+    industry_heat = heat.T.groupby(groups).mean().T
+    broadcast = industry_heat.reindex(columns=groups.values)
+    broadcast.columns = heat.columns
+    return (-broadcast.rolling(20).mean()).astype("float32")
 
 
 def market_limit_sentiment(
