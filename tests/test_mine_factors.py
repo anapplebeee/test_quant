@@ -102,6 +102,8 @@ def test_limit_up_factors_build():
         "limit_hit_count20_neg",
         "near_limit_count20_neg",
         "speculative_crowding20_neg",
+        "crowding_liq20_neg",
+        "sector_heat20_neg",
     }
     assert all(panel.shape == (len(md), len(md.symbols)) for panel in factors.values())
 
