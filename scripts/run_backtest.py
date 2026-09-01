@@ -12,6 +12,7 @@ from rich.panel import Panel
 import common
 from quart.backtest.engine import BacktestEngine
 from quart.backtest.metrics import format_summary, summarize
+from quart.backtest.stress import run_execution_stress
 from quart.config import load_config
 from quart.data.artifacts import ArtifactStore
 from quart.data.benchmark import equal_weight_benchmark
@@ -28,6 +29,26 @@ from quart.strategy.parameters import (
 )
 
 console = Console()
+
+
+def _parse_csv_grid(raw: str, label: str) -> list[float]:
+    text = str(raw).strip()
+    if not text:
+        return []
+    try:
+        values = [float(item.strip()) for item in text.split(",") if item.strip()]
+    except ValueError as exc:
+        raise ValueError(f"{label} 必须是逗号分隔数字") from exc
+    if not values:
+        raise ValueError(f"{label} 不能为空")
+    return values
+
+
+def _parse_csv_text(raw: str, label: str) -> list[str]:
+    values = [item.strip().lower() for item in str(raw).split(",") if item.strip()]
+    if not values:
+        raise ValueError(f"{label} 不能为空")
+    return values
 
 
 def main() -> None:
@@ -106,11 +127,49 @@ def main() -> None:
         default=1.0,
         help="交易成本压力倍数，0=零成本、1=配置成本、2=双倍成本",
     )
+    parser.add_argument(
+        "--execution-price",
+        choices=("open", "vwap", "close"),
+        default=None,
+        help="T+1 成交价场景，默认使用 config.backtest.execution_price_mode",
+    )
+    parser.add_argument(
+        "--stress-initial-cash",
+        default="",
+        help="可选账户规模压力网格，如 100000,1000000,5000000；启用后写出 CSV/Artifact",
+    )
+    parser.add_argument(
+        "--stress-cost-multipliers",
+        default="1,2",
+        help="压力测试成本倍数网格（默认 1,2）",
+    )
+    parser.add_argument(
+        "--stress-price-modes",
+        default="open,vwap,close",
+        help="压力测试成交场景网格（默认 open,vwap,close）",
+    )
     args = parser.parse_args()
     if not 0 <= args.cost_multiplier <= 10:
         parser.error("--cost-multiplier 必须在 0 到 10 之间")
     if args.rev_weight is not None and not 0 <= args.rev_weight <= 1:
         parser.error("--rev-weight 必须在 0 到 1 之间")
+    try:
+        stress_cash_values = _parse_csv_grid(args.stress_initial_cash, "--stress-initial-cash")
+        stress_cost_multipliers = _parse_csv_grid(
+            args.stress_cost_multipliers, "--stress-cost-multipliers",
+        ) if stress_cash_values else []
+        stress_price_modes = _parse_csv_text(
+            args.stress_price_modes, "--stress-price-modes",
+        ) if stress_cash_values else []
+    except ValueError as exc:
+        parser.error(str(exc))
+    if stress_cash_values and any(value <= 0 for value in stress_cash_values):
+        parser.error("--stress-initial-cash 必须全部为正数")
+    if stress_cash_values and any(value < 0 for value in stress_cost_multipliers):
+        parser.error("--stress-cost-multipliers 不得为负数")
+    invalid_stress_modes = sorted(set(stress_price_modes) - {"open", "vwap", "close"})
+    if stress_cash_values and invalid_stress_modes:
+        parser.error(f"--stress-price-modes 仅支持 open,vwap,close，收到 {invalid_stress_modes}")
 
     cfg = load_config()
     store = BarStore()
@@ -162,12 +221,6 @@ def main() -> None:
     universe_meta["quality"] = (
         "FORMAL_PASS" if args.research_mode == "formal" else
         ("EXPLORATORY_PASS" if quality_gate.passed else "DEGRADED")
-    )
-    parser.add_argument(
-        "--execution-price",
-        choices=("open", "vwap", "close"),
-        default=None,
-        help="T+1 成交价场景，默认使用 config.backtest.execution_price_mode",
     )
     if not quality_gate.passed:
         console.print(
@@ -260,7 +313,8 @@ def main() -> None:
             float(cfg["risk"]["max_position_pct"]), collect=violations
         )
 
-    fees = Fees.from_config().scaled(args.cost_multiplier)
+    base_fees = Fees.from_config()
+    fees = base_fees.scaled(args.cost_multiplier)
     execution_meta = {
         "price_model": "T+1 日内场景价 + 不利方向滑点",
         "execution_price_mode": args.execution_price or cfg["backtest"].get("execution_price_mode", "open"),
@@ -278,6 +332,13 @@ def main() -> None:
         "suspension_rule": "无开盘行情/不可交易时拒单，持仓继续估值",
         "price_adjust": data_cfg.get("adjust", "unknown"),
     }
+    if stress_cash_values:
+        # 在创建 Artifact 前固化压力网格，便于仅查看运行元数据时审计口径。
+        execution_meta["stress_grid"] = {
+            "initial_cash": sorted(stress_cash_values),
+            "cost_multipliers": sorted(stress_cost_multipliers),
+            "price_modes": sorted(stress_price_modes),
+        }
     from quart.market_rules.rule_book import load_rule_book_version
 
     universe_meta["rules_version"] = load_rule_book_version()
@@ -324,6 +385,24 @@ def main() -> None:
     deferred_df = result.deferred_orders
     execution_meta["execution_price_mode"] = result.execution_price_mode
     execution_meta["execution_price_fallbacks"] = result.execution_price_fallbacks
+    stress_df = pd.DataFrame()
+    if stress_cash_values:
+        stress_risk_factory = None
+        if not args.no_risk:
+            stress_risk_factory = lambda: make_weight_validator(  # noqa: E731
+                float(cfg["risk"]["max_position_pct"]), collect=[]
+            )
+        stress_df = run_execution_stress(
+            md,
+            lambda: build_strategy(args.strategy, **explicit_params),
+            fees=base_fees,
+            initial_cash_values=stress_cash_values,
+            cost_multipliers=stress_cost_multipliers,
+            execution_price_modes=stress_price_modes,
+            risk_pipeline_factory=stress_risk_factory,
+            security_master=security_master,
+            max_adv_participation=cfg["backtest"].get("max_adv_participation", 0.05),
+        )
 
     bench_close = bench.set_index("date")["close"].reindex(equity.index).ffill()
     # 等权基准：与策略同股票池（已过滤板块/ST）的每日等权组合，衡量选股 alpha
@@ -350,6 +429,14 @@ def main() -> None:
         "execution_price_mode": result.execution_price_mode,
         "execution_price_fallbacks": result.execution_price_fallbacks,
         "portfolio_construction": portfolio_receipt,
+        "execution_stress": (
+            {
+                "n_cases": len(stress_df),
+                "min_cagr": float(stress_df["cagr"].min()),
+                "min_sharpe": float(stress_df["sharpe"].min()),
+            }
+            if not stress_df.empty else None
+        ),
     })
 
     console.print(Panel(
@@ -378,6 +465,8 @@ def main() -> None:
         trades_df.to_csv(out_dir / f"trades_{args.strategy}_{stamp}.csv", index=False)
     if not deferred_df.empty:
         deferred_df.to_csv(out_dir / f"deferred_{args.strategy}_{stamp}.csv", index=False)
+    if not stress_df.empty:
+        stress_df.to_csv(out_dir / f"execution_stress_{args.strategy}_{stamp}.csv", index=False)
     with open(out_dir / f"summary_{args.strategy}_{stamp}.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     console.print(f"[green]结果已保存到 {out_dir}/[/green]")
@@ -388,6 +477,8 @@ def main() -> None:
         run.put_table("trades", trades_df)
     if not deferred_df.empty:
         run.put_table("deferred_orders", deferred_df)
+    if not stress_df.empty:
+        run.put_table("execution_stress", stress_df)
     run.put_json("summary", summary)
     run.put_json("factor_receipt", factor_receipt)
     if portfolio_receipt is not None:
@@ -398,6 +489,7 @@ def main() -> None:
         n_trades=len(trades_df),
         n_deferred_orders=len(deferred_df),
         n_execution_price_fallbacks=result.execution_price_fallbacks,
+        n_execution_stress_cases=len(stress_df),
         n_risk_violations=len(violations),
         n_enabled_factors=factor_receipt["enabled_count"],
         n_degraded_factors=factor_receipt["degraded_count"],
