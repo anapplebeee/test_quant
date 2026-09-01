@@ -57,6 +57,9 @@ SPEC: dict[str, tuple[type | tuple[type, ...], bool, str]] = {
     "manual_trading.auto_migrate_holdings": ((bool,), False, "自动迁移 holdings.json"),
     "notify.dingtalk_webhook": ((str,), False, "钉钉 webhook"),
     "notify.dingtalk_secret": ((str,), False, "钉钉加签 secret"),
+    "notify.wecom_webhook": ((str,), False, "企业微信群机器人 webhook"),
+    "notify.wecom_secret": ((str,), False, "企业微信群机器人加签 secret"),
+    "notify.wechat_pushplus_token": ((str,), False, "微信(PushPlus)个人推送 token"),
 }
 
 

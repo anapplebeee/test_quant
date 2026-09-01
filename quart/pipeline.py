@@ -24,6 +24,8 @@ from quart.execution import generate_orders as build_rebalance_plan
 from quart.execution.constraints import A_SHARE_LOT
 from quart.manual_trading import PlannedOrderInput, TradingRepository, next_trade_date
 from quart.notify.dingtalk import send_markdown
+from quart.notify.wechat import send_markdown as wechat_send_markdown
+from quart.notify.wecom import send_markdown as wecom_send_markdown
 from quart.risk.daily_loss import DailyLossAssessment, DailyLossGuard
 from quart.risk.engine import RiskLimits, RiskState, limits_from_config
 from quart.risk.rules import check_holdings_risk, validate_weights
@@ -497,4 +499,6 @@ def run_daily(
 
     if push:
         send_markdown(f"Quart 每日信号 {date.date()}", report)
+        wecom_send_markdown(f"Quart 每日信号 {date.date()}", report)
+        wechat_send_markdown(f"Quart 每日信号 {date.date()}", report)
     return report

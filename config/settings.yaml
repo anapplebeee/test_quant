@@ -111,3 +111,6 @@ manual_trading:
 notify:
   dingtalk_webhook: ""
   dingtalk_secret: ""
+  wecom_webhook: ""
+  wecom_secret: ""
+  wechat_pushplus_token: ""
