@@ -296,7 +296,7 @@ def _prepare(request: PortfolioConstructionInput, constraints: PortfolioConstrai
     styles = _style_frame(request.style_exposures, universe, constraints.style_active_bounds)
     covariance = _covariance(request.covariance, universe, required=float(request.risk_aversion) > 0)
     if constraints.max_adv_participation is not None:
-        adv = _positive_series(request.adv, universe, "adv")
+        adv = _adv_series(request.adv, universe, tradable)
     else:
         adv = pd.Series(np.inf, index=universe, dtype="float64")
 
@@ -412,18 +412,24 @@ def _covariance(value: pd.DataFrame | None, universe: pd.Index, *, required: boo
     return frame
 
 
-def _positive_series(
+def _adv_series(
     value: Mapping[str, float] | pd.Series | None,
     universe: pd.Index,
-    name: str,
+    tradable: pd.Index,
 ) -> pd.Series:
     if value is None:
         raise PortfolioInfeasibleError(["启用 ADV 约束必须提供 adv"])
-    series = _series(value, name).reindex(universe)
-    if ((~np.isfinite(series)) | (series < 0)).any():
-        missing = sorted(series[(~np.isfinite(series)) | (series < 0)].index)
-        raise PortfolioInfeasibleError([f"{name} 必须覆盖全部股票且为非负: {missing}"])
-    return series
+    series = _series(value, "adv").reindex(universe)
+    active = universe.intersection(tradable)
+    missing = series.loc[active].isna()
+    if missing.any():
+        raise PortfolioInfeasibleError([f"adv 缺少可交易股票: {sorted(missing[missing].index)}"])
+    invalid = series.notna() & ((~np.isfinite(series)) | (series < 0))
+    if invalid.any():
+        raise PortfolioInfeasibleError([f"adv 必须为有限非负数: {sorted(series[invalid].index)}"])
+    # 非交易的指数成分只用于计算相对基准暴露；其 ADV 对当日交易无意义，可记为
+    # 0 而不要求行情面板虚构一条流动性记录。
+    return series.fillna(0.0)
 
 
 def _validate_bound_spec(name: str, value: float | Mapping[str, float] | None) -> None:

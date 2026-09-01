@@ -57,7 +57,9 @@ class FactorPortfolioStrategy(BaseStrategy):
     def prepare(self, md: MarketData) -> None:
         super().prepare(md)
         p = self.params
-        self.factor_names = _parse_factor_names(str(p.get("factor_names", "")))
+        self.factor_names = _parse_factor_names(
+            str(p.get("factor_names", "vol20_neg,amp20_neg,lottery20_neg"))
+        )
         self.top_k = int(p.get("top_k", 10))
         self.rebalance_days = int(p.get("rebalance_days", 20))
         self.max_weight = float(p.get("max_weight_pct", 0.10))

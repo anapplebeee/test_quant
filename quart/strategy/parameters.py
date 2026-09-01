@@ -12,7 +12,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 CORE_PARAM_KEYS = {"top_k", "max_names", "rebalance_days"}
-PROTECTED_WEB_PARAMS = {"scores_path"}
+PROTECTED_WEB_PARAMS = {"scores_path", "exposure_history_path"}
 
 _LOWVOL_FACTORS: dict[str, tuple[str, str]] = {
     "rev_weight": ("短期反转", "20 日反转 z-score"),
@@ -345,7 +345,7 @@ def build_factor_receipt(
         }
         formula = f"momentum(mode={mode}, lookback={lookback}, skip={skip})"
         is_factor_strategy = True
-    elif name == "factor_portfolio":
+    elif name in {"factor_portfolio", "index_enhancement"}:
         factor_names = str(effective.get("factor_names", "")).split(",")
         for factor_name in filter(None, (item.strip() for item in factor_names)):
             add("研究因子", factor_name, 1.0, "横截面 z-score 后等权合成")
@@ -358,6 +358,7 @@ def build_factor_receipt(
             "industry_active_bound": effective.get("industry_active_bound"),
             "market_cap_active_bound": effective.get("market_cap_active_bound"),
             "style_active_bounds": effective.get("style_active_bounds"),
+            "benchmark_index": effective.get("benchmark_index"),
         }
         formula = "mean(zscore(factor_i)) → PortfolioConstructor"
         is_factor_strategy = True
