@@ -242,6 +242,7 @@ def render_formal_report(
         f"| daily snapshot_id | `{snap_ids.get('daily')}` |",
         f"| index snapshot_id | `{snap_ids.get('index')}` |",
         f"| 证券主数据版本 | `{dv.get('security_master_version')}` |",
+        f"| 公司行为账本版本 | `{dv.get('corporate_action_version')}` |",
         "",
     ]
     if snap_ids.get("daily") is None:

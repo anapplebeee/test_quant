@@ -137,10 +137,14 @@ def main() -> None:
     if args.research_mode == "formal":
         try:
             bars = filter_for_pit_universe(bars, args.universe_index)
+            from quart.data.pit_evidence import require_pit_evidence
+
+            pit_evidence = require_pit_evidence(bars, index_code=args.universe_index)
         except RuntimeError as exc:
             raise SystemExit(str(exc)) from exc
         if bars.empty:
             raise SystemExit("PIT 股票池在回测区间内为空")
+        universe_meta["pit_evidence"] = pit_evidence.to_dict()
 
     data_cfg = cfg.get("data", {})
     bars = filter_for_simulation(

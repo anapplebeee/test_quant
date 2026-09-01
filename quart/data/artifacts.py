@@ -129,18 +129,19 @@ def _global_data_dates(store) -> tuple[str | None, str | None]:
     )
 
 
-def _snapshot_provenance(base: Path | None = None) -> tuple[dict[str, str | None], str | None]:
-    """DATA-001 内容哈希快照版本：(数据集 -> snapshot_id) + 证券主数据版本。
+def _snapshot_provenance(base: Path | None = None) -> tuple[dict[str, str | None], str | None, str | None]:
+    """数据快照版本：(数据集 -> snapshot_id) + 证券主数据/公司行为版本。
 
     快照未构建（清单缺失）时对应值为 None —— 可复现契约降级但不报错。
     只读小体积 JSON 清单，可在每次 create_run 时安全调用。
     """
     ids: dict[str, str | None] = {"daily": None, "index": None}
     master_version: str | None = None
+    corporate_action_version: str | None = None
     try:
         from quart.data import snapshot as snap
     except Exception:
-        return ids, master_version
+        return ids, master_version, corporate_action_version
     for ds in ids:
         try:
             manifest = snap.load_manifest(ds, base=base)
@@ -151,7 +152,9 @@ def _snapshot_provenance(base: Path | None = None) -> tuple[dict[str, str | None
         ids[ds] = manifest.snapshot_id
         if master_version is None and manifest.security_master_version:
             master_version = manifest.security_master_version
-    return ids, master_version
+        if corporate_action_version is None and manifest.corporate_action_version:
+            corporate_action_version = manifest.corporate_action_version
+    return ids, master_version, corporate_action_version
 
 
 def data_version(store=None, snapshot_base: Path | None = None) -> dict:
@@ -163,7 +166,7 @@ def data_version(store=None, snapshot_base: Path | None = None) -> dict:
     （快照未构建时该字段为 None，审计时应先运行
     ``scripts/data_snapshot.py build``）。
     """
-    snapshot_ids, master_version = _snapshot_provenance(snapshot_base)
+    snapshot_ids, master_version, corporate_action_version = _snapshot_provenance(snapshot_base)
     try:
         if store is None:
             from quart.data.store import BarStore
@@ -175,6 +178,7 @@ def data_version(store=None, snapshot_base: Path | None = None) -> dict:
                 "symbols": 0, "last_date": None, "first_date": None,
                 "snapshot_ids": snapshot_ids,
                 "security_master_version": master_version,
+                "corporate_action_version": corporate_action_version,
             }
         last_date, first_date = _global_data_dates(store)
         return {
@@ -183,12 +187,14 @@ def data_version(store=None, snapshot_base: Path | None = None) -> dict:
             "first_date": first_date,
             "snapshot_ids": snapshot_ids,
             "security_master_version": master_version,
+            "corporate_action_version": corporate_action_version,
         }
     except Exception:
         return {
             "symbols": 0, "last_date": None, "first_date": None,
             "snapshot_ids": snapshot_ids,
             "security_master_version": master_version,
+            "corporate_action_version": corporate_action_version,
         }
 
 

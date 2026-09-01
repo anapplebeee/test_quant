@@ -26,7 +26,12 @@ class _FakeStore:
         return []
 
 
-def _manifest(dataset: str, snapshot_id: str, master: str | None = None) -> snap.SnapshotManifest:
+def _manifest(
+    dataset: str,
+    snapshot_id: str,
+    master: str | None = None,
+    corporate_actions: str | None = None,
+) -> snap.SnapshotManifest:
     return snap.SnapshotManifest(
         snapshot_id=snapshot_id,
         dataset_name=dataset,
@@ -35,6 +40,7 @@ def _manifest(dataset: str, snapshot_id: str, master: str | None = None) -> snap
         source="test",
         quality_status="scanned",
         security_master_version=master,
+        corporate_action_version=corporate_actions,
     )
 
 
@@ -46,15 +52,20 @@ def test_data_version_has_snapshot_keys_without_manifests(tmp_path):
     assert dv["symbols"] == 0
     assert dv["snapshot_ids"] == {"daily": None, "index": None}
     assert dv["security_master_version"] is None
+    assert dv["corporate_action_version"] is None
 
 
 def test_data_version_reads_snapshot_ids_from_base(tmp_path):
-    snap.save_manifest(_manifest("daily", "snap-daily-1", master="master-v9"), base=tmp_path)
+    snap.save_manifest(
+        _manifest("daily", "snap-daily-1", master="master-v9", corporate_actions="ca-v7"),
+        base=tmp_path,
+    )
     snap.save_manifest(_manifest("index", "snap-index-1"), base=tmp_path)
 
     dv = data_version(_FakeStore(), snapshot_base=tmp_path)
     assert dv["snapshot_ids"] == {"daily": "snap-daily-1", "index": "snap-index-1"}
     assert dv["security_master_version"] == "master-v9"
+    assert dv["corporate_action_version"] == "ca-v7"
 
 
 def test_data_version_missing_dataset_degrades_to_none(tmp_path):
