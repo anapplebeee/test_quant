@@ -14,12 +14,16 @@
     uv run python scripts/research_audit.py --strategy lowvol_indz \
         --start 2024-03-01 --oos-start 2025-09-01
     uv run python scripts/research_audit.py --strategy lowvol_indz \
+        --param size_weight=0.3 --param turnover_weight=0.2 \
+        --start 2024-03-01 --oos-start 2025-09-01
+    uv run python scripts/research_audit.py --strategy lowvol_indz \
         --start 2022-01-01 --oos-start 2025-01-01 --skip-wfa
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import re
 import sys
 from pathlib import Path
 
@@ -42,6 +46,18 @@ from quart.research.formal_audit import (
 console = Console()
 
 
+def _parse_value(raw: str):
+    low = raw.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    for cast in (int, float):
+        try:
+            return cast(raw)
+        except ValueError:
+            pass
+    return raw
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="正式研究审计（OOS/WFA/成本/容量）")
     parser.add_argument("--strategy", default=load_config()["strategy"]["name"])
@@ -51,9 +67,18 @@ def main() -> None:
                         help="纯 OOS 冻结起点（参数不变，仅前推样本）")
     parser.add_argument("--skip-wfa", action="store_true",
                         help="跳过 WFA（门禁将判 FAIL，仅用于诊断）")
+    parser.add_argument("--param", action="append", default=[], metavar="KEY=VALUE",
+                        help="候选参数覆盖，可重复（如 --param size_weight=0.3）")
     parser.add_argument("--save-dir", default=str(common.reports_dir()),
                         help="兼容报告输出目录")
     args = parser.parse_args()
+
+    extra_params: dict = {}
+    for spec in args.param:
+        key, sep, raw = spec.partition("=")
+        if not sep:
+            raise SystemExit(f"--param 格式应为 KEY=VALUE，收到 {spec!r}")
+        extra_params[key.strip()] = _parse_value(raw.strip())
 
     cfg = load_config()
     thresholds = {**DEFAULT_THRESHOLDS,
@@ -66,6 +91,7 @@ def main() -> None:
         "end": args.end,
         "oos_start": args.oos_start,
         "skip_wfa": args.skip_wfa,
+        "param_overrides": extra_params or None,
         "thresholds": thresholds,
     }
     run = store.create_run("research_audit", params)
@@ -77,8 +103,13 @@ def main() -> None:
         console.print("[yellow]daily 快照未构建（无法识别历史修订）："
                       "建议先运行 scripts/data_snapshot.py build[/yellow]")
 
-    console.print(f"[blue]成本压力回测 {args.strategy} [0/1/2x] ...[/blue]")
-    cost_summaries = run_cost_stress(args.strategy, args.start, args.end)
+    label = args.strategy
+    if extra_params:
+        label += " (" + ", ".join(f"{k}={v}" for k, v in sorted(extra_params.items())) + ")"
+
+    console.print(f"[blue]成本压力回测 {label} [0/1/2x] ...[/blue]")
+    cost_summaries = run_cost_stress(args.strategy, args.start, args.end,
+                                    params=extra_params or None)
     for cost, s in sorted(cost_summaries.items()):
         console.print(f"  {cost:g}x: CAGR={s.get('cagr')}, Sharpe={s.get('sharpe')}, "
                       f"MDD={s.get('max_drawdown')}, trades={s.get('n_trades')}")
@@ -87,7 +118,8 @@ def main() -> None:
     if args.oos_start:
         console.print(f"[blue]纯 OOS 冻结验证 [{args.oos_start} ~ ] @ 1x cost ...[/blue]")
         oos_summary = run_cost_stress(
-            args.strategy, args.oos_start, args.end, multipliers=(1.0,)
+            args.strategy, args.oos_start, args.end, multipliers=(1.0,),
+            params=extra_params or None,
         )[1.0]
         console.print(f"  OOS: CAGR={oos_summary.get('cagr')}, "
                       f"Sharpe={oos_summary.get('sharpe')}, MDD={oos_summary.get('max_drawdown')}")
@@ -96,7 +128,8 @@ def main() -> None:
 
     wfa_summary = None
     if not args.skip_wfa:
-        wfa_summary = run_wfa_subprocess(args.strategy, args.start, args.end)
+        wfa_summary = run_wfa_subprocess(args.strategy, args.start, args.end,
+                                         params=extra_params or None)
         if wfa_summary is None:
             console.print("[red]WFA 未执行或失败 —— 门禁将判 FAIL[/red]")
     else:
@@ -109,7 +142,7 @@ def main() -> None:
     result = evaluate_gates(cost_summaries, wfa_summary, thresholds)
 
     report_md = render_formal_report(
-        strategy=args.strategy,
+        strategy=label,
         start=args.start,
         end=args.end,
         oos_start=args.oos_start,
@@ -151,7 +184,8 @@ def main() -> None:
 
     out_dir = Path(args.save_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    compat = out_dir / f"research_audit_{dt.date.today():%Y%m%d}.md"
+    slug = re.sub(r"[^0-9A-Za-z=_]+", "_", label)
+    compat = out_dir / f"research_audit_{slug}_{dt.date.today():%Y%m%d}.md"
     compat.write_text(report_md, encoding="utf-8")
 
     verdict = "[green]PASS[/green]" if result.passed else "[red]FAIL[/red]"

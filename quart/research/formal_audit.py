@@ -54,11 +54,18 @@ def data_provenance(store=None, snapshot_base: Path | None = None) -> dict:
 # ---------------- 成本压力回测（进程内） ----------------
 
 
-def run_single_backtest(strategy: str, cost: float, start: str, end: str | None = None) -> dict:
+def run_single_backtest(
+    strategy: str,
+    cost: float,
+    start: str,
+    end: str | None = None,
+    params: dict | None = None,
+) -> dict:
     """进程内执行单次回测，返回 summarize() 结果 + n_trades。
 
     与 `scripts/admission_gate.py` 原实现同源：同一策略/参数/数据下
     两次调用必须给出同一结果（确定性由引擎与费用模型保证）。
+    `params` 为候选参数覆盖（显式参数优先于 config overrides）。
     """
     from quart.backtest.engine import BacktestEngine
     from quart.backtest.metrics import summarize
@@ -88,7 +95,7 @@ def run_single_backtest(strategy: str, cost: float, start: str, end: str | None 
         min_list_days=int(data_cfg.get("min_list_days", 0)),
     )
 
-    strategy_obj = build_strategy(strategy)
+    strategy_obj = build_strategy(strategy, **(params or {}))
     md = MarketData.from_bars(bars, benchmark=bench)
     fees = Fees.from_config().scaled(cost)
     result = BacktestEngine(md, strategy_obj, fees=fees).run_result()
@@ -107,27 +114,38 @@ def run_cost_stress(
     start: str,
     end: str | None = None,
     multipliers: tuple[float, ...] = COST_MULTIPLIERS,
+    params: dict | None = None,
 ) -> dict[float, dict]:
     """按成本倍数逐一回测，返回 {倍数: summarize 结果}。"""
     out: dict[float, dict] = {}
     for cost in multipliers:
         logger.info("cost stress: {} @ {}x cost [{} ~ {}]", strategy, cost, start, end or "now")
-        out[float(cost)] = run_single_backtest(strategy, cost, start, end)
+        out[float(cost)] = run_single_backtest(strategy, cost, start, end, params=params)
     return out
 
 
 # ---------------- WFA（子进程） ----------------
 
 
-def run_wfa_subprocess(strategy: str, start: str, end: str | None = None) -> dict | None:
+def _wfa_cmd(strategy: str, start: str, end: str | None = None,
+             params: dict | None = None) -> list[str]:
+    """构造 walk_forward.py 命令；候选参数以单值 --grid 冻结（每折只用该值）。"""
+    cmd = [sys.executable, "scripts/walk_forward.py", "--strategy", strategy, "--start", start]
+    if end:
+        cmd += ["--end", end]
+    for k, v in sorted((params or {}).items()):
+        cmd += ["--grid", f"{k}={v}"]
+    return cmd
+
+
+def run_wfa_subprocess(strategy: str, start: str, end: str | None = None,
+                       params: dict | None = None) -> dict | None:
     """子进程跑 `scripts/walk_forward.py`，解析其 artifacts 的 oos_summary。
 
     失败（进程退出码非 0 / 找不到制品）返回 None —— 调用方门禁应判不通过，
     不允许把"WFA 没跑"美化成"样本外达标"。
     """
-    cmd = [sys.executable, "scripts/walk_forward.py", "--strategy", strategy, "--start", start]
-    if end:
-        cmd += ["--end", end]
+    cmd = _wfa_cmd(strategy, start, end, params)
     logger.info("running WFA: {}", " ".join(cmd))
     proc = subprocess.run(cmd, cwd=PROJECT_ROOT, capture_output=True, text=True)
     if proc.returncode != 0:
