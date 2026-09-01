@@ -8,10 +8,18 @@ from __future__ import annotations
 
 from datetime import date
 
+import pandas as pd
+
 from common import reports_dir, safe_path, valid_date8
 from quart.data.artifacts import STATUS_OK, ArtifactStore
 from quart.data.calendar import TradingCalendar
-from quart.strategy import REGISTRY, build_strategy
+from quart.strategy import REGISTRY
+from quart.strategy.parameters import (
+    build_factor_receipt,
+    effective_strategy_params,
+    encode_parameter_rows,
+    strategy_parameter_rows,
+)
 
 # 展示元数据：label 用于下拉/表格，desc 用于详情。新增策略只改这里 + REGISTRY。
 STRATEGY_META: dict[str, dict[str, str]] = {
@@ -53,6 +61,14 @@ def strategy_choices() -> list[str]:
     return sorted(REGISTRY.keys())
 
 
+def default_strategy_name() -> str:
+    """返回配置指定的默认策略；配置漂移时安全回退注册表首项。"""
+    from quart.config import load_config
+
+    configured = str((load_config().get("strategy") or {}).get("name") or "")
+    return configured if configured in REGISTRY else strategy_choices()[0]
+
+
 def live_signal_choices() -> list[str]:
     """仅返回配置允许生成正式 T+1 计划的策略。"""
     from quart.config import load_config
@@ -68,12 +84,36 @@ def get_strategy_defaults(name: str) -> dict:
     实际生效值天然一致（数据关联性）。
     """
     try:
-        params = build_strategy(name).params
+        params = effective_strategy_params(name)
         rebalance = int(params.get("rebalance_days", 5))
         top_k = int(params.get("top_k", params.get("max_names", 10)))
     except Exception:
         rebalance, top_k = 5, 10
     return {"rebalance_days": rebalance, "top_k": top_k}
+
+
+STRATEGY_PARAMETER_COLUMNS = ["参数", "值", "类型", "分类", "说明"]
+
+
+def strategy_parameter_table(name: str) -> pd.DataFrame:
+    """返回 schema 驱动的高级参数表，供 Gradio 动态编辑。"""
+    return pd.DataFrame(strategy_parameter_rows(name), columns=STRATEGY_PARAMETER_COLUMNS)
+
+
+def encode_strategy_parameter_table(name: str, table) -> list[str]:
+    """校验前端参数表并编码为安全的 ``key=value`` 列表。"""
+    return encode_parameter_rows(name, table)
+
+
+def strategy_factor_preview(name: str, table=None) -> dict:
+    """返回提交前因子公式预览；表格无效时显式抛错。"""
+    overrides = None
+    if table is not None:
+        assignments = encode_parameter_rows(name, table)
+        from quart.strategy.parameters import parse_strategy_assignments
+
+        overrides = parse_strategy_assignments(name, assignments)
+    return build_factor_receipt(name, overrides, source="preview")
 
 
 def strategy_catalog() -> list[dict]:

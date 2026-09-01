@@ -21,6 +21,11 @@ from quart.data.universe import filter_for_pit_universe, filter_for_simulation
 from quart.execution.fees import Fees
 from quart.risk.rules import make_weight_validator
 from quart.strategy import build_strategy
+from quart.strategy.parameters import (
+    build_factor_receipt,
+    core_strategy_overrides,
+    parse_strategy_assignments,
+)
 
 console = Console()
 
@@ -86,6 +91,13 @@ def main() -> None:
                         help="低换手率因子权重（lowvol 系，需 baostock 基本面数据）")
     parser.add_argument("--value-weight", type=float, default=None,
                         help="价值因子权重 z(1/PE_TTM)（lowvol 系，需 baostock 基本面数据）")
+    parser.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="按策略 PARAMS_SCHEMA 传入高级参数；可重复使用，显式值优先",
+    )
     parser.add_argument("--no-risk", action="store_true",
                         help="关闭回测内风控（默认启用，与实盘同一约束）")
     parser.add_argument(
@@ -168,10 +180,14 @@ def main() -> None:
         if not 0 < args.limit_up_threshold < 1:
             parser.error("--limit-up-threshold 必须在 0 到 1 之间")
         explicit_params["limit_up_threshold"] = args.limit_up_threshold
-    if args.rebalance_days is not None:
-        explicit_params["rebalance_days"] = args.rebalance_days
-    if args.top_k is not None:
-        explicit_params["top_k"] = args.top_k
+    try:
+        explicit_params.update(core_strategy_overrides(
+            args.strategy,
+            rebalance_days=args.rebalance_days,
+            top_k=args.top_k,
+        ))
+    except (KeyError, TypeError, ValueError) as exc:
+        parser.error(str(exc))
     if args.rev_weight is not None:
         explicit_params["rev_weight"] = args.rev_weight
     if args.weight_mode is not None:
@@ -189,8 +205,15 @@ def main() -> None:
             if flag < 0:
                 parser.error(f"--{key.replace('_', '-')} 不能为负数")
             explicit_params[key] = flag
+    try:
+        explicit_params.update(parse_strategy_assignments(args.strategy, args.param))
+    except (KeyError, TypeError, ValueError) as exc:
+        parser.error(str(exc))
     strategy = build_strategy(args.strategy, **explicit_params)
     effective_params = dict(strategy.params)
+    factor_request = build_factor_receipt(
+        args.strategy, effective_params, source="request",
+    )
 
     md = MarketData.from_bars(bars, benchmark=bench)
     # 风控进回测：默认与实盘同一约束，否则回测组合可以违反单票上限而实盘被截断
@@ -231,6 +254,7 @@ def main() -> None:
             "research_mode": args.research_mode,
             "universe": universe_meta,
             "execution": execution_meta,
+            "factor_request": factor_request,
         },
     )
 
@@ -247,7 +271,16 @@ def main() -> None:
     # 等权基准：与策略同股票池（已过滤板块/ST）的每日等权组合，衡量选股 alpha
     ew_bench = equal_weight_benchmark(equity, bars)
     summary = summarize(equity, benchmark=bench_close, benchmark2=ew_bench, benchmark2_name="bench2")
+    factor_receipt = build_factor_receipt(
+        args.strategy,
+        effective_params,
+        strategy=strategy,
+        source="run",
+    )
     summary.update({
+        "strategy": args.strategy,
+        "strategy_params": effective_params,
+        "factor_receipt": factor_receipt,
         "initial_cash": result.initial_cash,
         "benchmark": cfg["benchmark"],
         "research_mode": args.research_mode,
@@ -288,11 +321,14 @@ def main() -> None:
     if not trades_df.empty:
         run.put_table("trades", trades_df)
     run.put_json("summary", summary)
+    run.put_json("factor_receipt", factor_receipt)
     run.add_metrics(
         **{k: summary.get(k) for k in
            ("cagr", "sharpe", "max_drawdown", "total_return", "calmar", "bench_excess_cagr")},
         n_trades=len(trades_df),
         n_risk_violations=len(violations),
+        n_enabled_factors=factor_receipt["enabled_count"],
+        n_degraded_factors=factor_receipt["degraded_count"],
     )
     manifest = run.finish()
     console.print(

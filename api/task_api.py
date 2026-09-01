@@ -231,6 +231,13 @@ ALLOWED_ARGS: dict[str, dict[str, str]] = {
         "--momentum-skip-days": r"^\d{1,3}$",
         "--limit-up-threshold": r"^(0\.\d+|1\.0+)$",
         "--cost-multiplier": r"^(0(\.\d+)?|[1-9](\.\d+)?|10(\.0+)?)$",
+        # schema 驱动的高级策略参数；仅允许无空格标量，脚本层再按当前策略
+        # PARAMS_SCHEMA 校验参数名、类型和范围。
+        "--param": (
+            r"^[A-Za-z][A-Za-z0-9_]{0,63}="
+            r"(?:null|true|false|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|"
+            r"[A-Za-z][A-Za-z0-9_.-]{0,63})$"
+        ),
         "--no-regime": None,   # 开关型，不带值
         "--no-risk": None,
     },

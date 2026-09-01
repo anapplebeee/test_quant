@@ -15,6 +15,8 @@ import pandas as pd
 # 策略中文名：单一数据源 → frontend/pages 同源；新增策略只需改 REGISTRY + STRATEGY_META。
 from api.strategy_api import STRATEGY_META
 from common import degraded, reports_dir, safe_path, valid_name
+from quart.data.artifacts import ArtifactStore
+from quart.strategy.parameters import build_factor_receipt
 
 
 def _warn(where: str, exc: BaseException) -> None:
@@ -270,6 +272,45 @@ def get_execution_assumptions(name: str | None = None) -> dict:
     execution.setdefault("suspension_rule", "无开盘行情/不可交易时拒单，持仓继续估值")
     execution["source"] = "run" if persisted else "current_config_fallback"
     return execution
+
+
+def get_factor_execution_receipt(name: str) -> dict | None:
+    """读取本次回测固化的因子回执，兼容旧回测的制品参数推断。"""
+    if not valid_name(name):
+        return None
+    summary = get_backtest_summary(name) or {}
+    persisted = summary.get("factor_receipt")
+    if isinstance(persisted, dict):
+        return persisted
+
+    import re
+
+    match = re.match(r"^(.+)_(20\d{6})_(\d{6})$", name)
+    strategy = str(summary.get("strategy") or (match.group(1) if match else ""))
+    if not strategy:
+        return None
+
+    try:
+        prefix = f"backtest_{name}_"
+        manifests = [
+            manifest
+            for manifest in ArtifactStore().list_runs(task=f"backtest_{strategy}")
+            if manifest.run_id.startswith(prefix)
+        ]
+        if manifests:
+            manifest = manifests[-1]
+            return build_factor_receipt(
+                strategy,
+                manifest.params,
+                source="artifact_params_inferred",
+            )
+        return build_factor_receipt(
+            strategy,
+            source="current_config_fallback",
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        _warn("factor_execution_receipt", exc)
+        return None
 
 
 def get_trades(name: str) -> pd.DataFrame | None:

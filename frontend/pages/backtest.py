@@ -16,12 +16,21 @@ from api.backtest_api import (
     get_cost_breakdown,
     get_equity_curve,
     get_execution_assumptions,
+    get_factor_execution_receipt,
     get_performance_diagnostics,
     get_trades,
     scan_summaries,
 )
 from api.research_api import list_research_reports, list_sweeps, load_research_report, load_sweep, sweep_headline
-from api.strategy_api import get_strategy_defaults, strategy_choices
+from api.strategy_api import (
+    STRATEGY_PARAMETER_COLUMNS,
+    default_strategy_name,
+    encode_strategy_parameter_table,
+    get_strategy_defaults,
+    strategy_choices,
+    strategy_factor_preview,
+    strategy_parameter_table,
+)
 from api.task_api import TASKS, task_queue
 from frontend.components.artifacts_panel import render_artifacts_panel, render_wfa_panel
 from frontend.theme import metric_card, metric_grid, page_header, section_header
@@ -29,11 +38,15 @@ from frontend.theme import metric_card, metric_grid, page_header, section_header
 # 策略清单单一数据源：REGISTRY 驱动（与首页/策略监控同源）
 try:
     STRATEGY_CHOICES = strategy_choices()
+    DEFAULT_STRATEGY = default_strategy_name()
 except Exception:
     STRATEGY_CHOICES = [
         "momentum_rotation", "momentum_path", "lowvol_composite", "dual_ma",
         "ml_rank", "lowvol_indz",
     ]
+    DEFAULT_STRATEGY = "lowvol_indz"
+if DEFAULT_STRATEGY not in STRATEGY_CHOICES:
+    DEFAULT_STRATEGY = STRATEGY_CHOICES[0]
 
 
 def _strategy_defaults(strategy: str) -> dict:
@@ -42,6 +55,13 @@ def _strategy_defaults(strategy: str) -> dict:
         return get_strategy_defaults(strategy)
     except Exception:
         return {"rebalance_days": 5, "top_k": 10}
+
+
+def _strategy_parameter_table(strategy: str) -> pd.DataFrame:
+    try:
+        return strategy_parameter_table(strategy)
+    except Exception:
+        return pd.DataFrame(columns=STRATEGY_PARAMETER_COLUMNS)
 
 
 def _fmt_pct(value, digits: int = 2) -> str:
@@ -132,6 +152,93 @@ def _execution_html(name: str) -> str:
     )
 
 
+def _receipt_value(value) -> str:
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if value is None:
+        return "—"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _factor_receipt_html(
+    name: str | None = None,
+    receipt: dict | None = None,
+    *,
+    preview: bool = False,
+) -> str:
+    """展示实际因子公式、权重和运行期降级；预览与结果共用。"""
+    receipt = receipt or (get_factor_execution_receipt(name or "") if name else None)
+    if not receipt:
+        return (
+            '<div class="assumption-panel"><div class="info-card-title">因子执行回执</div>'
+            '<div class="microcopy">该结果没有可追溯的策略参数，无法确认实际因子。</div></div>'
+        )
+
+    source = str(receipt.get("source") or "unknown")
+    source_labels = {
+        "run": "本次运行已固化",
+        "preview": "提交前预览",
+        "request": "任务请求参数",
+        "artifact_params_inferred": "旧结果：由同次制品参数推断",
+        "current_config_fallback": "旧结果：仅按当前配置回退，不代表历史真实口径",
+    }
+    enabled = receipt.get("enabled_factors") or []
+    disabled = receipt.get("disabled_factors") or []
+    items = []
+    for item in enabled:
+        status = str(item.get("status") or "configured")
+        badge_class = "status-warning" if status == "degraded" else "status-active"
+        badge_label = {
+            "active": "已执行",
+            "configured": "已配置",
+            "degraded": "已降级",
+        }.get(status, status)
+        value = _receipt_value(item.get("value"))
+        items.append(
+            '<div class="assumption-item">'
+            f'<span>{escape(str(item.get("factor") or item.get("key") or "—"))}</span>'
+            f'<strong>{escape(value)} '
+            f'<span class="status-indicator {badge_class}">{escape(badge_label)}</span></strong>'
+            f'<small>{escape(str(item.get("detail") or ""))}</small></div>'
+        )
+    controls = receipt.get("controls") or {}
+    controls_text = " · ".join(
+        f"{key}={_receipt_value(value)}" for key, value in controls.items()
+    ) or "—"
+    disabled_text = "、".join(str(item.get("factor") or item.get("key")) for item in disabled)
+    warnings = receipt.get("warnings") or []
+    warning_html = "".join(
+        f'<div class="risk-banner risk-high"><span>{escape(str(warning))}</span></div>'
+        for warning in warnings
+    )
+    strategy_kind = "横截面因子策略" if receipt.get("is_factor_strategy") else "规则/技术信号策略"
+    title = "提交前因子预览" if preview else "因子执行回执"
+    return (
+        f'<div class="assumption-panel"><div class="info-card-title">{title}</div>'
+        f'<div><strong>{escape(strategy_kind)}</strong></div>'
+        f'<div class="microcopy">公式：{escape(str(receipt.get("formula") or "—"))}</div>'
+        f'<div class="assumption-grid">{"".join(items)}</div>'
+        f'<div class="microcopy">组合与过滤：{escape(controls_text)}</div>'
+        f'<div class="microcopy">关闭的可选因子（{len(disabled)}）：'
+        f'{escape(disabled_text or "无")}</div>{warning_html}'
+        f'<div class="microcopy">来源：{escape(source_labels.get(source, source))}</div></div>'
+    )
+
+
+def _factor_preview_html(strategy: str, table=None) -> str:
+    try:
+        return _factor_receipt_html(
+            receipt=strategy_factor_preview(strategy, table), preview=True,
+        )
+    except Exception as exc:
+        return (
+            '<div class="risk-banner risk-high"><b>高级参数无效</b>'
+            f'<span>{escape(str(exc))}</span></div>'
+        )
+
+
 def _summary_html(name: str, summary: dict, diagnostics: dict | None, n_trades: int) -> str:
     diagnostics = diagnostics or {}
     primary = metric_grid([
@@ -167,6 +274,7 @@ def _summary_html(name: str, summary: dict, diagnostics: dict | None, n_trades: 
         meta
         + '<div class="info-card-title">核心绩效</div>' + primary
         + '<div class="info-card-title">相对与下行风险</div>' + secondary
+        + _factor_receipt_html(name)
         + _cost_html(name)
         + _execution_html(name)
     )
@@ -307,6 +415,7 @@ def _run_backtest(
     strategy: str,
     rebalance_days: float,
     top_k: float,
+    strategy_params,
     start: str,
     end: str,
     research_mode: str,
@@ -329,6 +438,13 @@ def _run_backtest(
         yield "❌ 成本压力倍数必须在 0 到 10 之间"
         return
 
+    try:
+        assignments = encode_strategy_parameter_table(strategy, strategy_params)
+        receipt = strategy_factor_preview(strategy, strategy_params)
+    except (KeyError, TypeError, ValueError) as exc:
+        yield f"❌ 高级策略参数无效：{exc}"
+        return
+
     extra = [
         "--strategy", strategy,
         "--start", (start or "2020-01-01"),
@@ -342,11 +458,14 @@ def _run_backtest(
         extra += ["--rebalance-days", str(rb)]
     if tk:
         extra += ["--top-k", str(tk)]
+    for assignment in assignments:
+        extra += ["--param", assignment]
 
     header = (
         f"🚀 已提交回测：**{strategy}** | 换手 {rb or '默认'} 日 | "
         f"持仓 {tk or '默认'} | {start or '2020-01-01'} ~ {end or '最新'} | "
-        f"{research_mode or 'exploratory'} | {cost:g}x 成本"
+        f"{research_mode or 'exploratory'} | {cost:g}x 成本 | "
+        f"有效因子/信号 {receipt.get('enabled_count', 0)} 个"
     )
     yield from _stream_task("backtest", extra, header)
 
@@ -404,15 +523,15 @@ def render():
             )
             with gr.Row():
                 strategy_in = gr.Dropdown(
-                    label="策略", choices=STRATEGY_CHOICES, value=STRATEGY_CHOICES[0],
+                    label="策略", choices=STRATEGY_CHOICES, value=DEFAULT_STRATEGY,
                 )
                 rebal_in = gr.Number(
                     label="换手频率（交易日）",
-                    value=_strategy_defaults(STRATEGY_CHOICES[0])["rebalance_days"], precision=0,
+                    value=_strategy_defaults(DEFAULT_STRATEGY)["rebalance_days"], precision=0,
                 )
                 topk_in = gr.Number(
                     label="持仓数 top_k",
-                    value=_strategy_defaults(STRATEGY_CHOICES[0])["top_k"], precision=0,
+                    value=_strategy_defaults(DEFAULT_STRATEGY)["top_k"], precision=0,
                 )
             with gr.Row():
                 start_in = gr.Textbox(label="起始日期", value="2020-01-01")
@@ -425,19 +544,57 @@ def render():
                     label="成本压力倍数", value=1.0, minimum=0.0, maximum=10.0,
                     info="0 = 零成本；1 = 默认；2 = 双倍压力",
                 )
+            with gr.Accordion("因子与策略高级参数 · schema 动态生成", open=True):
+                gr.Markdown(
+                    "仅修改“值”列。切换策略时参数表会按该策略的 `PARAMS_SCHEMA` 自动重建；"
+                    "核心的调仓周期与持仓数仍使用上方独立控件。"
+                )
+                strategy_params_in = gr.Dataframe(
+                    value=_strategy_parameter_table(DEFAULT_STRATEGY),
+                    headers=STRATEGY_PARAMETER_COLUMNS,
+                    datatype=["str"] * len(STRATEGY_PARAMETER_COLUMNS),
+                    interactive=True,
+                    wrap=True,
+                    show_search="filter",
+                    buttons=["fullscreen", "copy"],
+                    static_columns=[0, 2, 3, 4],
+                    max_height=430,
+                    label="因子、择时、组合构造与交易过滤参数",
+                )
+                factor_preview = gr.HTML(
+                    value=_factor_preview_html(
+                        DEFAULT_STRATEGY,
+                        _strategy_parameter_table(DEFAULT_STRATEGY),
+                    )
+                )
             run_btn = gr.Button("运行回测", variant="primary", size="lg")
             run_out = gr.Markdown()
 
             def _on_strategy_change(name: str):
-                """切换策略时同步该策略当前生效的默认参数（换手频率/持仓数）"""
+                """同步核心参数、高级参数和因子公式预览。"""
                 d = _strategy_defaults(name)
-                return gr.update(value=d["rebalance_days"]), gr.update(value=d["top_k"])
+                table = _strategy_parameter_table(name)
+                return (
+                    gr.update(value=d["rebalance_days"]),
+                    gr.update(value=d["top_k"]),
+                    gr.update(value=table),
+                    _factor_preview_html(name, table),
+                )
 
-            strategy_in.change(_on_strategy_change, inputs=[strategy_in], outputs=[rebal_in, topk_in])
+            strategy_in.change(
+                _on_strategy_change,
+                inputs=[strategy_in],
+                outputs=[rebal_in, topk_in, strategy_params_in, factor_preview],
+            )
+            strategy_params_in.change(
+                _factor_preview_html,
+                inputs=[strategy_in, strategy_params_in],
+                outputs=[factor_preview],
+            )
             run_btn.click(
                 _run_backtest,
                 inputs=[
-                    strategy_in, rebal_in, topk_in, start_in, end_in,
+                    strategy_in, rebal_in, topk_in, strategy_params_in, start_in, end_in,
                     research_mode_in, cost_multiplier_in,
                 ],
                 outputs=[run_out],
@@ -451,7 +608,7 @@ def render():
             )
             with gr.Row():
                 wfa_strategy = gr.Dropdown(
-                    label="策略", choices=STRATEGY_CHOICES, value=STRATEGY_CHOICES[0],
+                    label="策略", choices=STRATEGY_CHOICES, value=DEFAULT_STRATEGY,
                 )
                 wfa_train = gr.Number(label="训练窗口（交易日）", value=504, precision=0)
                 wfa_test = gr.Number(label="测试窗口（交易日）", value=126, precision=0)
