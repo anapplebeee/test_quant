@@ -21,6 +21,7 @@ A 股实测量级通常在 3-8pp/yr，**远大于**本项目已花大力气修�
 可以要求其在过去 N 日有连续行情。这不能还原真实的调样日期，但能排除
 "当时根本没上市/没数据"的股票，是严格的改进。
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -123,6 +124,62 @@ def build_history_from_snapshots(index_code: str, snapshots: dict[str, list[str]
     return df.sort_values(["symbol", "in_date"]).reset_index(drop=True)
 
 
+def merge_history_snapshot(
+    history: pd.DataFrame | None,
+    observed_at: str | pd.Timestamp,
+    symbols: list[str],
+) -> pd.DataFrame:
+    """把一份最新成分快照增量合入既有 SCD2 历史，绝不覆盖旧区间。
+
+    ``build_history_from_snapshots`` 适合一次性根据多份离线快照重建历史；运行时
+    采集器则必须使用本函数。此前采集器每次只传入“今天”的快照并直接保存，导致
+    昨日以前的历史被整个替换，形式上有 PIT 表、实际却没有 PIT 覆盖。
+
+    本模块沿用既有的闭区间查询合同（``out_date`` 当天仍可查询到调出股票），
+    因而调出记录写为观测日期本身。快照代表收盘后可见的成分状态，策略须在下一
+    个交易日使用它；不在同一交易日根据快照下单。
+    """
+    observed = pd.Timestamp(observed_at).normalize()
+    current_symbols = {str(symbol).zfill(6) for symbol in symbols}
+    if not current_symbols:
+        raise ValueError("constituent snapshot is empty")
+    if history is None or history.empty:
+        return build_history_from_snapshots("incremental", {observed.isoformat(): sorted(current_symbols)})
+
+    df = history.copy()
+    missing = set(HISTORY_COLUMNS) - set(df.columns)
+    if missing:
+        raise ValueError(f"history missing columns: {sorted(missing)}")
+    df["symbol"] = df["symbol"].astype(str).str.zfill(6)
+    df["in_date"] = pd.to_datetime(df["in_date"]).astype("datetime64[ns]").dt.normalize()
+    df["out_date"] = (
+        pd.to_datetime(df["out_date"]).fillna(_OPEN_END).astype("datetime64[ns]").dt.normalize()
+    )
+
+    if observed < df["in_date"].min():
+        raise ValueError("cannot merge a snapshot earlier than existing history")
+
+    active_mask = (df["in_date"] <= observed) & (df["out_date"] >= observed)
+    active_symbols = set(df.loc[active_mask, "symbol"])
+    leaving = active_symbols - current_symbols
+    entering = current_symbols - active_symbols
+
+    if leaving:
+        df.loc[active_mask & df["symbol"].isin(leaving), "out_date"] = observed
+    if entering:
+        additions = pd.DataFrame(
+            {
+                "symbol": sorted(entering),
+                "in_date": observed,
+                # 返回值本身也可立即用于 PIT 查询；不能等到 save_history 才补开放区间。
+                "out_date": _OPEN_END,
+            }
+        ).astype({"in_date": "datetime64[ns]", "out_date": "datetime64[ns]"})
+        df = pd.concat([df, additions], ignore_index=True)
+
+    return df.sort_values(["symbol", "in_date", "out_date"]).reset_index(drop=True)
+
+
 def scan_existing_snapshots(index_code: str) -> dict[str, list[str]]:
     """扫描 data/universe/ 下已缓存的 `{index}_{YYYY-MM-DD}.parquet` 快照。
 
@@ -134,7 +191,7 @@ def scan_existing_snapshots(index_code: str) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     prefix = f"{index_code}_"
     for p in sorted(udir.glob(f"{index_code}_*.parquet")):
-        stem = p.stem[len(prefix):]
+        stem = p.stem[len(prefix) :]
         try:
             date = dt.date.fromisoformat(stem)
         except ValueError:
@@ -166,6 +223,7 @@ __all__ = [
     "describe",
     "history_path",
     "load_history",
+    "merge_history_snapshot",
     "save_history",
     "scan_existing_snapshots",
 ]

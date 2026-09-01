@@ -4,6 +4,7 @@
 **历史修订会改变 snapshot_id** —— 任一分区文件的历史内容被修改，
 重建快照必须得到不同的 snapshot_id；纯 mtime 变化不影响。
 """
+
 from __future__ import annotations
 
 import json
@@ -20,12 +21,18 @@ def _write_daily_bars(root, symbol: str, date: str, close: float) -> None:
     year = date[:4]
     d = root / "daily" / f"year={year}"
     d.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame({
-        "date": [pd.Timestamp(date)],
-        "symbol": [symbol],
-        "open": [close], "high": [close], "low": [close], "close": [close],
-        "volume": [1000.0], "amount": [close * 1000.0],
-    }).to_parquet(d / f"{symbol}_{year}.parquet", index=False)
+    pd.DataFrame(
+        {
+            "date": [pd.Timestamp(date)],
+            "symbol": [symbol],
+            "open": [close],
+            "high": [close],
+            "low": [close],
+            "close": [close],
+            "volume": [1000.0],
+            "amount": [close * 1000.0],
+        }
+    ).to_parquet(d / f"{symbol}_{year}.parquet", index=False)
 
 
 @pytest.fixture
@@ -37,6 +44,7 @@ def data_root(tmp_path):
 
 
 # ---------------- 快照 ----------------
+
 
 def test_snapshot_deterministic_for_identical_content(data_root, tmp_path):
     """内容相同的两份数据 → 相同 snapshot_id（与 mtime 无关）。"""
@@ -96,9 +104,17 @@ def test_manifest_contract_fields(data_root):
     """§10 快照清单合同字段必须齐备。"""
     m = snap.build_snapshot("daily", data_root, security_master_version="abc123")
     for attr in (
-        "snapshot_id", "dataset_name", "schema_version", "created_at", "source",
-        "quality_status", "partitions", "universe_snapshot_id",
-        "security_master_version", "corporate_action_version", "rule_book_version",
+        "snapshot_id",
+        "dataset_name",
+        "schema_version",
+        "created_at",
+        "source",
+        "quality_status",
+        "partitions",
+        "universe_snapshot_id",
+        "security_master_version",
+        "corporate_action_version",
+        "rule_book_version",
         "pit_metadata",
     ):
         assert hasattr(m, attr)
@@ -115,6 +131,7 @@ def test_build_snapshot_missing_dir(tmp_path):
 
 # ---------------- PIT 元数据 ----------------
 
+
 def test_collect_pit_metadata(tmp_path):
     (tmp_path / "meta").mkdir()
     pd.DataFrame({"date": pd.date_range("2024-01-01", periods=5)}).to_csv(
@@ -128,6 +145,7 @@ def test_collect_pit_metadata(tmp_path):
     assert meta["trading_calendar"]["sessions"] == 5
     assert meta["list_dates"]["symbols"] == 1
     assert "security_master_version" not in meta  # 无主数据时不出现
+    assert "corporate_action_version" not in meta  # 无公司行为账本时不出现
 
 
 def test_pit_metadata_attached_to_manifest(data_root):
@@ -138,24 +156,37 @@ def test_pit_metadata_attached_to_manifest(data_root):
 
 # ---------------- 证券主数据 ----------------
 
+
 @pytest.fixture
 def sm_root(tmp_path):
-    pd.DataFrame({"code": ["600519", "000001", "301999"]}).to_parquet(
-        tmp_path / "stock_names.parquet", index=False
-    )
+    pd.DataFrame({"code": ["600519", "000001", "301999"]}).to_parquet(tmp_path / "stock_names.parquet", index=False)
     (tmp_path / "universe").mkdir()
-    pd.DataFrame({
-        "symbol": ["600519", "000001"],
-        "first_date": [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-02")],
-    }).to_parquet(tmp_path / "universe" / "list_dates.parquet", index=False)
+    pd.DataFrame(
+        {
+            "symbol": ["600519", "000001"],
+            "first_date": [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-02")],
+        }
+    ).to_parquet(tmp_path / "universe" / "list_dates.parquet", index=False)
     return tmp_path
 
 
 def test_master_from_local_schema(sm_root):
     master = SecurityMaster.from_local(sm_root)
-    cols = ["symbol", "exchange", "board", "security_type", "listed_at", "delisted_at",
-            "status", "status_effective_from", "status_effective_to",
-            "lot_size", "tick_size", "price_limit_rule", "settlement_rule"]
+    cols = [
+        "symbol",
+        "exchange",
+        "board",
+        "security_type",
+        "listed_at",
+        "delisted_at",
+        "status",
+        "status_effective_from",
+        "status_effective_to",
+        "lot_size",
+        "tick_size",
+        "price_limit_rule",
+        "settlement_rule",
+    ]
     assert list(master.table.columns) == cols
     assert master.validate() == []
     row = master.table.set_index("symbol").loc["301999"]
@@ -172,11 +203,17 @@ def test_master_as_of_pit_query(sm_root):
 
 
 def test_master_status_effective_interval(tmp_path):
-    df = pd.DataFrame([{
-        "symbol": "600519", "listed_at": pd.Timestamp("2024-01-02"),
-        "status": "st", "status_effective_from": pd.Timestamp("2024-03-01"),
-        "status_effective_to": pd.Timestamp("2024-04-01"),
-    }])
+    df = pd.DataFrame(
+        [
+            {
+                "symbol": "600519",
+                "listed_at": pd.Timestamp("2024-01-02"),
+                "status": "st",
+                "status_effective_from": pd.Timestamp("2024-03-01"),
+                "status_effective_to": pd.Timestamp("2024-04-01"),
+            }
+        ]
+    )
     master = SecurityMaster(df)
     assert master.status_as_of("600519", "2024-03-15")["status"] == "st"
     assert master.status_as_of("600519", "2024-02-01") is None
@@ -201,11 +238,16 @@ def test_master_save_load_roundtrip(sm_root, tmp_path):
 
 
 def test_master_validate_detects_inverted_interval(tmp_path):
-    df = pd.DataFrame([{
-        "symbol": "600519", "status": "st",
-        "status_effective_from": pd.Timestamp("2024-04-01"),
-        "status_effective_to": pd.Timestamp("2024-03-01"),
-    }])
+    df = pd.DataFrame(
+        [
+            {
+                "symbol": "600519",
+                "status": "st",
+                "status_effective_from": pd.Timestamp("2024-04-01"),
+                "status_effective_to": pd.Timestamp("2024-03-01"),
+            }
+        ]
+    )
     problems = SecurityMaster(df).validate()
     assert any("inverted" in p for p in problems)
 

@@ -24,12 +24,13 @@
 - ``diff_snapshots`` 输出新增/删除/修订的分区清单，用于数据修订审计。
 - ``verify_snapshot`` 重新哈希落盘文件做完整性校验（漂移检测）。
 - ``collect_pit_metadata`` 聚合 PIT 元数据（交易日历覆盖、股票池快照、
-  上市日期覆盖、证券主数据版本），随快照一起落盘。
+  上市日期覆盖、证券主数据和公司行为版本），随快照一起落盘。
 
 快照清单落盘在 ``data/meta/snapshots/<dataset>/<snapshot_id>.json``，
 ``latest.json`` 指向当前版本。快照本身不可变：重复构建同一内容得到
 相同 snapshot_id，落盘是幂等覆盖（JSON 只含元数据，无历史风险）。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -123,9 +124,7 @@ def _parquet_min_max_date(path: Path) -> tuple[str | None, str | None]:
         import pyarrow.parquet as pq
 
         schema = pq.read_schema(path)
-        date_col = next(
-            (c for c in _DATE_COLUMN_CANDIDATES if c in schema.names), None
-        )
+        date_col = next((c for c in _DATE_COLUMN_CANDIDATES if c in schema.names), None)
         if date_col is None:
             return None, None
         col = pq.read_table(path, columns=[date_col]).column(date_col).to_pandas()
@@ -157,9 +156,7 @@ def fingerprint_partition(path: Path, root: Path) -> PartitionFingerprint:
     )
 
 
-def derive_snapshot_id(
-    dataset_name: str, schema_version: int, partitions: list[PartitionFingerprint]
-) -> str:
+def derive_snapshot_id(dataset_name: str, schema_version: int, partitions: list[PartitionFingerprint]) -> str:
     """由分区条目的规范化 JSON 派生 snapshot_id。
 
     只包含内容相关字段（relpath/size/rows/hash），与 mtime 无关；
@@ -169,10 +166,7 @@ def derive_snapshot_id(
         "dataset_name": dataset_name,
         "schema_version": schema_version,
         "partitions": sorted(
-            (
-                [p.relpath, p.size_bytes, p.row_count, p.content_hash]
-                for p in partitions
-            ),
+            ([p.relpath, p.size_bytes, p.row_count, p.content_hash] for p in partitions),
             key=lambda item: str(item[0]),
         ),
     }
@@ -215,12 +209,12 @@ def build_snapshot(
 
     files = sorted(p for p in root.rglob("*") if p.is_file())
     fingerprints = [fingerprint_partition(p, root) for p in files]
-    date_bounds = [
-        (p.min_date, p.max_date) for p in fingerprints if p.min_date and p.max_date
-    ]
+    date_bounds = [(p.min_date, p.max_date) for p in fingerprints if p.min_date and p.max_date]
     meta_pit = dict(pit_metadata or {})
     if security_master_version is None:
         meta_pit.setdefault("security_master_version", None)
+    if corporate_action_version is None:
+        meta_pit.setdefault("corporate_action_version", None)
 
     manifest = SnapshotManifest(
         snapshot_id=derive_snapshot_id(dataset_name, schema_version, fingerprints),
@@ -242,7 +236,10 @@ def build_snapshot(
     )
     logger.info(
         "snapshot built: dataset={} id={} files={} rows={}",
-        dataset_name, manifest.snapshot_id, manifest.file_count, manifest.total_rows,
+        dataset_name,
+        manifest.snapshot_id,
+        manifest.file_count,
+        manifest.total_rows,
     )
     return manifest
 
@@ -299,9 +296,7 @@ def load_manifest(
 # ---------------- 修订识别与校验 ----------------
 
 
-def diff_snapshots(
-    old: SnapshotManifest, new: SnapshotManifest
-) -> dict[str, list[str]]:
+def diff_snapshots(old: SnapshotManifest, new: SnapshotManifest) -> dict[str, list[str]]:
     """对比两份快照，识别数据修订。
 
     Returns
@@ -310,19 +305,14 @@ def diff_snapshots(
     revised 即"历史修订"的分区列表（同路径但内容哈希不同）。
     """
     old_map, new_map = old.partition_map(), new.partition_map()
-    revised = sorted(
-        rp for rp, fp in new_map.items()
-        if rp in old_map and old_map[rp].content_hash != fp.content_hash
-    )
+    revised = sorted(rp for rp, fp in new_map.items() if rp in old_map and old_map[rp].content_hash != fp.content_hash)
     added = sorted(rp for rp in new_map if rp not in old_map)
     removed = sorted(rp for rp in old_map if rp not in new_map)
     unchanged = sorted(rp for rp in new_map if rp in old_map and rp not in revised)
     return {"revised": revised, "added": added, "removed": removed, "unchanged": unchanged}
 
 
-def verify_snapshot(
-    manifest: SnapshotManifest, root_dir: str | Path | None = None
-) -> list[str]:
+def verify_snapshot(manifest: SnapshotManifest, root_dir: str | Path | None = None) -> list[str]:
     """完整性校验：重新哈希落盘文件并比对清单。
 
     Returns
@@ -350,7 +340,8 @@ def collect_pit_metadata(base: Path | None = None) -> dict[str, Any]:
     - 交易日历（data/meta/trading_calendar.csv）；
     - 股票池快照（data/universe/<code>_<date>.parquet）；
     - 上市日期覆盖（data/universe/list_dates.parquet）；
-    - 证券主数据版本（data/meta/security_master.parquet，如有）。
+    - 证券主数据版本（data/meta/security_master.parquet，如有）；
+    - 公司行为账本版本（data/meta/corporate_actions.parquet，如有）。
     """
     root = Path(base) if base else Path(data_root())
     meta: dict[str, Any] = {}
@@ -401,6 +392,23 @@ def collect_pit_metadata(base: Path | None = None) -> dict[str, Any]:
             meta["security_master_version"] = load_master_version(sm_path)
         except Exception as exc:  # pragma: no cover
             logger.warning("pit: security_master unreadable: {}", exc)
+
+    ca_path = root / "meta" / "corporate_actions.parquet"
+    if ca_path.exists():
+        try:
+            from quart.data.corporate_actions import CorporateActionLedger
+
+            ledger = CorporateActionLedger.load(ca_path)
+            actions = ledger.table
+            meta["corporate_action_version"] = ledger.version()
+            meta["corporate_actions"] = {
+                "rows": len(actions),
+                "symbols": int(actions["symbol"].nunique()),
+                "min_available_at": str(actions["available_at"].min().date()),
+                "max_ex_date": str(actions["ex_date"].max().date()),
+            }
+        except Exception as exc:  # pragma: no cover
+            logger.warning("pit: corporate actions unreadable: {}", exc)
 
     try:
         from quart.market_rules.rule_book import RULE_BOOK_PATH, load_rule_book_version

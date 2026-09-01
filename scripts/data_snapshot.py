@@ -12,6 +12,7 @@
     uv run python scripts/data_snapshot.py master --as-of 2024-06-01
     uv run python scripts/data_snapshot.py master --sources
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,14 +38,13 @@ def _datasets_from_args(args: argparse.Namespace) -> list[str]:
 
 
 def _attach_pit(manifest: snap.SnapshotManifest) -> snap.SnapshotManifest:
-    """装配 PIT 元数据与证券主数据版本（可缺省，不阻塞快照）。"""
-    try:
-        from quart.data.security_master import load_master_version
-
-        manifest.security_master_version = load_master_version()
-    except FileNotFoundError:
-        console.print("[yellow]security_master.parquet 不存在，先运行 master --build[/]")
     manifest.pit_metadata = snap.collect_pit_metadata()
+    manifest.security_master_version = manifest.pit_metadata.get("security_master_version")
+    manifest.corporate_action_version = manifest.pit_metadata.get("corporate_action_version")
+    if manifest.security_master_version is None:
+        console.print("[yellow]security_master.parquet 不存在，先运行 master --build[/]")
+    if manifest.corporate_action_version is None:
+        console.print("[yellow]corporate_actions.parquet 不存在，尚未绑定公司行为账本[/]")
     return manifest
 
 
@@ -64,8 +64,9 @@ def cmd_build(args: argparse.Namespace) -> None:
             else:
                 console.print(f"[green]no content change vs {old.snapshot_id}[/]")
         snap.save_manifest(manifest)
-        console.print(f"[bold]{ds}[/] snapshot_id={manifest.snapshot_id} "
-                      f"files={manifest.file_count} rows={manifest.total_rows}")
+        console.print(
+            f"[bold]{ds}[/] snapshot_id={manifest.snapshot_id} files={manifest.file_count} rows={manifest.total_rows}"
+        )
         if args.verify:
             problems = snap.verify_snapshot(manifest)
             if problems:

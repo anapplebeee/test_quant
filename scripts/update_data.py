@@ -22,7 +22,9 @@ def main() -> None:
         choices=["index", "all", "mainboard"],
         help="stock pool: index constituents / all A-shares / only mainboard (沪深主板)",
     )
-    parser.add_argument("--index", default=load_config()["universe"]["default_index"], help="index code for benchmark, e.g. 000300")
+    parser.add_argument(
+        "--index", default=load_config()["universe"]["default_index"], help="index code for benchmark, e.g. 000300"
+    )
     parser.add_argument("--start", default="20190101", help="history start YYYYMMDD")
     parser.add_argument("--max", type=int, default=None, help="limit number of symbols (debug)")
     parser.add_argument("--workers", type=int, default=8, help="parallel symbol workers (1-32)")
@@ -65,7 +67,11 @@ def main() -> None:
     workers = max(1, min(int(args.workers), 32))
     logger.info(
         "updating {} symbols (universe={}, benchmark={}, workers={}, full_refresh={})",
-        len(codes), args.universe, args.index, workers, args.full_refresh,
+        len(codes),
+        args.universe,
+        args.index,
+        workers,
+        args.full_refresh,
     )
     stats = update_universe_data(
         args.index,
@@ -96,7 +102,9 @@ def main() -> None:
         f"refreshed={stats.get('refreshed', 0)}"
     )
     if stats["failed_symbols"]:
-        console.print(f"[yellow]failed: {stats['failed_symbols'][:20]}{'...' if len(stats['failed_symbols'])>20 else ''}[/yellow]")
+        console.print(
+            f"[yellow]failed: {stats['failed_symbols'][:20]}{'...' if len(stats['failed_symbols']) > 20 else ''}[/yellow]"
+        )
 
     # 数据更新后自动构建内容哈希快照（DATA-001）。
     # 协调文档 10.1 Research Release 要求"固定数据快照"——快照必须是
@@ -110,9 +118,14 @@ def main() -> None:
         snapshot_ids = {}
         for ds in datasets:
             try:
+                pit_metadata = snap.collect_pit_metadata()
                 manifest = snap.build_snapshot(
-                    ds, quality_status="updated",
-                    pit_metadata=snap.collect_pit_metadata(),
+                    ds,
+                    quality_status="updated",
+                    security_master_version=pit_metadata.get("security_master_version"),
+                    corporate_action_version=pit_metadata.get("corporate_action_version"),
+                    rule_book_version=pit_metadata.get("rule_book_version"),
+                    pit_metadata=pit_metadata,
                 )
                 snap.save_manifest(manifest)
                 snapshot_ids[ds] = manifest.snapshot_id
@@ -123,10 +136,7 @@ def main() -> None:
         temp_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
         temp_path.replace(status_path)
         if snapshot_ids:
-            console.print(
-                "[green]snapshot built[/green] "
-                + ", ".join(f"{k}={v}" for k, v in snapshot_ids.items())
-            )
+            console.print("[green]snapshot built[/green] " + ", ".join(f"{k}={v}" for k, v in snapshot_ids.items()))
     except Exception as exc:
         # 快照构建失败不应阻断数据更新（数据已落盘），只告警
         logger.warning("snapshot build failed (data update ok): {}", exc)
