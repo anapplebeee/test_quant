@@ -324,6 +324,7 @@ def main() -> None:
         strategy=strategy,
         source="run",
     )
+    portfolio_receipt = strategy.construction_receipt()
     summary.update({
         "strategy": args.strategy,
         "strategy_params": effective_params,
@@ -335,6 +336,7 @@ def main() -> None:
         "execution": execution_meta,
         "rule_book_version": result.rule_book_version,
         "n_deferred_orders": len(deferred_df),
+        "portfolio_construction": portfolio_receipt,
     })
 
     console.print(Panel(
@@ -375,6 +377,8 @@ def main() -> None:
         run.put_table("deferred_orders", deferred_df)
     run.put_json("summary", summary)
     run.put_json("factor_receipt", factor_receipt)
+    if portfolio_receipt is not None:
+        run.put_json("portfolio_construction", portfolio_receipt)
     run.add_metrics(
         **{k: summary.get(k) for k in
            ("cagr", "sharpe", "max_drawdown", "total_return", "calmar", "bench_excess_cagr")},

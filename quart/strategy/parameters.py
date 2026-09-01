@@ -345,6 +345,19 @@ def build_factor_receipt(
         }
         formula = f"momentum(mode={mode}, lookback={lookback}, skip={skip})"
         is_factor_strategy = True
+    elif name == "factor_portfolio":
+        factor_names = str(effective.get("factor_names", "")).split(",")
+        for factor_name in filter(None, (item.strip() for item in factor_names)):
+            add("研究因子", factor_name, 1.0, "横截面 z-score 后等权合成")
+        controls = {
+            "top_k": effective.get("top_k"),
+            "max_weight_pct": effective.get("max_weight_pct"),
+            "min_cash_weight": effective.get("min_cash_weight"),
+            "risk_aversion": effective.get("risk_aversion"),
+            "turnover_penalty": effective.get("turnover_penalty"),
+        }
+        formula = "mean(zscore(factor_i)) → PortfolioConstructor"
+        is_factor_strategy = True
     elif name == "ml_rank":
         available = True if strategy is not None and getattr(strategy, "scores", None) is not None else None
         add("ML横截面预测分", "ml_score", 1.0, "离线模型预测分数 Top-K", available)

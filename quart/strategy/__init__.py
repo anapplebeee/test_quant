@@ -3,6 +3,7 @@ from __future__ import annotations
 from quart.config import load_config
 from quart.strategy.base import BaseStrategy
 from quart.strategy.dual_ma import DualMAStrategy
+from quart.strategy.factor_portfolio import FactorPortfolioStrategy
 from quart.strategy.lowvol_composite import LowVolCompositeStrategy
 from quart.strategy.ml_rank import MLRankStrategy
 from quart.strategy.momentum import MomentumRotationStrategy, PathMomentumStrategy
@@ -11,6 +12,7 @@ REGISTRY: dict[str, type[BaseStrategy]] = {
     "momentum_rotation": MomentumRotationStrategy,
     "momentum_path": PathMomentumStrategy,
     "dual_ma": DualMAStrategy,
+    "factor_portfolio": FactorPortfolioStrategy,
     "ml_rank": MLRankStrategy,
     "lowvol_composite": LowVolCompositeStrategy,
     # 行业内 z-score 打分变体（R2 因子研究：rel_ind_mom20 ICIR 最稳）

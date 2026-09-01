@@ -132,6 +132,10 @@ class BaseStrategy(ABC):
             symbol: int(shares) for symbol, shares in positions.items() if int(shares) > 0
         }
 
+    def construction_receipt(self) -> dict | None:
+        """返回最近一次组合构建回执；非 Constructor 策略默认无回执。"""
+        return None
+
     def _require_md(self) -> MarketData:
         if self._md is None:
             raise RuntimeError(
