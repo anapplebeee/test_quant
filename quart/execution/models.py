@@ -86,6 +86,8 @@ class ExecutionContext:
     cash_buffer: float = 1.0
     reserve_fees: bool = True
     slip_notional_mode: str = "position_value"
+    #: RuleBook 适配器；None 时订单生成器退化为全局 lot_size（兼容合成测试）。
+    rule_resolver: object | None = None
 
 
 @dataclass(frozen=True)

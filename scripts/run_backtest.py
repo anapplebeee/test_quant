@@ -130,8 +130,8 @@ def main() -> None:
         "index": args.universe_index,
         "quality": "PIT" if args.research_mode == "formal" else "NON_PIT",
         "source": "universe_history" if args.research_mode == "formal" else "all_local_bars",
-        "rules_version": "ashare_v1",
-        "rule_version": "ashare_v1",
+        "rules_version": None,
+        "rule_version": None,
     }
     if args.research_mode == "formal":
         try:
@@ -269,6 +269,11 @@ def main() -> None:
         "suspension_rule": "无开盘行情/不可交易时拒单，持仓继续估值",
         "price_adjust": data_cfg.get("adjust", "unknown"),
     }
+    from quart.market_rules.rule_book import load_rule_book_version
+
+    universe_meta["rules_version"] = load_rule_book_version()
+    universe_meta["rule_version"] = universe_meta["rules_version"]
+    execution_meta["rule_book_version"] = universe_meta["rules_version"]
 
     # 产出同时写 artifacts/（可追溯：run_id + 参数 + 数据版本 + 指纹）
     # 与 reports/（兼容现有 api/frontend）
@@ -288,8 +293,17 @@ def main() -> None:
         },
     )
 
+    from quart.data.security_master import MASTER_PATH, SecurityMaster
+
+    security_master = SecurityMaster.load() if MASTER_PATH.exists() else None
     try:
-        result = BacktestEngine(md, strategy, fees=fees, risk_pipeline=risk_pipeline).run_result()
+        result = BacktestEngine(
+            md,
+            strategy,
+            fees=fees,
+            risk_pipeline=risk_pipeline,
+            security_master=security_master,
+        ).run_result()
     except Exception as exc:
         run.finish(status="failed", error=str(exc))
         raise
@@ -316,6 +330,7 @@ def main() -> None:
         "research_mode": args.research_mode,
         "universe": universe_meta,
         "execution": execution_meta,
+        "rule_book_version": result.rule_book_version,
     })
 
     console.print(Panel(

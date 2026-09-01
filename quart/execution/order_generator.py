@@ -50,10 +50,24 @@ def _slip_notional(ctx: ExecutionContext, order_notional: float, position_notion
     return position_notional
 
 
+def _lot_size(ctx: ExecutionContext, symbol: str) -> int:
+    resolver = ctx.rule_resolver
+    if resolver is None:
+        return int(ctx.lot_size)
+    try:
+        return int(resolver.lot_size(symbol, ctx.date, fallback=ctx.lot_size))
+    except Exception:
+        # 订单生成器只在此保留数量兼容回退；真实 A 股规则覆盖失败会在执行模型
+        # 返回明确拒单原因，不能静默变成另一套价格规则。
+        return int(ctx.lot_size)
+
+
 def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePlan:
     """把目标权重转换为委托计划。纯函数，不修改入参。"""
+    bind_context = getattr(model, "bind_context", None)
+    if callable(bind_context):
+        bind_context(ctx)
     fees = ctx.fees
-    lot = ctx.lot_size
     cash = float(ctx.cash)
     positions = {s: int(v) for s, v in ctx.positions.items() if int(v) > 0}
 
@@ -78,6 +92,7 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
     # 先卖后买：A 股卖出资金当日可用于买入，且先卖能释放预算避免买不起。
     # 按代码排序保证同分结果确定（回测可复现）。
     for sym in sorted(positions.keys()):
+        lot = _lot_size(ctx, sym)
         shares = positions[sym]
         sellable = (
             shares
@@ -197,6 +212,7 @@ def generate_orders(ctx: ExecutionContext, model: ExecutionModel) -> RebalancePl
     # 保证"缺钱"降级为更小的组合而不是随机缺票。
     buy_syms = sorted(targets.items(), key=lambda kv: -kv[1])
     for sym, weight in buy_syms:
+        lot = _lot_size(ctx, sym)
         base_price = _price(ctx, ctx.exec_prices, sym)
         prev_close = _price(ctx, ctx.prev_closes, sym)
         ref_price = prev_close if math.isfinite(prev_close) else base_price

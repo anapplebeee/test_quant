@@ -353,6 +353,7 @@ def run_walk_forward(
     warmup_days: int = 260,
     progress: Callable[[str], None] | None = None,
     account_mode: str = "continuous",
+    security_master=None,
 ) -> WFAResult:
     """执行 walk-forward 验证。
 
@@ -415,6 +416,7 @@ def run_walk_forward(
             engine = BacktestEngine(
                 train_md, strat, fees=fees,
                 initial_cash=initial_cash, risk_pipeline=risk_pipeline,
+                security_master=security_master,
             )
             res = engine.run_result()
             n_trades = 0 if res.trades.empty else len(res.trades)
@@ -433,6 +435,7 @@ def run_walk_forward(
             engine = BacktestEngine(
                 train_md, strat, fees=fees,
                 initial_cash=initial_cash, risk_pipeline=risk_pipeline,
+                security_master=security_master,
             )
             best_summary = summarize(engine.run_result().equity)
             best_summary["n_trades"] = 0
@@ -467,6 +470,7 @@ def run_walk_forward(
                 test_md, strat, fees=fees, initial_cash=initial_cash,
                 risk_pipeline=risk_pipeline, signal_md=context_md,
                 signal_offset=sp.test_lo - rec["context_lo"],
+                security_master=security_master,
             )
             oos = engine.run_result()
             bench_slice = benchmark.iloc[sp.test_lo:sp.test_hi] if benchmark is not None else None
@@ -504,6 +508,7 @@ def run_walk_forward(
             engine = BacktestEngine(
                 exec_md, scheduled, fees=fees,
                 initial_cash=initial_cash, risk_pipeline=risk_pipeline,
+                security_master=security_master,
             )
             continuous = engine.run_result()
             oos_dates = md.dates[sorted(owner)]

@@ -10,20 +10,40 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 from quart.execution.constraints import is_limit_down, is_limit_up
 from quart.execution.fees import Fees
 from quart.execution.models import BUY
 
+if TYPE_CHECKING:
+    from quart.execution.models import ExecutionContext
+    from quart.execution.rule_resolver import ExecutionRuleResolver
+
 
 class LiveExecutionModel:
     """实盘/纸面交易口径的执行模型。"""
 
-    def __init__(self, fees: Fees | None = None, note_limits: bool = True):
+    def __init__(
+        self,
+        fees: Fees | None = None,
+        note_limits: bool = True,
+        rule_resolver: ExecutionRuleResolver | None = None,
+    ):
         self.fees = fees or Fees.from_config()
         self.note_limits = note_limits
+        if rule_resolver is None:
+            from quart.execution.rule_resolver import ExecutionRuleResolver
+
+            rule_resolver = ExecutionRuleResolver()
+        self.rule_resolver = rule_resolver
+        self._context: ExecutionContext | None = None
         #: 本轮生成的非阻塞提示（由调用方读取后清空）
         self.warnings: list[str] = []
+
+    def bind_context(self, context: ExecutionContext) -> None:
+        """由共享订单生成器注入计划交易日。"""
+        self._context = context
 
     def exec_price(
         self,
@@ -48,6 +68,13 @@ class LiveExecutionModel:
             return None
         if not math.isfinite(prev_close) or not math.isfinite(base_price):
             return None
+        if self._context is not None:
+            note = self.rule_resolver.limit_note(
+                symbol, side, base_price, prev_close, self._context.date
+            )
+            if note is not None:
+                self.warnings.append(note)
+                return None
         if side == BUY and is_limit_up(base_price, prev_close, symbol):
             self.warnings.append(f"{symbol}: 昨收涨停，次日开盘可能无法买入，请人工确认")
         elif side != BUY and is_limit_down(base_price, prev_close, symbol):

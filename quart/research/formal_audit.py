@@ -74,6 +74,7 @@ def run_single_backtest(
     from quart.data.market import MarketData
     from quart.data.quality import load_blocklist
     from quart.data.quality_gate import require_quality_gate
+    from quart.data.security_master import MASTER_PATH, SecurityMaster
     from quart.data.store import BarStore
     from quart.data.universe import filter_for_simulation
     from quart.execution.fees import Fees
@@ -111,7 +112,13 @@ def run_single_backtest(
     strategy_obj = build_strategy(strategy, **(params or {}))
     md = MarketData.from_bars(bars, benchmark=bench)
     fees = Fees.from_config().scaled(cost)
-    result = BacktestEngine(md, strategy_obj, fees=fees).run_result()
+    security_master = SecurityMaster.load() if MASTER_PATH.exists() else None
+    result = BacktestEngine(
+        md,
+        strategy_obj,
+        fees=fees,
+        security_master=security_master,
+    ).run_result()
 
     bench_close = bench.set_index("date")["close"].reindex(result.equity.index).ffill()
     ew_bench = equal_weight_benchmark(result.equity, bars)

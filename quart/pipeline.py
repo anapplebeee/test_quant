@@ -62,6 +62,7 @@ def generate_orders(
     fees: Fees | None = None,
     prev_close: pd.Series | None = None,
     sellable_positions: dict[str, int] | None = None,
+    trade_date: str | pd.Timestamp | None = None,
 ) -> tuple[list[OrderPlan], float]:
     """生成次日委托计划。
 
@@ -87,9 +88,14 @@ def generate_orders(
         if sym in latest_close.index and not pd.isna(latest_close[sym])
     )
 
-    model = LiveExecutionModel(fees)
+    from quart.execution.rule_resolver import ExecutionRuleResolver
+
+    # 每日信号使用当前已发布主数据；缺失时仍由 RuleBook 处理板块/日期规则，
+    # 但不会虚构上市日龄或证券状态。
+    rule_resolver = ExecutionRuleResolver(autoload_security_master=True)
+    model = LiveExecutionModel(fees, rule_resolver=rule_resolver)
     ctx = ExecutionContext(
-        date=pd.Timestamp.today().normalize(),
+        date=pd.Timestamp(trade_date or pd.Timestamp.today()).normalize(),
         targets=targets,
         equity=equity,
         cash=cash,
@@ -100,6 +106,7 @@ def generate_orders(
         prev_closes=prev_close,
         fees=fees,
         lot_size=A_SHARE_LOT,
+        rule_resolver=rule_resolver,
         # 实盘不留现金垫：委托计划要如实反映目标仓位，由人判断是否留余地
         cash_buffer=1.0,
     )
@@ -229,6 +236,9 @@ def run_daily(
     strategy = build_strategy(strategy_name)
     strategy.prepare(md)
     i = len(md.dates) - 1
+    from quart.market_rules.rule_book import load_rule_book_version
+
+    rule_book_version = load_rule_book_version()
 
     manual_cfg = cfg.get("manual_trading", {})
     manual_enabled = bool(manual_cfg.get("enabled", True))
@@ -276,6 +286,8 @@ def run_daily(
     # 前一交易日收盘：涨跌停判断必须基于它，不能用当日收盘
     # （今收 vs 今收算出的涨跌停价永远不触发）
     prev_close = md.closes.iloc[i - 1] if i > 0 else last_close
+    date = md.dates[i]
+    trade_date = intended_trade_date or next_trade_date(str(date.date()))
     if risk_state in (RiskState.HALTED, RiskState.RECOVERY):
         weights: dict[str, float] = {}
         orders: list[OrderPlan] = []
@@ -296,6 +308,7 @@ def run_daily(
             warnings=warnings,
             prev_close=prev_close,
             sellable_positions=sellable_positions,
+            trade_date=trade_date,
         )
         if risk_state is RiskState.REDUCING:
             buys = [o for o in orders if o.side == BUY]
@@ -310,8 +323,6 @@ def run_daily(
         positions, last_close, equity, limits.max_position_pct
     )
 
-    date = md.dates[i]
-    trade_date = intended_trade_date or next_trade_date(str(date.date()))
     plan_id = None
     if repository is not None:
         account_id = account_state.account_id if account_state is not None else repository.get_or_create_account(account_name)
@@ -369,6 +380,7 @@ def run_daily(
                 "warnings": list(warnings),
                 "plan_id": plan_id,
                 "intended_trade_date": trade_date,
+                "rule_book_version": rule_book_version,
             },
         )
         run.put_text("report", report)

@@ -93,6 +93,7 @@ class BacktestResult:
     ending_positions: dict[str, int] = field(default_factory=dict)
     pending_targets: dict[str, float] | None = None
     strategy_state: dict = field(default_factory=dict)
+    rule_book_version: str | None = None
 
     @property
     def final_positions(self) -> dict[str, int]:
@@ -128,6 +129,8 @@ class BacktestEngine:
         risk_pipeline=None,
         signal_md: MarketData | None = None,
         signal_offset: int = 0,
+        rule_book=None,
+        security_master=None,
     ):
         cfg = load_config()["backtest"]
         self.md = md
@@ -145,8 +148,10 @@ class BacktestEngine:
         self.risk_pipeline = risk_pipeline
         self.trades: list[Trade] = []
         from quart.execution.backtest_model import BacktestExecutionModel
+        from quart.execution.rule_resolver import ExecutionRuleResolver
 
-        self._model = BacktestExecutionModel(self.fees)
+        self.rule_resolver = ExecutionRuleResolver(rule_book, security_master)
+        self._model = BacktestExecutionModel(self.fees, rule_resolver=self.rule_resolver)
 
     # ---------------- 公开 API ----------------
 
@@ -214,6 +219,7 @@ class BacktestEngine:
             ending_positions=dict(portfolio.positions),
             pending_targets=carried_targets,
             strategy_state=self.strategy.serialize_state(),
+            rule_book_version=self.rule_resolver.version,
         )
 
     # ---------------- 内部实现 ----------------
@@ -249,6 +255,7 @@ class BacktestEngine:
             adv=adv,
             min_order_value=self.min_order_value,
             cash_buffer=LEGACY_CASH_BUFFER,
+            rule_resolver=self.rule_resolver,
         )
         plan = generate_orders(ctx, self._model)
         portfolio.positions = dict(plan.ending_positions)

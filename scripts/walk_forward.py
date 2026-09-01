@@ -125,8 +125,8 @@ def main() -> None:
         "index": args.universe_index,
         "quality": "PIT" if args.research_mode == "formal" else "NON_PIT",
         "source": "universe_history" if args.research_mode == "formal" else "all_local_bars",
-        "rules_version": "ashare_v1",
-        "rule_version": "ashare_v1",
+        "rules_version": None,
+        "rule_version": None,
     }
     if args.research_mode == "formal":
         try:
@@ -175,6 +175,10 @@ def main() -> None:
     )
     if bars.empty:
         raise SystemExit("过滤板块/ST 后无可用标的")
+    from quart.market_rules.rule_book import load_rule_book_version
+
+    universe_meta["rules_version"] = load_rule_book_version()
+    universe_meta["rule_version"] = universe_meta["rules_version"]
     universe_meta["coverage_start"] = str(pd.Timestamp(bars["date"].min()).date())
     universe_meta["coverage_end"] = str(pd.Timestamp(bars["date"].max()).date())
 
@@ -226,6 +230,9 @@ def main() -> None:
         },
     )
 
+    from quart.data.security_master import MASTER_PATH, SecurityMaster
+
+    security_master = SecurityMaster.load() if MASTER_PATH.exists() else None
     try:
         result = run_walk_forward(
             md, bench_close, args.strategy,
@@ -238,6 +245,7 @@ def main() -> None:
             min_trades=args.min_trades,
             account_mode=args.account_mode,
             warmup_days=args.warmup,
+            security_master=security_master,
             progress=lambda s: console.print(f"  {s}"),
         )
     except Exception as exc:
