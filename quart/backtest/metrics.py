@@ -99,13 +99,28 @@ def window_stats(equity: pd.Series, days: int) -> dict:
     }
 
 
-def _bench_metrics(result: dict, name: str, bench: pd.Series) -> None:
-    """写入单个基准的对比指标（支持多基准，含区间窗口）。"""
+def _bench_metrics(result: dict, equity: pd.Series, name: str, bench: pd.Series) -> None:
+    """写入单个基准的对比指标（支持多基准，含区间窗口）。
+
+    超额年化（``{name}_excess_cagr``）采用**相对净值口径**：
+    ``rel = (eq/eq0)/(bench/bench0)`` 的年化收益，而不是
+    ``cagr(eq) - cagr(bench)`` 的算术差。基准强势（如等权全市场年化
+    +100%+）时，算术差会把"跑输"夸大近一个量级——例如策略 +20% vs
+    基准 +145%：算术差 -125%，而相对净值年化约 -51%。
+    """
     if bench is None or len(bench) < 2:
         return
     result[f"{name}_total_return"] = total_return(bench)
     result[f"{name}_cagr"] = cagr(bench)
-    result[f"{name}_excess_cagr"] = result["cagr"] - cagr(bench)
+    aligned = bench.reindex(equity.index).ffill()
+    valid = aligned.notna()
+    eq, b = equity[valid], aligned[valid]
+    if len(eq) >= 2 and float(eq.iloc[0]) > 0 and float(b.iloc[0]) > 0:
+        relative = (eq / float(eq.iloc[0])) / (b / float(b.iloc[0]))
+        result[f"{name}_excess_cagr"] = cagr(relative)
+    else:
+        # 基准无有效起点（退化）：退回算术差，避免 NaN 破坏下游
+        result[f"{name}_excess_cagr"] = result["cagr"] - cagr(bench)
     for label, days in WINDOWS:
         ws = window_stats(bench, days)
         result[f"{name}_{label}_return"] = ws["return"]
@@ -141,9 +156,9 @@ def summarize(
         ws = window_stats(equity, days)
         result[f"{label}_return"] = ws["return"]
         result[f"{label}_mdd"] = ws["mdd"]
-    _bench_metrics(result, "bench", benchmark)
+    _bench_metrics(result, equity, "bench", benchmark)
     if benchmark2 is not None:
-        _bench_metrics(result, benchmark2_name, benchmark2)
+        _bench_metrics(result, equity, benchmark2_name, benchmark2)
     return result
 
 

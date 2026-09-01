@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quart.backtest.engine import Fees
-from quart.backtest.metrics import max_drawdown, sharpe_ratio
+from quart.backtest.metrics import cagr, max_drawdown, sharpe_ratio, summarize
 
 
 def test_fee_math():
@@ -68,3 +69,28 @@ def test_drawdown_flat_market():
     eq = pd.Series(np.full(50, 12345.6))
     mdd, _ = max_drawdown(eq)
     assert mdd == 0.0
+
+
+def test_excess_cagr_is_relative_nav_not_arithmetic_difference():
+    """基准强势时，算术差会把负超额夸大近一个量级；
+    修复后 excess_cagr 必须等于相对净值年化。"""
+    days = 243 * 4
+    idx = pd.bdate_range("2022-01-03", periods=days)
+    strategy = pd.Series((1 + 0.00075) ** np.arange(days), index=idx)  # 年化 ~+20%
+    benchmark = pd.Series((1 + 0.0037) ** np.arange(days), index=idx)  # 年化 ~+145%
+    summary = summarize(strategy, benchmark=benchmark)
+
+    relative = (strategy / strategy.iloc[0]) / (benchmark / benchmark.iloc[0])
+    expected = cagr(relative)
+    assert summary["bench_excess_cagr"] == pytest.approx(expected, abs=1e-9)
+    # 与旧算术差口径显著不同（旧口径 -125% vs 相对口径 -51%）
+    assert summary["bench_excess_cagr"] > summary["cagr"] - summary["bench_cagr"] + 0.1
+    assert summary["bench_excess_cagr"] < 0.0
+
+
+def test_excess_cagr_equals_benchmark_when_identical():
+    days = 243 * 3
+    idx = pd.bdate_range("2022-01-03", periods=days)
+    identical = pd.Series((1 + 0.001) ** np.arange(days), index=idx)
+    summary = summarize(identical, benchmark=identical.copy())
+    assert summary["bench_excess_cagr"] == pytest.approx(0.0, abs=1e-12)
