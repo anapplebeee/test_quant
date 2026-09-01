@@ -9,6 +9,7 @@
 - 当前实现与已知偏差：[`ARCHITECTURE_OVERVIEW.md`](ARCHITECTURE_OVERVIEW.md)
 - 目标模块、运行拓扑与迁移阶段：[`docs/TARGET_ARCHITECTURE_V3.md`](docs/TARGET_ARCHITECTURE_V3.md)
 - 工作包、依赖、PR 门禁与发布流程：[`docs/DEVELOPMENT_COORDINATION.md`](docs/DEVELOPMENT_COORDINATION.md)
+- 2026-09-01 严格落地审计、能力缺口与交付路线：[`docs/量化平台能力缺口与交付路线_2026-09-01.md`](docs/量化平台能力缺口与交付路线_2026-09-01.md)
 - 长期架构决策：[`docs/adr/README.md`](docs/adr/README.md)
 
 当本文的长期方向与目标架构文档发生冲突时，以已接受的 ADR 和目标架构文档为准；本文继续负责里程碑与商业能力差距，不重复定义领域契约。
