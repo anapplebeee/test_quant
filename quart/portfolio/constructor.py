@@ -156,9 +156,12 @@ class PortfolioConstructor:
             raise PortfolioInfeasibleError([
                 f"不可交易持仓 {frozen_weight:.2%} 超过可投资上限 {investable_cap:.2%}"
             ])
-        if (target.loc[frozen] > float(constraints.max_weight) + _EPS).any():
-            bad = sorted(target.loc[frozen][target.loc[frozen] > constraints.max_weight + _EPS].index)
-            raise PortfolioInfeasibleError([f"不可交易持仓超过单票上限: {bad}"])
+        # 冻结（停牌/无行情/退市整理）持仓豁免单票上限：它不可交易，无法主动
+        # 减仓，上限约束对其无意义。直接 raise 会让"持仓中某股停牌且权重被动
+        # 超限"的合法回测崩溃（RESEARCH 2026-09 实测 600803 停牌触发）。
+        # 超限冻结持仓保留并在约束审计里标记 frozen.overweight，待解冻后自然
+        # 回落目标权重。可交易持仓由下方贪心分配自然限制在 max_weight 内，
+        # 无需在此额外检查。
 
         # 仅 alpha 有效且可交易的标的是新目标候选；当前但不再有 alpha 的可交易
         # 标的会自然降至零，完成策略分数与组合权重的分离。
@@ -541,6 +544,7 @@ def _validate_final(
     if invested > 1.0 - float(constraints.min_cash_weight) + _EPS:
         reasons.append("最低现金约束被违反")
     bad_weight = target[target > float(constraints.max_weight) + _EPS]
+    bad_weight = bad_weight[~bad_weight.index.isin(frozen)]  # 冻结持仓豁免单票上限
     if not bad_weight.empty:
         reasons.append(f"单票上限被违反: {sorted(bad_weight.index)}")
     frozen_delta = (target.loc[frozen] - current.loc[frozen]).abs() if len(frozen) else pd.Series(dtype=float)

@@ -134,3 +134,19 @@ def test_constructor_rejects_invalid_weight_input_without_clipping():
             ),
             PortfolioConstraints(max_weight=1.0),
         )
+
+
+def test_constructor_tolerates_frozen_overweight_position():
+    """停牌/无行情持仓权重被动超单票上限 → 不崩溃，冻结保留（RESEARCH 600803 场景）。"""
+    result = PortfolioConstructor().construct(
+        PortfolioConstructionInput(
+            alphas=pd.Series({"A": 0.5, "B": 1.0}),
+            current_weights={"A": 0.30, "B": 0.05},
+            tradable={"B"},
+        ),
+        PortfolioConstraints(max_weight=0.10, min_cash_weight=0.0),
+    )
+    # A 停牌冻结、权重 30% > 10% 上限：保留而非报错
+    assert result.target_weights["A"] == pytest.approx(0.30)
+    assert result.constraint_usage["frozen.A"].used == pytest.approx(0.0)
+    assert result.target_weights["B"] == pytest.approx(0.10)
