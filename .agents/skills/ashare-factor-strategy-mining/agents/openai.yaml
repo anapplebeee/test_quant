@@ -1,0 +1,4 @@
+interface:
+  display_name: "A股因子与策略挖掘"
+  short_description: "在Quart中按PIT、样本外、成本与容量门禁挖掘A股因子策略"
+  default_prompt: "使用 $ashare-factor-strategy-mining 挖掘并严格验证一个 A 股因子或策略候选。"
