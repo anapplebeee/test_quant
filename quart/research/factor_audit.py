@@ -105,7 +105,37 @@ FACTOR_SPECS = (
         "sector_mom5_neg", "板块轮动",
         "板块 5 日动量过热反向（broadcast，板块短期轮动反转）", is_new=True,
     ),
+    # ---- R010 新因子挖掘（平台未覆盖的新维度，ICIR 强于现有因子）----
+    # 挖掘审计（2021-2026 月度、65 样本、5 日 horizon）实测：
+    #   gap_fill20 IC=-0.065/ICIR=-0.66、amount_concen20 -0.037/-0.64、
+    #   vol_asym60 -0.062/-0.56，均反向（原值越高未来收益越低）。
+    # 三者刻画“价格韧性/成交脉冲/波动不对称”，与既有低波因子低相关（新 alpha 源）。
+    FactorSpec(
+        "gap_fill20_neg", "价格韧性",
+        "跳空回补强度反向（缺口不回补=趋势延续，回补频繁=弱势震荡）", is_new=True,
+    ),
+    FactorSpec(
+        "amount_concen20_neg", "成交脉冲",
+        "成交额集中度反向（成交脉冲式集中=投机，未来回吐）", is_new=True,
+    ),
+    FactorSpec(
+        "vol_asym60_neg", "波动不对称",
+        "上行/下行波动不对称反向（上行波动过大=过热）", is_new=True,
+    ),
 )
+
+
+def _winsorize(frame: pd.DataFrame, lower: float = 0.01, upper: float = 0.99) -> pd.DataFrame:
+    """横截面分位数去极值（R010 新因子必需）。
+
+    比率类因子（如 gap_fill 回补幅度、波动不对称 up/down）对停牌、一字板、
+    长期停牌复牌等特殊股票会产生极端病态值——未去极值时组合优化会想给这些
+    股票超高权重，直接触发"单票上限被违反"而构建失败。按每日截面的 1%/99%
+    分位裁剪，保留排序信息、消除量纲病态。
+    """
+    low_q = frame.quantile(lower, axis=1)
+    high_q = frame.quantile(upper, axis=1)
+    return frame.clip(lower=low_q, upper=high_q, axis=0).astype("float32")
 
 
 def rank_correlation(left: pd.Series, right: pd.Series) -> float:
@@ -121,6 +151,11 @@ def rank_correlation(left: pd.Series, right: pd.Series) -> float:
 
 
 class FactorInputs:
+    #: R010 挖掘的新 alpha 因子（已取负向，统一由 new_alpha_frames 提供）
+    NEW_ALPHA_FACTORS = frozenset(
+        {"gap_fill20_neg", "amount_concen20_neg", "vol_asym60_neg"}
+    )
+
     def __init__(self, market: MarketData):
         self.market = market
         self.close = market.close_val
@@ -185,6 +220,45 @@ class FactorInputs:
     @cached_property
     def price_event_frames(self) -> dict[str, pd.DataFrame]:
         return limit_event_panels(self.market)
+
+    @cached_property
+    def new_alpha_frames(self) -> dict[str, pd.DataFrame]:
+        """R010 挖掘的新 alpha 面板（已取负向，值越高越优）。
+
+        三个因子均只用 ≤T 的量价数据（T 收盘形成、T+1 可执行，与平台不变量 1
+        一致）。挖掘审计（2021-2026 月度、65 样本、5 日 horizon）显示三者原始
+        值与未来收益**负相关**、且 ICIR 强于既有因子：
+          gap_fill20 -0.66 / amount_concen20 -0.64 / vol_asym60 -0.56。
+        故统一取负后作为正向选股因子（neg 后缀）。
+        """
+        close = self.close
+        open_ = self.open
+        ret = self.returns
+        amount = self.amount
+
+        # 1. 跳空回补强度：向下跳空当日，收盘相对开盘的回补幅度均值。
+        #    无跳空的日子填中性值 0（"没有缺口可回补"=中性，而非缺失）——否则该
+        #    因子只在少数有跳空的股票上有值（实测覆盖仅 1357/3264），会把候选池
+        #    系统性扭曲，导致组合优化因候选不足而单票超限。
+        gap = open_ - close.shift(1)
+        intraday_move = (close - open_) / open_.replace(0, np.nan)
+        gap_fill = (
+            intraday_move.where(gap < 0).fillna(0.0).rolling(20, min_periods=10).mean()
+        )
+
+        # 2. 成交额集中度：20 日内最大单日成交额 / 20 日成交额之和
+        amount_concen = amount.rolling(20).max() / amount.rolling(20).sum().replace(0, np.nan)
+
+        # 3. 上下行波动不对称：上行收益波动 / 下行收益波动
+        up_vol = ret.clip(lower=0).rolling(60).std()
+        down_vol = (-ret.clip(upper=0)).rolling(60).std()
+        vol_asym = up_vol / down_vol.replace(0, np.nan)
+
+        return {
+            "gap_fill20_neg": _winsorize(-gap_fill),
+            "amount_concen20_neg": _winsorize(-amount_concen),
+            "vol_asym60_neg": _winsorize(-vol_asym),
+        }
 
     @cached_property
     def director_sale_frames(self) -> dict[str, pd.DataFrame] | None:
@@ -316,6 +390,8 @@ class FactorInputs:
             value = self._sector_momentum_relative(window=5)
             if value is not None:
                 value = -value
+        elif name in self.NEW_ALPHA_FACTORS:
+            value = self.new_alpha_frames[name]
         else:
             raise KeyError(f"unknown factor: {name}")
 

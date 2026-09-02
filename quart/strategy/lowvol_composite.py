@@ -80,6 +80,11 @@ class LowVolCompositeStrategy(BaseStrategy):
         "limit_breadth_quantile": (float, 0.5, "低仓位触发分位数"),
         "limit_breadth_floor": (float, 0.5, "低广度状态最低仓位"),
         "candidate_quality_weight": (float, 0.0, "ROE稳定/盈利加速/利润弹性候选权重（研究）"),
+        "new_alpha_weight": (
+            float, 0.0,
+            "R010 新alpha因子权重（gap_fill20/amount_concen20/vol_asym60 z均值，0=关闭）。"
+            "挖掘审计 ICIR≈0.37-0.38、与低波因子截面相关仅 0.41-0.51（正交 alpha 源）",
+        ),
     }
 
     def __init__(self, **params):
@@ -258,6 +263,27 @@ class LowVolCompositeStrategy(BaseStrategy):
             values, index=zs[0].index, columns=zs[0].columns, dtype="float32"
         )
 
+    def _build_new_alpha_score(self, md: MarketData) -> pd.DataFrame | None:
+        """R010 新 alpha 合成分：3 个新因子横截面 z 等权均值。
+
+        复用 FactorInputs.new_alpha_frames（已含去极值 + 取负向），保证与审计
+        因子完全同口径；因子已覆盖全池（gap_fill 无跳空日填中性 0），缺失截面
+        按 NaN 参与均值（nanmean），全缺失行由调用方 fillna(0) 中性化。
+        """
+        import warnings
+
+        from quart.research.factor_audit import FactorInputs
+
+        frames = FactorInputs(md).new_alpha_frames
+        zs = [self._z(frame.reindex(columns=md.close_val.columns)) for frame in frames.values()]
+        zs = [z for z in zs if bool(z.notna().to_numpy().any())]
+        if not zs:
+            return None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # 全 NaN 截面的 nanmean
+            arr = np.nanmean(np.stack([z.to_numpy() for z in zs]), axis=0)
+        return pd.DataFrame(arr, index=zs[0].index, columns=zs[0].columns).astype("float32")
+
     def prepare(self, md: MarketData) -> None:
         super().prepare(md)
         p = self.params
@@ -303,6 +329,7 @@ class LowVolCompositeStrategy(BaseStrategy):
         self.candidate_quality_weight = min(
             1.0, max(0.0, float(p.get("candidate_quality_weight", 0.0)))
         )
+        self.new_alpha_weight = min(1.0, max(0.0, float(p.get("new_alpha_weight", 0.0))))
 
         c = md.close_val.astype("float32")
         ret1 = c.pct_change(fill_method=None)
@@ -436,6 +463,18 @@ class LowVolCompositeStrategy(BaseStrategy):
                 comp = (
                     (1.0 - self.candidate_quality_weight) * comp
                     + self.candidate_quality_weight * quality.reindex_like(comp).fillna(0.0)
+                ).astype("float32")
+
+        # R010 新 alpha（价格韧性/成交脉冲/波动不对称）：与低波复合分正交的
+        # 独立来源（截面相关 0.41-0.51），混入方式同 vg/candidate_quality。
+        self.new_alpha_score = None
+        if self.new_alpha_weight > 0:
+            new_alpha = self._build_new_alpha_score(md)
+            if new_alpha is not None:
+                self.new_alpha_score = new_alpha
+                comp = (
+                    (1.0 - self.new_alpha_weight) * comp
+                    + self.new_alpha_weight * new_alpha.reindex_like(comp).fillna(0.0)
                 ).astype("float32")
 
         if self.industry_z:
