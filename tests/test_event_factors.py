@@ -12,6 +12,7 @@ from quart.research.event_factors import (
     dragon_tiger_panels,
     event_sentiment_panels,
     limit_event_panels,
+    market_limit_sentiment,
     neutralize_against,
     price_limit_panel,
 )
@@ -242,3 +243,63 @@ def test_director_sale_regex_covered_personas():
     # "持股5%以上股东"是财务/战略投资者，不是内部人，必须排除
     assert not re.search(DIRECTOR_SALE_PERSON_REGEX, "持股5%以上股东减持")
     assert not re.search(DIRECTOR_SALE_PERSON_REGEX, "股东减持公告")
+
+
+def _limit_up_md() -> tuple[pd.DatetimeIndex, MarketData]:
+    """构造涨停面板：600000 三连板后回调，600001 单板后横盘，600002 不涨停。
+
+    主板涨停 ~10%：用连续 +10.5% 模拟涨停（满足 ge prev*1.1 - tolerance）。
+    """
+    n = 8
+    dates = pd.bdate_range("2025-01-02", periods=n)
+    close = pd.DataFrame(10.0, index=dates, columns=["600000", "600001", "600002"])
+    # 600000: 三连板（+10.5% 三次）后回调
+    close["600000"] = [10.0, 11.05, 12.21, 13.49, 13.0, 12.5, 12.5, 12.5]
+    # 600001: 单板后横盘
+    close["600001"] = [10.0, 11.05, 11.05, 11.05, 11.05, 11.05, 11.05, 11.05]
+    # 600002: 从不涨停（微涨）
+    close["600002"] = 10.0 * (1 + np.arange(n) * 0.001)
+    open_ = close.shift(1).fillna(close.iloc[0])
+    volume = pd.DataFrame(1_000_000.0, index=dates, columns=close.columns)
+    md = MarketData(open_, close * 1.01, close * 0.99, close, volume)
+    return dates, md
+
+
+def test_market_sentiment_limit_up_consec_max():
+    """连板高度 = 全市场当日最高连续涨停数（600000 三连板 → 3）。"""
+    dates, md = _limit_up_md()
+    sent = market_limit_sentiment(md)
+    # 600000 在索引 1,2,3 连续涨停：streak 应为 1,2,3（峰值 3 在第 4 天）
+    assert sent["limit_up_consec_max"].loc[dates[1]] == 1.0
+    assert sent["limit_up_consec_max"].loc[dates[2]] == 2.0
+    assert sent["limit_up_consec_max"].loc[dates[3]] == 3.0
+
+
+def test_market_sentiment_break_rate():
+    """炸板率：昨日涨停股中今日未续板的比例。"""
+    dates, md = _limit_up_md()
+    sent = market_limit_sentiment(md)
+    # 索引1 涨停：600000,600001（2 只）。索引2：600000 续板、600001 未续。
+    # 炸板率 = 未续板数/昨日涨停数 = 1/2 = 0.5（dates[2]）
+    assert np.isclose(sent["limit_up_break_rate"].loc[dates[2]], 0.5, atol=1e-6)
+    # 索引2 涨停：仅 600000。索引3：600000 续板 → 炸板率 0（dates[3]）
+    assert np.isclose(sent["limit_up_break_rate"].loc[dates[3]], 0.0, atol=1e-6)
+
+
+def test_market_sentiment_money_effect_positive():
+    """赚钱效应：昨日涨停股今日平均收益（应为正，涨停后溢价）。"""
+    dates, md = _limit_up_md()
+    sent = market_limit_sentiment(md)
+    # 600000 三连板期间，昨日涨停股今日继续 +10.5% → 赚钱效应明显为正
+    assert sent["limit_up_money_effect"].loc[dates[2]] > 0.05
+
+
+def test_market_sentiment_phase_classification():
+    """情绪周期：涨停家数主升>80 / 震荡30-80 / 退潮<30。
+
+    合成数据仅 3 只涨停 → 应判为"退潮"。
+    """
+    dates, md = _limit_up_md()
+    sent = market_limit_sentiment(md)
+    # 3 只涨停（2 只当日），家数 < 30 → 退潮
+    assert (sent["sentiment_phase"] == "退潮").all()

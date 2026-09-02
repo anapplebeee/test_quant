@@ -206,6 +206,31 @@ def market_limit_sentiment(
     net = up_breadth - down_breadth
     mean = net.rolling(z_window, min_periods=max(5, z_window // 3)).mean()
     std = net.rolling(z_window, min_periods=max(5, z_window // 3)).std().replace(0, np.nan)
+
+    # ---- 打板情绪因子（日线可构造，RESEARCH-007/008）----
+    # 连板高度：每只股票连续涨停天数，取全市场当日最高连板数
+    up_b = up.astype(bool)
+    streak = up_b.astype("int8")
+    for i in range(1, len(streak)):
+        streak.iloc[i] = streak.iloc[i] * (streak.iloc[i - 1] + 1)
+    consec_max = streak.max(axis=1).astype(float)
+
+    # 炸板率（简化代理）：昨日涨停股中今日未继续涨停的比例。
+    # 注意这是日线代理（"未续板"），非 Level-2 盘中炸板，仅作情绪温度计。
+    prev_up_b = up_b.shift(1).fillna(False).astype(bool)
+    yesterday_count = prev_up_b.sum(axis=1).replace(0, np.nan)
+    break_rate = ((~up_b) & prev_up_b).sum(axis=1) / yesterday_count
+
+    # 赚钱效应：昨日涨停股今日平均收益（相对市场等权）
+    today_ret = market.close_val.astype("float64").pct_change(fill_method=None)
+    money_effect = today_ret.where(prev_up_b).mean(axis=1)
+
+    # 情绪周期状态机（资料三档）：涨停家数主升>80 / 震荡30-80 / 退潮<30
+    up_count = up_b.sum(axis=1)
+    phase = pd.Series("震荡", index=market.dates)
+    phase[up_count > 80] = "主升"
+    phase[up_count < 30] = "退潮"
+
     return pd.DataFrame(
         {
             "tradable_count": denominator,
@@ -215,6 +240,11 @@ def market_limit_sentiment(
             "limit_down_breadth": down_breadth,
             "limit_net_breadth": net,
             "limit_heat_z": (net - mean) / std,
+            # 打板情绪（日线代理，RESEARCH-008）
+            "limit_up_consec_max": consec_max,
+            "limit_up_break_rate": break_rate,
+            "limit_up_money_effect": money_effect,
+            "sentiment_phase": phase,
         },
         index=market.dates,
     )
