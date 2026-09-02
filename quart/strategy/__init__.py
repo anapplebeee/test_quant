@@ -8,6 +8,7 @@ from quart.strategy.index_enhancement import IndexEnhancementStrategy
 from quart.strategy.lowvol_composite import LowVolCompositeStrategy
 from quart.strategy.ml_rank import MLRankStrategy
 from quart.strategy.momentum import MomentumRotationStrategy, PathMomentumStrategy
+from quart.strategy.three_layer import ThreeLayerStrategy
 
 REGISTRY: dict[str, type[BaseStrategy]] = {
     "momentum_rotation": MomentumRotationStrategy,
@@ -19,6 +20,8 @@ REGISTRY: dict[str, type[BaseStrategy]] = {
     "lowvol_composite": LowVolCompositeStrategy,
     # 行业内 z-score 打分变体（R2 因子研究：rel_ind_mom20 ICIR 最稳）
     "lowvol_indz": LowVolCompositeStrategy,
+    # 三层合成：大盘择时(market_state_vector) × 行业内反转选强者 × 个股因子
+    "three_layer": ThreeLayerStrategy,
 }
 
 #: 非策略参数的配置键，传入策略前必须剥离

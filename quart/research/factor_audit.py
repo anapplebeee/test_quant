@@ -92,6 +92,19 @@ FACTOR_SPECS = (
         "董事/高管/实控人减持窗口内累计相对强度（负向——减持支撑撤走后回吐）",
         is_new=True,
     ),
+    # ---- 三层特征（RESEARCH-009：大盘/板块/个股，横截面审计）----
+    # 板块层：板块动量相对全市场强度，broadcast 回板块内个股。同一板块内个股
+    # 同分（真实预测维度是“选对赛道”），与剔板块的 rel_ind_rev20（选板块内
+    # 强者）正交分解——“板块特征”与“个股特征”。
+    FactorSpec(
+        "sector_mom20", "板块轮动",
+        "板块 20 日动量相对全市场（broadcast 板块内个股，选对赛道）", is_new=True,
+    ),
+    # 板块层短期反转：板块 5 日动量过热易回吐（A 股行业轮动短期反转），broadcast。
+    FactorSpec(
+        "sector_mom5_neg", "板块轮动",
+        "板块 5 日动量过热反向（broadcast，板块短期轮动反转）", is_new=True,
+    ),
 )
 
 
@@ -297,12 +310,49 @@ class FactorInputs:
             if frames is None:
                 return None
             value = frames["director_sale_support_neg"]
+        elif name == "sector_mom20":
+            value = self._sector_momentum_relative(window=20)
+        elif name == "sector_mom5_neg":
+            value = self._sector_momentum_relative(window=5)
+            if value is not None:
+                value = -value
         else:
             raise KeyError(f"unknown factor: {name}")
 
         if value is None:
             return None
         return value.replace([np.inf, -np.inf], np.nan).astype("float32")
+
+    def _sector_momentum_relative(self, window: int = 20) -> pd.DataFrame | None:
+        """板块动量相对强度（broadcast）：板块窗口收益 − 全市场窗口收益。
+
+        “板块特征”层的横截面表达：把每只股票替换为所属板块（统计聚类/申万
+        一级，随 industries 源）在 window 日的窗口收益，再减去当日全市场等权
+        窗口收益做中性化。同一板块内个股得分相同——真实预测维度是“选对赛道”。
+
+        时点安全：只用 ≤T 的收盘价算窗口收益，信号 T 收盘形成、T+1 才可执行，
+        与 `_relative_industry_reversal` 同口径。映射缺失时返回 None（fail-closed，
+        调用方明确跳过该因子，不静默替代）。
+        """
+        try:
+            from quart.strategy.industries import load_industry_series
+
+            mapping = load_industry_series("first")
+        except (FileNotFoundError, ValueError):
+            return None
+        window_return = self.close.pct_change(window, fill_method=None)
+        if window_return is None or window_return.empty:
+            return None
+        groups = pd.Series(
+            [mapping.get(symbol, "UNKNOWN") for symbol in window_return.columns],
+            index=window_return.columns,
+        )
+        sector_return = window_return.T.groupby(groups).mean().T
+        market_return = window_return.mean(axis=1)
+        broadcast = sector_return.sub(market_return, axis=0)
+        out = broadcast.reindex(columns=groups.values)
+        out.columns = window_return.columns
+        return out
 
     def _relative_industry_reversal(self, window: int = 20) -> pd.DataFrame | None:
         try:

@@ -63,6 +63,11 @@ STRATEGY_META: dict[str, dict[str, str]] = {
         "status": "研究",
         "desc": "多因子组合研究模板。尚无官方 PIT 因子暴露数据，也未通过正式 OOS 准入门禁，仅限回测研究用途。",
     },
+    "three_layer": {
+        "label": "三层合成(大盘×行业内×个股)",
+        "status": "研究",
+        "desc": "RESEARCH-009：因子z合成alpha(行业内反转选强者rel_ind_rev20+低波/拥挤等)×market_state_vector大盘择时门控。未通过正式OOS准入门禁，仅限回测研究。",
+    },
 }
 
 

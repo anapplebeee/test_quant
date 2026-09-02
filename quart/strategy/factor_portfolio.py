@@ -52,6 +52,13 @@ class FactorPortfolioStrategy(BaseStrategy):
         "style_active_bounds": (str, "", "风格主动暴露上限，如 momentum=0.15,size=0.2"),
         "turnover_penalty": (float, 0.0, "目标函数换手成本惩罚"),
         "transaction_cost_bps": (float, 0.0, "目标函数预估双边成本（bps）"),
+        "rank_combine": (
+            bool, False,
+            "因子合成用横截面 rank 百分位等权而非 z-score 等权。拥挤度/反转类因子 "
+            "大量并列且厚尾，z-score 会把并列段噪声放大导致选股抖动；RESEARCH-009 "
+            "校准实证 rank 合成能复现 composite3 的 +15% 正 alpha（见 "
+            "scripts/composite_backtest.py 注释）",
+        ),
     }
 
     def prepare(self, md: MarketData) -> None:
@@ -92,7 +99,8 @@ class FactorPortfolioStrategy(BaseStrategy):
                 )
             panels[name] = panel.reindex(index=md.dates, columns=md.symbols)
         self.factor_panels = panels
-        self.alpha_panel = _combine_panels(panels)
+        self.rank_combine = bool(p.get("rank_combine", False))
+        self.alpha_panel = _combine_ranks(panels) if self.rank_combine else _combine_panels(panels)
         self.returns = md.close_val.pct_change(fill_method=None)
         self._next_rebalance = 0
         self.last_construction: PortfolioConstructionResult | None = None
@@ -236,6 +244,21 @@ def _combine_panels(panels: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
         std = panel.std(axis=1).replace(0, np.nan)
         standardized.append(panel.sub(mean, axis=0).div(std, axis=0))
     combined = sum(standardized) / len(standardized)
+    return combined.replace([np.inf, -np.inf], np.nan).astype("float64")
+
+
+def _combine_ranks(panels: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+    """横截面 rank 百分位（0~1）等权合成（RESEARCH-009 校准）。
+
+    与 z-score 合成不同：rank 对厚尾与大量并列不敏感（拥挤度计数类因子如 20 日
+    0 次涨停极多并列，z-score 会把并列段微小噪声放大导致选股在并列股间抖动、
+    换手爆炸）。这与 ``scripts/composite_backtest.py`` 的
+    ``cross_sectional_rank`` 口径一致——实证该口径能复现 composite3 的 +15% CAGR。
+    """
+    ranked: list[pd.DataFrame] = []
+    for panel in panels.values():
+        ranked.append(panel.rank(axis=1, pct=True, method="average"))
+    combined = sum(ranked) / len(ranked)
     return combined.replace([np.inf, -np.inf], np.nan).astype("float64")
 
 
