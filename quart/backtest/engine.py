@@ -138,6 +138,7 @@ class BacktestEngine:
         security_master=None,
         max_adv_participation: float | None = None,
         execution_price_mode: str | None = None,
+        execution_model=None,
     ):
         cfg = load_config()["backtest"]
         self.md = md
@@ -173,7 +174,14 @@ class BacktestEngine:
         from quart.execution.rule_resolver import ExecutionRuleResolver
 
         self.rule_resolver = ExecutionRuleResolver(rule_book, security_master)
-        self._model = BacktestExecutionModel(self.fees, rule_resolver=self.rule_resolver)
+        self._model = (
+            execution_model
+            if execution_model is not None
+            else BacktestExecutionModel(self.fees, rule_resolver=self.rule_resolver)
+        )
+        # 自定义 execution_model 需要 ExecutionContext 里的 date/行情来做盘中判定；
+        # 默认 BacktestExecutionModel 保留既有行为（不注入 context，避免改变回测结果）。
+        self._bind_execution_context = execution_model is not None
 
     # ---------------- 公开 API ----------------
 
@@ -299,6 +307,8 @@ class BacktestEngine:
             cash_buffer=LEGACY_CASH_BUFFER,
             rule_resolver=self.rule_resolver,
         )
+        if self._bind_execution_context and hasattr(self._model, "bind_context"):
+            self._model.bind_context(ctx)
         plan = generate_orders(ctx, self._model)
         portfolio.positions = dict(plan.ending_positions)
 
