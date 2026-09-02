@@ -18,6 +18,7 @@ from collections.abc import Iterable
 import numpy as np
 import pandas as pd
 
+from quart.data.announcements import classify_event
 from quart.data.market import MarketData
 from quart.data.security_master import _board_of
 from quart.execution.constraints import LIMIT_TOLERANCE
@@ -378,8 +379,130 @@ def dragon_tiger_panels(
     }
 
 
+#: 内部人减持相关人（董事/高管/监事/实控人），用于精确筛选"内部人抛售"
+#: 而非一般股东。注意**不含**"持股5%以上"——那会命中财务/战略投资者等
+#: 非内部人（全市场约 4733 条），污染"董事抛售"的信号（用户问的是董事）。
+DIRECTOR_SALE_PERSON_REGEX = r"董事|高管|高级管理人员|监事|董监高|实际控制人|实控人"
+
+
+def director_sale_support_panels(
+    events: pd.DataFrame,
+    trading_dates: pd.DatetimeIndex,
+    symbols: Iterable[str],
+    returns: pd.DataFrame | None = None,
+    *,
+    support_window: int = 15,
+    is_director_col: str | None = None,
+) -> dict[str, pd.DataFrame]:
+    """内部人减持拉升/支撑行为因子（PROVISIONAL，见假设卡）。
+
+    机制：董事/高管/实控人在减持计划预披露后进入减持窗口（一般 ≤15 个交易
+    日），有动机在窗口内维持甚至拉抬股价，以便在更高价位减持。一旦窗口
+    结束，支撑撤走，前期被支撑的涨幅大概率回吐。因此"减持窗口内拉升越猛"
+    是**负向**信号——未来倾向跑输，方向与直觉相反但符合均值回归。
+
+    时点安全（协议不变量 1、6）：
+    - 事件仅用 ``published_at/available_at`` 映射到**首次可用交易日**
+      （公告无时分秒 → 下一交易日），绝不使用实际减持日或未来数据；
+    - 选择性披露：未发生减持事件的股票-日期置 ``NaN``，**不是 0**，同时
+      单独返回 ``active_mask`` 区分"未披露"与"披露的零拉升"；
+    - 拉升度量（窗口内相对强度）只使用事件可用日及**之后**的价格，且该
+      价格是 T+1 才可执行，因此对 T 收盘信号是时点安全的。
+
+    必需列：``symbol, published_at``；``event_type`` 若缺失则按标题
+    ``classify_event`` 判定。``title`` 用于筛内部人身份。``returns`` 为
+    日收益横截面面板（index=交易日, columns=symbol），用于计算窗口内相对
+    强度；缺失时仅返回 active 掩码（拉升因子为 NaN）。
+
+    返回（面板与掩码同序，可按日期 index、symbol 列对齐）：
+    - ``director_sale_support_neg``：减持窗口内相对强度（**负向**，值越大
+      表示前期被拉抬越狠 → 未来越差）。仅事件窗口内的股票-日期有值，其余
+      为 NaN。窗口内但无有效价格（停牌）时保持 NaN。
+    - ``director_sale_active``：事件活跃掩码（1=事件窗口内，NaN=无事件），
+      用于与事件活跃等权基线对比（协议 §诊断 6）。
+    """
+    required = {"symbol", "published_at"}
+    missing = required - set(events.columns)
+    if missing:
+        raise ValueError(f"event data missing columns: {sorted(missing)}")
+    if support_window <= 0:
+        raise ValueError("support_window must be positive")
+
+    idx = pd.DatetimeIndex(trading_dates).sort_values().normalize()
+    cols = [str(symbol) for symbol in symbols]
+    empty = {
+        "director_sale_support_neg": pd.DataFrame(np.nan, index=idx, columns=cols, dtype="float32"),
+        "director_sale_active": pd.DataFrame(np.nan, index=idx, columns=cols, dtype="float32"),
+    }
+
+    frame = events.copy()
+    frame["symbol"] = frame["symbol"].astype(str).str.zfill(6)
+    if "event_type" not in frame:
+        frame["event_type"] = frame["title"].astype(str).map(classify_event)
+    red = frame[frame["event_type"] == "share_reduction"].copy()
+    if red.empty:
+        return empty
+    # 内部人筛选：标题含董事/高管/实控人/持股5%以上；若调用方已给出
+    # is_director 列则优先使用。
+    if is_director_col is not None and is_director_col in red:
+        red = red[red[is_director_col].fillna(False).astype(bool)]
+    elif "title" in red:
+        red = red[red["title"].astype(str).str.contains(DIRECTOR_SALE_PERSON_REGEX, na=False)]
+    if red.empty:
+        return empty
+
+    red["available_date"] = _availability_dates(red, idx)
+    red = red[red["available_date"].notna() & red["symbol"].isin(cols)]
+    if red.empty:
+        return empty
+
+    active = pd.DataFrame(np.nan, index=idx, columns=cols, dtype="float32")
+    pos = {d: k for k, d in enumerate(idx)}
+    for _, row in red.iterrows():
+        start = pos.get(row["available_date"])
+        if start is None:
+            continue
+        col = row["symbol"]
+        end = min(start + support_window, len(idx))
+        active.iloc[start:end, active.columns.get_loc(col)] = 1.0
+
+    # 拉升度量：事件窗口内的**逐日累计**相对强度。用个股收益减去当日横
+    # 截面均值（等权市场收益）得到相对收益，再从窗口起点逐日累加——T 日
+    # 的信号只使用 ≤T 的数据（协议不变量 1：不把未来拉到过去）。值越大
+    # 表示截至 T 窗口内相对市场被拉抬越狠（减持支撑信号）。这是研究层的
+    # 因子值，不是组合权重。
+    if returns is not None:
+        returns = returns.reindex(index=idx, columns=cols)
+        rel = returns.sub(returns.mean(axis=1), axis=0)
+        support = pd.DataFrame(np.nan, index=idx, columns=cols, dtype="float32")
+        for _, row in red.iterrows():
+            start = pos.get(row["available_date"])
+            if start is None:
+                continue
+            col = row["symbol"]
+            end = min(start + support_window, len(idx))
+            if end - start < 1:
+                continue
+            window_rel = rel.iloc[start:end, rel.columns.get_loc(col)]
+            if window_rel.dropna().empty:
+                continue
+            # 逐日累计：第 k 天的值 = 窗口起点到第 k 天的相对收益累计，
+            # 保证 T 日信号不包含 T 之后的量价。
+            cumsum = window_rel.fillna(0.0).cumsum().astype("float32")
+            support.iloc[start:end, support.columns.get_loc(col)] = cumsum.to_numpy()
+    else:
+        support = pd.DataFrame(np.nan, index=idx, columns=cols, dtype="float32")
+
+    return {
+        "director_sale_support_neg": support.astype("float32"),
+        "director_sale_active": active.astype("float32"),
+    }
+
+
 __all__ = [
+    "DIRECTOR_SALE_PERSON_REGEX",
     "PRICE_EVENT_FACTORS",
+    "director_sale_support_panels",
     "dragon_tiger_panels",
     "event_sentiment_panels",
     "limit_event_panels",

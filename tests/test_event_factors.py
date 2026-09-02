@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 
 from quart.data.market import MarketData
 from quart.research.event_factors import (
+    DIRECTOR_SALE_PERSON_REGEX,
+    director_sale_support_panels,
     dragon_tiger_panels,
     event_sentiment_panels,
     limit_event_panels,
@@ -133,3 +137,108 @@ def test_dragon_tiger_factor_is_normalized_by_disclosed_turnover():
 
     assert panels["dragon_tiger_net_buy_decay"].loc[dates[1], "600000"] == np.float32(0.2)
     assert panels["dragon_tiger_institution_decay"].loc[dates[1], "600000"] == np.float32(0.05)
+
+
+def _sale_market(n_days: int) -> tuple[pd.DatetimeIndex, pd.DataFrame]:
+    """构造 600000 持续 3% 拉升、600001/600002 平走的收益面板。"""
+    dates = pd.bdate_range("2025-01-02", periods=n_days)
+    close = pd.DataFrame(10.0, index=dates, columns=["600000", "600001", "600002"])
+    close["600000"] = 10.0 * (1.03 ** np.arange(n_days))  # 持续 3% 拉升
+    close["600001"] = 10.0  # 平走
+    close["600002"] = 10.0
+    returns = close.pct_change(fill_method=None)
+    return dates, returns
+
+
+def test_director_sale_active_mask_is_nan_outside_window():
+    """无减持事件的股票-日期必须为 NaN，而不是 0（选择性披露）。"""
+    dates, returns = _sale_market(8)
+    events = pd.DataFrame({
+        "symbol": ["600000"],
+        "published_at": ["2025-01-02"],
+        "title": ["关于董事减持股份预披露的公告"],
+    })
+    panels = director_sale_support_panels(events, dates, ["600000", "600001", "600002"],
+                                          returns=returns, support_window=3)
+    active = panels["director_sale_active"]
+    # 600001/600002 无事件 → 全 NaN
+    assert np.isnan(active.loc[dates[3], "600001"])
+    assert np.isnan(active.loc[dates[3], "600002"])
+    # 600000 无事件的早期日也是 NaN（尚未披露）
+    assert np.isnan(active.loc[dates[0], "600000"])
+    # 事件披露次日可用（无时分秒 → 下一交易日），窗口内为 1.0
+    assert active.loc[dates[1], "600000"] == np.float32(1.0)
+
+
+def test_director_sale_support_no_future_leakage():
+    """拉升度量逐日累计：T 日信号不得包含 T 之后的量价。
+
+    横截面均值基于传入的全部 symbols（审计管道传全市场）；600000 拉升
+    3%/日、600001/600002 平走 → 每日 rel(600000)=3%-1%=2%。
+    """
+    dates, returns = _sale_market(8)
+    events = pd.DataFrame({
+        "symbol": ["600000"],
+        "published_at": ["2025-01-02"],
+        "title": ["关于董事减持股份预披露的公告"],
+    })
+    symbols = ["600000", "600001", "600002"]
+    panels = director_sale_support_panels(events, dates, symbols, returns=returns,
+                                          support_window=5)
+    support = panels["director_sale_support_neg"]
+    # 窗口从 1-03（index=1）起：逐日累计相对收益
+    # 1-03: rel=2% → 累计 2%；1-06: 累计 4%；1-07: 累计 6%
+    # 关键断言：某天的值 = 截至该天的累计，而非窗口末尾的总额
+    v_day2 = support.loc[dates[1], "600000"]  # 累计 2%
+    v_day3 = support.loc[dates[2], "600000"]  # 累计 4%
+    assert np.isclose(v_day2, 0.02, atol=1e-3)
+    assert np.isclose(v_day3, 0.04, atol=1e-3)
+
+
+def test_director_sale_support_direction_positive_when_pumped():
+    """窗口内被拉抬（相对强度为正）→ 因子值为正（负向信号：该回避）。"""
+    dates, returns = _sale_market(8)
+    events = pd.DataFrame({
+        "symbol": ["600000"],  # 持续拉升
+        "published_at": ["2025-01-02"],
+        "title": ["关于董事减持股份预披露的公告"],
+    })
+    symbols = ["600000", "600001", "600002"]
+    panels = director_sale_support_panels(events, dates, symbols, returns=returns,
+                                          support_window=5)
+    support = panels["director_sale_support_neg"]
+    # 拉升股在窗口内的相对强度为正 → 因子正值（越高越该回避）
+    assert support.loc[dates[2], "600000"] > 0.03
+    # 因子本身不 active 之外的日期为 NaN
+    assert np.isnan(support.loc[dates[6], "600000"])
+
+
+def test_director_sale_filters_non_director_reduction():
+    """非内部人减持（如财务投资者）不应触发拉升因子。"""
+    dates, returns = _sale_market(8)
+    events = pd.DataFrame({
+        "symbol": ["600000", "600001"],
+        "published_at": ["2025-01-02", "2025-01-02"],
+        "title": [
+            "关于股东减持股份预披露的公告",  # 无董事/高管/实控人关键词
+            "关于董事减持股份预披露的公告",
+        ],
+    })
+    panels = director_sale_support_panels(events, dates, ["600000", "600001"],
+                                          returns=returns, support_window=3)
+    active = panels["director_sale_active"]
+    # 600000 非内部人 → 不进入事件窗口
+    assert np.isnan(active.loc[dates[1], "600000"])
+    # 600001 含"董事" → 进入
+    assert active.loc[dates[1], "600001"] == np.float32(1.0)
+
+
+def test_director_sale_regex_covered_personas():
+    """内部人正则覆盖董事/高管/监事/实控人，但**排除**持股5%以上（财务投资者）。"""
+    assert re.search(DIRECTOR_SALE_PERSON_REGEX, "董事减持公告")
+    assert re.search(DIRECTOR_SALE_PERSON_REGEX, "高级管理人员减持")
+    assert re.search(DIRECTOR_SALE_PERSON_REGEX, "实际控制人减持")
+    assert re.search(DIRECTOR_SALE_PERSON_REGEX, "监事减持")
+    # "持股5%以上股东"是财务/战略投资者，不是内部人，必须排除
+    assert not re.search(DIRECTOR_SALE_PERSON_REGEX, "持股5%以上股东减持")
+    assert not re.search(DIRECTOR_SALE_PERSON_REGEX, "股东减持公告")

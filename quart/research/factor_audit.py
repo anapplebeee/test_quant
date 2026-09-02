@@ -87,6 +87,11 @@ FACTOR_SPECS = (
         "sector_heat20_neg", "板块拥挤",
         "个股投机热度聚合到一级行业的板块拥挤反向（板块层容量结构）", is_new=True,
     ),
+    FactorSpec(
+        "director_sale_support_neg", "内部人减持",
+        "董事/高管/实控人减持窗口内累计相对强度（负向——减持支撑撤走后回吐）",
+        is_new=True,
+    ),
 )
 
 
@@ -167,6 +172,33 @@ class FactorInputs:
     @cached_property
     def price_event_frames(self) -> dict[str, pd.DataFrame]:
         return limit_event_panels(self.market)
+
+    @cached_property
+    def director_sale_frames(self) -> dict[str, pd.DataFrame] | None:
+        """董事减持拉升因子面板；事件文件缺失时返回 None（fail，不合成）。
+
+        PROVISIONAL：仅当 news.parquet（事件合同）存在时计算；active mask
+        与拉升面板同序返回，供审计做事件活跃等权基线对比。
+        """
+        try:
+            from quart.config import data_root
+            from quart.data.announcements import build_event_frame
+            from quart.research.event_factors import director_sale_support_panels
+
+            path = data_root() / "events" / "news.parquet"
+            if not path.exists():
+                return None
+            raw = pd.read_parquet(path)
+            events = raw if "event_type" in raw else build_event_frame(raw)
+            return director_sale_support_panels(
+                events,
+                self.close.index,
+                self.close.columns,
+                returns=self.returns,
+            )
+        except Exception:
+            # 数据/映射缺失：审计管道对该因子返回不可用，不合成观测。
+            return None
 
     def compute(self, name: str) -> pd.DataFrame | None:
         ret = self.returns
@@ -260,6 +292,11 @@ class FactorInputs:
             value = frames[name].reindex(index=close.index, columns=close.columns)
         elif name in self.price_event_frames:
             value = self.price_event_frames[name]
+        elif name == "director_sale_support_neg":
+            frames = self.director_sale_frames
+            if frames is None:
+                return None
+            value = frames["director_sale_support_neg"]
         else:
             raise KeyError(f"unknown factor: {name}")
 
