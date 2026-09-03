@@ -101,7 +101,10 @@ strategy:
       rank_buffer: 0.5
       industry_z: true
       rev_weight: 0.0
-      new_alpha_weight: 0.3
+      # R010 3 个正交因子独立权重（0.3×3 等价于旧 new_alpha_weight=0.3 定稿值）
+      gap_fill_weight: 0.3
+      amount_concen_weight: 0.3
+      vol_asym_weight: 0.3
       min_avg_amount: 20000000
       max_weight_pct: 0.4
       use_regime_filter: true

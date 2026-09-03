@@ -80,11 +80,13 @@ class LowVolCompositeStrategy(BaseStrategy):
         "limit_breadth_quantile": (float, 0.5, "低仓位触发分位数"),
         "limit_breadth_floor": (float, 0.5, "低广度状态最低仓位"),
         "candidate_quality_weight": (float, 0.0, "ROE稳定/盈利加速/利润弹性候选权重（研究）"),
-        "new_alpha_weight": (
-            float, 0.0,
-            "R010 新alpha因子权重（gap_fill20/amount_concen20/vol_asym60 z均值，0=关闭）。"
-            "挖掘审计 ICIR≈0.37-0.38、与低波因子截面相关仅 0.41-0.51（正交 alpha 源）",
-        ),
+        # ---- R010 新 alpha：3 个正交因子各自独立权重（可分别调，正交性正是价值）。
+        # 合成 = Σ w_i·z_i / Σ w_i（权重归一）；w 全相等即退化为等权均值，与旧
+        # new_alpha_weight 单权重在 w=0.3 时结果一致（向后兼容等价）。
+        # 默认值 0.3×3 等价于上一轮定稿的 new_alpha_weight=0.3（权威口径 13.26%/-20.01%）。
+        "gap_fill_weight": (float, 0.3, "R010 跳空回补强度反向（gap_fill20_neg）权重"),
+        "amount_concen_weight": (float, 0.3, "R010 成交额脉冲集中反向（amount_concen20_neg）权重"),
+        "vol_asym_weight": (float, 0.3, "R010 上下行波动不对称反向（vol_asym60_neg）权重"),
     }
 
     def __init__(self, **params):
@@ -263,26 +265,51 @@ class LowVolCompositeStrategy(BaseStrategy):
             values, index=zs[0].index, columns=zs[0].columns, dtype="float32"
         )
 
-    def _build_new_alpha_score(self, md: MarketData) -> pd.DataFrame | None:
-        """R010 新 alpha 合成分：3 个新因子横截面 z 等权均值。
+    def _build_new_alpha_score(
+        self,
+        md: MarketData,
+        weights: dict[str, float] | None = None,
+    ) -> pd.DataFrame | None:
+        """R010 新 alpha 合成分：3 个正交因子的横截面 z 按权重加权归一。
 
-        复用 FactorInputs.new_alpha_frames（已含去极值 + 取负向），保证与审计
-        因子完全同口径；因子已覆盖全池（gap_fill 无跳空日填中性 0），缺失截面
-        按 NaN 参与均值（nanmean），全缺失行由调用方 fillna(0) 中性化。
+        ``weights`` 以因子名映射权重；缺省=各因子 1 等权。返回
+        Σ(w·z)/Σw。复用 FactorInputs.new_alpha_frames（已含去极值 + 取负向），
+        与审计因子完全同口径；因子已覆盖全池（gap_fill 无跳空日填中性 0），
+        缺失截面按 NaN 参与，全缺失行由调用方 fillna(0) 中性化。
         """
         import warnings
 
         from quart.research.factor_audit import FactorInputs
 
+        weights = weights if weights is not None else {
+            "gap_fill20_neg": 1.0,
+            "amount_concen20_neg": 1.0,
+            "vol_asym60_neg": 1.0,
+        }
         frames = FactorInputs(md).new_alpha_frames
-        zs = [self._z(frame.reindex(columns=md.close_val.columns)) for frame in frames.values()]
-        zs = [z for z in zs if bool(z.notna().to_numpy().any())]
-        if not zs:
+        panels = []
+        wsum = 0.0
+        for name, panel in frames.items():
+            w = max(0.0, float(weights.get(name, 0.0)))
+            if w <= 0:
+                continue
+            z = self._z(panel.reindex(columns=md.close_val.columns))
+            if not bool(z.notna().to_numpy().any()):
+                continue
+            panels.append((z, w))
+            wsum += w
+        if not panels or wsum <= 0:
             return None
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)  # 全 NaN 截面的 nanmean
-            arr = np.nanmean(np.stack([z.to_numpy() for z in zs]), axis=0)
-        return pd.DataFrame(arr, index=zs[0].index, columns=zs[0].columns).astype("float32")
+            warnings.simplefilter("ignore", RuntimeWarning)
+            acc = np.zeros_like(panels[0][0].to_numpy(dtype="float64"))
+            ref_idx, ref_cols = panels[0][0].index, panels[0][0].columns
+            for z, w in panels:
+                acc = acc + w * z.reindex(index=ref_idx, columns=ref_cols).to_numpy(
+                    dtype="float64", na_value=np.nan
+                )
+            arr = acc / wsum
+        return pd.DataFrame(arr, index=ref_idx, columns=ref_cols).astype("float32")
 
     def prepare(self, md: MarketData) -> None:
         super().prepare(md)
@@ -329,7 +356,10 @@ class LowVolCompositeStrategy(BaseStrategy):
         self.candidate_quality_weight = min(
             1.0, max(0.0, float(p.get("candidate_quality_weight", 0.0)))
         )
-        self.new_alpha_weight = min(1.0, max(0.0, float(p.get("new_alpha_weight", 0.0))))
+        # R010 3 个正交因子独立权重（0~1，仅作占比，合成内归一）
+        self.gap_fill_weight = max(0.0, float(p.get("gap_fill_weight", 0.0)))
+        self.amount_concen_weight = max(0.0, float(p.get("amount_concen_weight", 0.0)))
+        self.vol_asym_weight = max(0.0, float(p.get("vol_asym_weight", 0.0)))
 
         c = md.close_val.astype("float32")
         ret1 = c.pct_change(fill_method=None)
@@ -465,16 +495,24 @@ class LowVolCompositeStrategy(BaseStrategy):
                     + self.candidate_quality_weight * quality.reindex_like(comp).fillna(0.0)
                 ).astype("float32")
 
-        # R010 新 alpha（价格韧性/成交脉冲/波动不对称）：与低波复合分正交的
-        # 独立来源（截面相关 0.41-0.51），混入方式同 vg/candidate_quality。
+        # R010 新 alpha（价格韧性/成交脉冲/波动不对称，3 个正交因子独立权重加权）：
+        # 与低波复合分正交的独立来源（截面相关 0.41-0.51）。总权重取 3 个独立权重的
+        # 均值（0.3×3 → 等效 0.3，向后兼容上一轮定稿）；新 alpha 分内部权重归一。
+        weights = {
+            "gap_fill20_neg": self.gap_fill_weight,
+            "amount_concen20_neg": self.amount_concen_weight,
+            "vol_asym60_neg": self.vol_asym_weight,
+        }
+        total_w = sum(weights.values())
         self.new_alpha_score = None
-        if self.new_alpha_weight > 0:
-            new_alpha = self._build_new_alpha_score(md)
+        if total_w > 0:
+            new_alpha = self._build_new_alpha_score(md, weights)
             if new_alpha is not None:
                 self.new_alpha_score = new_alpha
+                mix_w = total_w / len(weights)  # 总混入权重 = 独立权重均值
                 comp = (
-                    (1.0 - self.new_alpha_weight) * comp
-                    + self.new_alpha_weight * new_alpha.reindex_like(comp).fillna(0.0)
+                    (1.0 - mix_w) * comp
+                    + mix_w * new_alpha.reindex_like(comp).fillna(0.0)
                 ).astype("float32")
 
         if self.industry_z:

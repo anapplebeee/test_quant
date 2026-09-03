@@ -26,11 +26,10 @@ _LOWVOL_FACTORS: dict[str, tuple[str, str]] = {
     "value_weight": ("价值", "正盈利股票 EP"),
     "event_crowding_weight": ("事件拥挤反向", "涨停与放量追涨拥挤反向"),
     "candidate_quality_weight": ("财报质量候选", "ROE 稳定、盈利加速、业绩超预期代理"),
-    # R010 挖掘的正交新 alpha（与低波因子截面相关仅 0.41-0.51）
-    "new_alpha_weight": (
-        "R010新alpha",
-        "价格韧性/成交脉冲/波动不对称（gap_fill20、amount_concen20、vol_asym60）",
-    ),
+    # R010 挖掘的 3 个正交新 alpha（与低波因子截面相关仅 0.41-0.51，各自可独立调）
+    "gap_fill_weight": ("R010跳空回补", "跳空回补强度反向（缺口不回补=趋势延续，回补频繁=弱势）"),
+    "amount_concen_weight": ("R010成交脉冲", "成交额脉冲式集中反向（脉冲=投机，未来回吐）"),
+    "vol_asym_weight": ("R010波动不对称", "上行/下行波动不对称反向（上行波动过大=过热）"),
 }
 
 

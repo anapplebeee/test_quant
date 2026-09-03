@@ -39,7 +39,9 @@ ALPHA_PARAMS = dict(
     max_weight_pct=0.4,
     rebalance_days=45,
     rank_buffer=0.5,
-    new_alpha_weight=0.3,
+    gap_fill_weight=0.3,        # R010 3 个正交因子独立权重（等价旧 new_alpha_weight=0.3）
+    amount_concen_weight=0.3,
+    vol_asym_weight=0.3,
     use_regime_filter=True,   # alpha 自带 R4 趋势打分择时（已验证有效）
     regime_mode="score",
     timing_levels=2,
