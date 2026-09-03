@@ -93,13 +93,23 @@ def run(
     freq: str = "ME",
     hot_rank: int = 1,
     start: str | None = None,
+    stop_loss: float | None = None,
+    trail_stop: float | None = None,
+    max_pos_weight: float | None = None,
+    end: str | None = None,
 ) -> pd.DataFrame:
     """主模拟。返回逐日账户净值表：date, cash, market_value, equity, holdings, hot_sector。
 
     执行模型：在每个 rebalance 日 T（收盘决策），以 T 收盘价买入目标龙头；
     持仓在持有期间逐日盯市值；到下一 rebalance 日换仓。当日买入不可卖(T+1)由
-    rebalance 间隔>1 天自然满足。换仓时先卖旧再买新，卖收印花税。
-    只做多。
+    rebalance 间隔>1 天自然满足。换仓时先卖旧再买新，卖收印花税。只做多。
+
+    风控（可关闭）：
+      stop_loss : 硬止损比例（0~1）。持仓价从买入成本回撤超过该比例则次日触发卖出。
+      trail_stop: 移动止损比例（0~1）。持仓从持有期最高市值回撤超过该比例则卖出。
+      max_pos_weight: 单票市值上限（占当期总资产比例）。>0 时把资金在更多标的上摊薄，
+                  降低集中度；用于实验"降集中度收敛回撤"。
+    所有止损只在"买入后次日及以后"(满足 T+1) 触发。
     """
     bars = bars.copy()
     bars["date"] = pd.to_datetime(bars["date"])
@@ -109,6 +119,8 @@ def run(
     pool["date"] = pd.to_datetime(pool["date"])
 
     calendar = pd.DatetimeIndex(sorted(bars["date"].unique()))
+    if end is not None:
+        calendar = calendar[calendar <= pd.Timestamp(end)]
     rb = [d for d in rebalance_dates(calendar, freq) if start is None or d >= pd.Timestamp(start)]
     if not rb:
         return pd.DataFrame(columns=["date", "cash", "market_value", "equity", "holdings", "hot_sector"])
@@ -130,10 +142,25 @@ def run(
     sim_start = pd.Timestamp(start) if start else calendar.min()
     # 进入模拟区间前的数据仅用于 warmup（板块热度/动量），不回测净值
     cash = capital
-    positions: dict[str, float] = {}  # symbol -> shares(100股整手)
+    positions: dict[str, float] = {}      # symbol -> shares(100股整手)
+    buy_price: dict[str, float] = {}      # symbol -> 成交均价（成本，止损基准）
+    buy_date: dict[str, object] = {}      # symbol -> 买入日
+    peak_val: dict[str, float] = {}       # symbol -> 持仓期最高市值（移动止损基准）
     rows = []
     hot_at = None
     began = False
+
+    def _sell(s, px):
+        """按价卖出 symbol 全部，更新现金并清仓；返回回收现金(扣费后)。"""
+        nonlocal cash
+        q = positions[s]
+        proceeds = q * px
+        fee = max(proceeds * COMMISSION_RATE, COMMISSION_MIN) + proceeds * STAMP_DUTY
+        cash += proceeds - fee
+        del positions[s]
+        buy_price.pop(s, None)
+        buy_date.pop(s, None)
+        peak_val.pop(s, None)
 
     for d in calendar:
         dstr = pd.Timestamp(d)
@@ -178,21 +205,23 @@ def run(
                         cand_sorted = sorted(cand, key=keyfun2, reverse=True)
                     # 4) 卖旧持仓（换仓）：仅当拿到有效价格才卖出并销仓；
                     #    停牌/无报价时保留持仓（否则会凭空消失导致净值崩坏）。
+                    keep = set(cand_sorted[:max(n_leaders, 1)])
                     for s in list(positions):
-                        q = positions[s]
-                        if s not in cand_sorted[:max(n_leaders, 1)]:
-                            px = priced.get(s)
-                            if px is None:
-                                cval = closes.loc[dstr, s] if dstr in closes.index and s in closes.columns else np.nan
-                                px = float(cval) if pd.notna(cval) else None
-                            if px is not None:
-                                proceeds = q * px
-                                fee = max(proceeds * COMMISSION_RATE, COMMISSION_MIN) + proceeds * STAMP_DUTY
-                                cash += proceeds - fee
-                                del positions[s]
-                            # px is None => 停牌，保留持仓，等下个有价日再处理
-                    # 5) 买目标龙头（凑 n_leaders 只，每只预算=现金/预算只数 的一手倍）
+                        if s in keep:
+                            continue
+                        px = priced.get(s)
+                        if px is None:
+                            cval = closes.loc[dstr, s] if dstr in closes.index and s in closes.columns else np.nan
+                            px = float(cval) if pd.notna(cval) else None
+                        if px is not None:
+                            _sell(s, px)
+                        # px is None => 停牌，保留持仓，等下个有价日再处理
+                    # 5) 买目标龙头。单只预算上限 = min(现金/n_leaders, 若设 max_pos_weight 则当期总资产×max_pos_weight)
+                    equity_now = cash + sum(q * (closes_val.loc[dstr, s] if dstr in closes_val.index and s in closes_val.columns else np.nan)
+                                            for s, q in positions.items() if pd.notna(closes_val.loc[dstr, s]))
                     budget_per = capital / max(n_leaders, 1)
+                    if max_pos_weight is not None and max_pos_weight > 0:
+                        budget_per = min(budget_per, equity_now * max_pos_weight)
                     for s in cand_sorted[:n_leaders]:
                         if len(positions) >= n_leaders:
                             break
@@ -214,6 +243,37 @@ def run(
                             cost = q * p * LOT
                         cash -= cost + fee
                         positions[s] = positions.get(s, 0) + q * LOT
+                        buy_price[s] = p
+                        buy_date[s] = dstr
+                        peak_val[s] = q * p * LOT
+
+        # 每日风控止损（买入后次日及以后才允许触发，满足 T+1）
+        if positions and (stop_loss is not None or trail_stop is not None):
+            for s in list(positions):
+                q = positions[s]
+                if buy_price.get(s) is None or buy_date.get(s) == dstr:
+                    continue  # 当日新买，T+1 不可卖
+                # 当前可用价（原始收盘；停牌则用估值价）——仅作触发判断
+                if dstr in closes_val.index and s in closes_val.columns and pd.notna(closes_val.loc[dstr, s]):
+                    cur_px = float(closes_val.loc[dstr, s])
+                else:
+                    continue
+                cur_val = q * cur_px
+                if cur_px > peak_val.get(s, 0.0):
+                    peak_val[s] = cur_px
+                cur_peak = peak_val.get(s, cur_px)
+                hit = False
+                if stop_loss is not None and buy_price[s] > 0:
+                    if cur_px <= buy_price[s] * (1.0 - stop_loss):
+                        hit = True
+                if (not hit) and trail_stop is not None and cur_peak > 0:
+                    if cur_px <= cur_peak * (1.0 - trail_stop):
+                        hit = True
+                if hit:
+                    # 实际以当日可成交价（原始收盘）卖出；停牌无法成交则保留
+                    sell_px = float(closes.loc[dstr, s]) if dstr in closes.index and s in closes.columns and pd.notna(closes.loc[dstr, s]) else None
+                    if sell_px is not None:
+                        _sell(s, sell_px)
 
         # 每日盯市值（停牌持仓用前收 ffill 估值）
         mv = 0.0
