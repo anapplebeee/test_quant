@@ -53,7 +53,9 @@ def load_md():
     # （~2GB）会触发 duckdb/ pandas 分配失败；分块后单块 ~150MB。
     frames = []
     keep = ["date", "symbol", "open", "high", "low", "close", "volume", "amount"]
-    for year in range(2021, 2027):  # 机器内存受限：评估窗口 2021-2026（结论同窗口自洽）
+    for year in range(2019, 2027):
+        # 全区间 2019-2026：与 RESEARCH-011 门禁及既往结论同口径。预热期由因子
+        # 滚动窗口天然消化（早期截面 NaN→不交易），不单独截窗，避免换窗口失真。
         part = store.load(start=f"{year}-01-01", end=f"{year}-12-31", include_index=False)
         if part.empty:
             continue
@@ -109,6 +111,7 @@ def run(md: MarketData, bt: dict, overlay: bool, cost_mult: float,
     engine = BacktestEngine(md, strategy, fees=fees, initial_cash=CAP,
                             max_adv_participation=0.05)
     equity = engine.run()
+    n_trades = len(engine.trades)
     del engine, strategy, alpha
     import gc
 
@@ -126,7 +129,7 @@ def run(md: MarketData, bt: dict, overlay: bool, cost_mult: float,
     longest = int((below != below.shift()).cumsum()[below].value_counts().max()) if below.any() else 0
     return {
         "cagr": cagr, "mdd": mdd, "sharpe": sharpe, "calmar": calmar,
-        "final": float(equity.iloc[-1]), "trades": len(engine.trades),
+        "final": float(equity.iloc[-1]), "trades": n_trades,
         "longest_dd_days": longest, "equity": equity,
     }
 
@@ -150,21 +153,25 @@ def main() -> None:
             f"MDD={r['mdd']*100:6.2f}% Calmar={r['calmar']:4.2f} "
             f"终值={r['final']:,.0f} 最长水下={r['longest_dd_days']}日"
         )
-    gate_a = gated["cagr"] >= 0.12 and abs(gated["mdd"]) <= 0.20
-    gate_b = gated["cagr"] >= 0.20 and abs(gated["mdd"]) <= 0.20
-    print(f"### Gate A(≥12%/≤20%): {'PASS' if gate_a else 'FAIL'} | "
-          f"Gate B(≥20%/≤20%): {'PASS' if gate_b else 'FAIL'}")
+    # 门禁判在【胜出配置】上：alpha 自带 R4 择时已把回撤控到 20% 内，叠加机械式
+    # 回撤阶梯反而腰斩收益，故以 alpha-only 作为候选；overlay 两版一并列出对照。
+    for label, r in [("alpha-only", base), ("+risk_budget(全维度)", full),
+                     ("+risk_budget(仅回撤+波动)", gated)]:
+        ga = r["cagr"] >= 0.12 and abs(r["mdd"]) <= 0.20
+        gb = r["cagr"] >= 0.20 and abs(r["mdd"]) <= 0.20
+        print(f"### 门禁[{label}]: GateA(≥12%/≤20%)={'PASS' if ga else 'FAIL'} "
+              f"GateB(≥20%/≤20%)={'PASS' if gb else 'FAIL'}")
 
-    print("\n=== 2) 成本鲁棒性（风险层=仅回撤+波动，0/1/2/3x 成本）===")
+    print("\n=== 2) 成本鲁棒性（alpha-only 胜出配置，0/1/2/3x 成本）===")
     for mult in [0.0, 1.0, 2.0, 3.0]:
-        r = run(md, bt, overlay=True, cost_mult=mult, enable_state=False)
+        r = run(md, bt, overlay=False, cost_mult=mult)
         print(
             f"### cost {mult}x: CAGR={r['cagr']*100:5.2f}% Sharpe={r['sharpe']:4.2f} "
             f"MDD={r['mdd']*100:6.2f}% trades={r['trades']}"
         )
 
-    print("\n=== 3) 双基准超额（风险层=仅回撤+波动，1x）===")
-    eq = gated["equity"]
+    print("\n=== 3) 双基准超额（alpha-only 胜出配置，1x）===")
+    eq = base["equity"]
     nav = eq / eq.iloc[0]
     for name, b in [("沪深300", bench300), ("同池等权", bench_equal)]:
         aligned = b.reindex(nav.index).ffill()
