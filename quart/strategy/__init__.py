@@ -4,6 +4,7 @@ from quart.config import load_config
 from quart.strategy.base import BaseStrategy
 from quart.strategy.dual_ma import DualMAStrategy
 from quart.strategy.factor_portfolio import FactorPortfolioStrategy
+from quart.strategy.hot_rotation import HotRotationStrategy
 from quart.strategy.index_enhancement import IndexEnhancementStrategy
 from quart.strategy.lowvol_composite import LowVolCompositeStrategy
 from quart.strategy.ml_rank import MLRankStrategy
@@ -22,6 +23,8 @@ REGISTRY: dict[str, type[BaseStrategy]] = {
     "lowvol_indz": LowVolCompositeStrategy,
     # 三层合成：大盘择时(market_state_vector) × 行业内反转选强者 × 个股因子
     "three_layer": ThreeLayerStrategy,
+    # 热点龙头轮动：单板块默认(实证最优=Top1+3票+10%止损)；selector=momentum 免外部依赖
+    "hot_rotation": HotRotationStrategy,
 }
 
 #: 非策略参数的配置键，传入策略前必须剥离

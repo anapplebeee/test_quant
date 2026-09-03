@@ -48,6 +48,23 @@ except Exception:
 if DEFAULT_STRATEGY not in STRATEGY_CHOICES:
     DEFAULT_STRATEGY = STRATEGY_CHOICES[0]
 
+# 热点龙头轮动：研究测试结论速览（2026-09-04，独立模拟器 reports/ht_hot_leader_research_*.md）
+_HOT_ROTATION_CONCLUSIONS = """\
+**策略 `hot_rotation`（热门板块轮动 + 板块内选龙头）研究结论（3 万本金 · T+1 · 整手 · 含费）**
+
+| 变体 | 全周期总收益 | 最大回撤 | Sharpe | 说明 |
+|---|---|---|---|---|
+| **单板块 Top1 + ML 分数选龙头(3票+10%硬止损)** | **+118%** | **-10.7%** | **2.23** | 实证最优(正式引擎风控25%会压缩集中度,数字不同) |
+| 单板块 + 动量选龙头(默认 momentum) | +29% | -50% | 0.57 | 动量追高回撤大，ML 更优 |
+| 多板块 Top3(hot_k=3) | +38% | -22% | 0.82 | 分散但不优于单板块 |
+
+**关键提示（不可外推实盘）**：全市场个股仅 2024 起；收益高度依赖 2025 初小盘热点行情，
+最近 9 个月(2025-12~2026-09)基准持平下策略曾巨亏(单板块 Top1+2票-45%)。规则优先、ML 选龙头，
+**跨板块/加止损不能解决 regime 失效**，实盘前需加市场热度/广度择时过滤。
+默认 `selector=momentum` 免外部依赖可即跑；`ml_score` 需先 `scripts/ht_train.py` 生成分数。
+详细见报告 §8-§11。
+"""
+
 
 def _strategy_defaults(strategy: str) -> dict:
     """该策略当前生效的默认参数（overrides 优先，与 build_strategy 同语义）。"""
@@ -515,6 +532,9 @@ def render():
             "RESEARCH & VALIDATION",
         ))
 
+        # ---- 策略研究结论速览（按选中策略切换）----
+        strat_conclusion = gr.Markdown(_HOT_ROTATION_CONCLUSIONS)
+
         # ---- 参数面板：策略与关键参数前端可调 ----
         with gr.Accordion("运行新回测 · 参数覆盖与成本压力", open=False):
             gr.Markdown(
@@ -570,6 +590,14 @@ def render():
             run_btn = gr.Button("运行回测", variant="primary", size="lg")
             run_out = gr.Markdown()
 
+            def _conclusion_html(name: str) -> str:
+                if name == "hot_rotation":
+                    return _HOT_ROTATION_CONCLUSIONS
+                return (
+                    "*选择策略后在此查看其研究结论。`hot_rotation`(热点龙头轮动)带内建测试结论表；"
+                    "其余策略回测结论见下方结果区与制品区。*"
+                )
+
             def _on_strategy_change(name: str):
                 """同步核心参数、高级参数和因子公式预览。"""
                 d = _strategy_defaults(name)
@@ -579,12 +607,13 @@ def render():
                     gr.update(value=d["top_k"]),
                     gr.update(value=table),
                     _factor_preview_html(name, table),
+                    _conclusion_html(name),
                 )
 
             strategy_in.change(
                 _on_strategy_change,
                 inputs=[strategy_in],
-                outputs=[rebal_in, topk_in, strategy_params_in, factor_preview],
+                outputs=[rebal_in, topk_in, strategy_params_in, factor_preview, strat_conclusion],
             )
             strategy_params_in.change(
                 _factor_preview_html,

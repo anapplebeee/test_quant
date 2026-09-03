@@ -113,6 +113,19 @@ strategy:
     # 双均线策略每日换仓为成本杀手，默认降频到 5 日
     dual_ma:
       rebalance_days: 5
+    # 热点龙头轮动(2026-09-04 移植 ht_* 研究至正式引擎)。
+    # 默认=实证最优单板块 Top1 + 3 票 + 10% 硬止损。
+    # 注意：平台风控单票上限 25% 会约束集中度(3 票 ~33%/票会被削到 25%)，
+    # 属平台治理对"集中追热点"的合规降噪，非策略 bug。
+    hot_rotation:
+      selector: momentum        # momentum 免外部依赖可即跑；ml_score 需 reports/ht_ml_scores.csv
+      freq: ME
+      hot_k: 1
+      hot_rank: 1
+      per_sector: 3
+      n_leaders: 3
+      stop_loss: 0.10
+      momentum_days: 5
   min_price: 2.0
 
 risk:

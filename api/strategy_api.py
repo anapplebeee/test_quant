@@ -68,6 +68,11 @@ STRATEGY_META: dict[str, dict[str, str]] = {
         "status": "研究",
         "desc": "RESEARCH-009：因子z合成alpha(行业内反转选强者rel_ind_rev20+低波/拥挤等)×market_state_vector大盘择时门控。未通过正式OOS准入门禁，仅限回测研究。",
     },
+    "hot_rotation": {
+        "label": "热点龙头轮动",
+        "status": "研究",
+        "desc": "板块热度选热门板块×板块内选龙头(动量或ML分数)，3万集中3票+10%止损。单板块实证优于多板块，收益集中2025初小盘牛、regime依赖强，仅限回测研究。",
+    },
 }
 
 

@@ -375,6 +375,26 @@ def build_factor_receipt(
         }
         formula = "ML prediction score"
         is_factor_strategy = True
+    elif name == "hot_rotation":
+        # 热门板块轮动：板块热度选热板块 + 板块内选龙头（momentum 或外部 ML 分数）
+        sel = effective.get("selector", "momentum")
+        hot_k = int(effective.get("hot_k", 1))
+        leaders = int(effective.get("n_leaders", 3))
+        sl = effective.get("stop_loss")
+        sl_txt = f"{float(sl):.0%}" if sl is not None else "无"
+        add("板块热度轮动", "sector_heat", 1.0,
+            f"每月取热度 Top{hot_k} 板块，板块内选 {leaders} 只龙头；止损 {sl_txt}")
+        add("龙头排序", "selector", sel,
+            "momentum=板块内动量 / ml_score=外部 LightGBM 分数")
+        controls = {
+            "freq": effective.get("freq", "ME"),
+            "hot_k": hot_k,
+            "selector": sel,
+            "n_leaders": leaders,
+            "stop_loss": sl,
+        }
+        formula = f"热度Top{hot_k}板块 × 龙头[{sel}] Top{leaders}"
+        is_factor_strategy = False
     else:
         fast = int(effective.get("fast_days", 5))
         slow = int(effective.get("slow_days", 20))
