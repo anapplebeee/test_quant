@@ -92,6 +92,8 @@ def run(
     n_leaders: int = 2,
     freq: str = "ME",
     hot_rank: int = 1,
+    hot_k: int = 1,
+    per_sector: int = 1,
     start: str | None = None,
     stop_loss: float | None = None,
     trail_stop: float | None = None,
@@ -103,6 +105,11 @@ def run(
     执行模型：在每个 rebalance 日 T（收盘决策），以 T 收盘价买入目标龙头；
     持仓在持有期间逐日盯市值；到下一 rebalance 日换仓。当日买入不可卖(T+1)由
     rebalance 间隔>1 天自然满足。换仓时先卖旧再买新，卖收印花税。只做多。
+
+    板块选择：
+      hot_k : 热门板块数。默认 1 = 只追热度 Top-1 单一板块(与原版一致)；>1 时取热度
+              Top-hot_k 个板块、跨板块选龙头(每板块取 per_sector 只)。
+      per_sector: 每个热门板块内选龙头只数(按分数/动量)。仅 hot_k>1 时生效。
 
     风控（可关闭）：
       stop_loss : 硬止损比例（0~1）。持仓价从买入成本回撤超过该比例则次日触发卖出。
@@ -162,6 +169,101 @@ def run(
         buy_date.pop(s, None)
         peak_val.pop(s, None)
 
+    def _rebalance_multi(dstr):
+        """多板块 rebalance（hot_k>1）：取热度 Top-hot_k 板块，跨板块各取 per_sector 龙头，
+        凑够最多 n_leaders 只。与单板块逻辑完全独立，避免影响 hot_k<=1 的原路径。"""
+        nonlocal cash, hot_at
+        day_heat = heat[heat["date"] == dstr].sort_values("heat", ascending=False)
+        day_close = closes.loc[dstr] if dstr in closes.index else pd.Series(dtype=float)
+        if day_heat.empty:
+            hot_at = None
+            return
+        ranked = day_heat.sort_values("heat", ascending=False)
+        hot_sectors = [str(ranked.iloc[i]["cluster"]) for i in range(min(hot_k, len(ranked)))]
+        hot_at = hot_sectors[0]
+        # 板块内候选一次合并
+        in_sector = pool.merge(sector.rename("cluster").reset_index(), on="symbol", how="left")
+        in_sector = in_sector[in_sector["date"] == dstr]
+        in_sector["symbol"] = in_sector["symbol"].astype(str)
+
+        def _score_key(priced_map, sc_day):
+            def kf(s):
+                p = priced_map.get(s)
+                if p is None:
+                    return -np.inf
+                if sc_day is not None:
+                    sv = sc_day.get(s)
+                    if pd.notna(sv):
+                        return float(sv)
+                c5 = float(closes.shift(5).loc[dstr, s]) if (dstr in closes.index and s in closes.columns and pd.notna(closes.shift(5).loc[dstr, s])) else np.nan
+                c0 = float(day_close[s]) if (s in day_close.index and pd.notna(day_close[s])) else np.nan
+                return float(c0 / c5 - 1.0) if (pd.notna(c0) and pd.notna(c5) and c5 > 0) else -np.inf
+            return kf
+
+        sc_day = sc_piv.loc[dstr] if (sc_piv is not None and dstr in sc_piv.index) else None
+        # 每板块按分数取 per_sector 只，跨板块去重收集 target
+        target: list[str] = []
+        for hs in hot_sectors:
+            cand = in_sector[in_sector["cluster"] == hs]["symbol"].tolist()
+            cand = sorted(set(cand))
+            priced = {s: float(day_close[s]) for s in cand if s in day_close.index and pd.notna(day_close[s])}
+            if not priced:
+                continue
+            top = sorted(priced, key=_score_key(priced, sc_day), reverse=True)[:per_sector]
+            for s in top:
+                if s not in target:
+                    target.append(s)
+        # 不足 n_leaders 时在 hot 板块池内按分数补足
+        if len(target) < max(n_leaders, 1):
+            pool_all = in_sector[in_sector["cluster"].isin(hot_sectors)]["symbol"].tolist()
+            priced_all = {s: float(day_close[s]) for s in set(pool_all) if s in day_close.index and pd.notna(day_close[s])}
+            for s in sorted(priced_all, key=_score_key(priced_all, sc_day), reverse=True):
+                if len(target) >= max(n_leaders, 1):
+                    break
+                if s not in target:
+                    target.append(s)
+        # 卖旧（不在 target 内）
+        keep = set(target[:max(n_leaders, 1)])
+        for s in list(positions):
+            if s in keep:
+                continue
+            px = float(day_close[s]) if (s in day_close.index and pd.notna(day_close[s])) else None
+            if px is None:
+                cval = closes.loc[dstr, s] if dstr in closes.index and s in closes.columns else np.nan
+                px = float(cval) if pd.notna(cval) else None
+            if px is not None:
+                _sell(s, px)
+        # 买 target
+        equity_now = cash + sum(
+            q * (float(closes_val.loc[dstr, s]) if (dstr in closes_val.index and s in closes_val.columns and pd.notna(closes_val.loc[dstr, s])) else 0.0)
+            for s, q in positions.items())
+        budget_per = capital / max(n_leaders, 1)
+        if max_pos_weight is not None and max_pos_weight > 0:
+            budget_per = min(budget_per, equity_now * max_pos_weight)
+        for s in target[:max(n_leaders, 1)]:
+            if len(positions) >= max(n_leaders, 1):
+                break
+            p = float(day_close[s]) if (s in day_close.index and pd.notna(day_close[s])) else None
+            if p is None or s in positions:
+                continue
+            affordable = int(cash / (p * LOT))
+            cap_by_budget = int(budget_per / (p * LOT))
+            q = max(0, min(affordable, cap_by_budget))
+            if q <= 0:
+                continue
+            cost = q * p * LOT
+            fee = max(cost * COMMISSION_RATE, COMMISSION_MIN)
+            if cost + fee > cash:
+                q = int((cash - fee) / (p * LOT))
+                if q <= 0:
+                    continue
+                cost = q * p * LOT
+            cash -= cost + fee
+            positions[s] = positions.get(s, 0) + q * LOT
+            buy_price[s] = p
+            buy_date[s] = dstr
+            peak_val[s] = q * p * LOT
+
     for d in calendar:
         dstr = pd.Timestamp(d)
         if dstr < sim_start:
@@ -170,8 +272,14 @@ def run(
         began = True
         # 当日是否再平衡日
         if dstr in rb:
-            # 1) 选热门板块
-            day_heat = heat[heat["date"] == dstr].sort_values("heat", ascending=False)
+            if hot_k > 1:
+                # 多板块模式：跨 Top-hot_k 板块选龙头（独立实现）
+                _rebalance_multi(dstr)
+                # 置空 day_heat，使下方单板块原逻辑不执行(仅 hot_k<=1 才走)
+                day_heat = heat[heat["date"] == dstr].iloc[0:0]
+            else:
+                # 1) 选热门板块（单一热门板块原路径）
+                day_heat = heat[heat["date"] == dstr].sort_values("heat", ascending=False)
             if not day_heat.empty:
                 ranked = day_heat.sort_values("heat", ascending=False)
                 if len(ranked) >= hot_rank:
