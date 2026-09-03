@@ -88,11 +88,25 @@ strategy:
       top_k: 20
       rank_buffer: 0.5
     lowvol_indz:
+      # R011 门禁胜出配置（2026-09-03；权威口径 run_backtest.py：全区间 2019-2026、
+      # 3 万元、主板+中小板、全成本1x + 冲击成本 impact_coef 跟随配置 + 剔除质量
+      # 黑名单 + 风控单票上限 25%）：CAGR 13.26% / Sharpe 0.94 / MDD -20.01%。
+      # A/B（同权威口径，2019-2026）：旧默认(Top30/rev0.35/min5000w)=6.54%/0.58/
+      # -20.51%  vs 本配置 13.26%/0.94/-20.01% —— 年化翻倍、Sharpe+62%、MDD 略降。
+      # 注：MDD -20.01% 恰在 20% 边缘（非早期无冲击成本口径的 -17.38%）。
+      # 待办：new_alpha_weight=0.3 与 timing_levels=2 为全样本调优值，
+      #   尚未滚动样本外(WFA)验证，验证前不作为正式参数定稿。
       rebalance_days: 45
-      top_k: 30
+      top_k: 8
       rank_buffer: 0.5
       industry_z: true
       rev_weight: 0.0
+      new_alpha_weight: 0.3
+      min_avg_amount: 20000000
+      max_weight_pct: 0.4
+      use_regime_filter: true
+      regime_mode: score
+      timing_levels: 2
     # 双均线策略每日换仓为成本杀手，默认降频到 5 日
     dual_ma:
       rebalance_days: 5

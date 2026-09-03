@@ -71,10 +71,11 @@ def test_catalog_marks_admission_tiers():
 
 
 def test_defaults_lowvol_indz_uses_override():
-    # settings.yaml: 全市场复验后正式候选采用 45 日 / Top30 / rev0
+    # settings.yaml: R011 门禁胜出配置采用 45 日 / Top8（CAGR 22.31% / MDD -17.38%，
+    # Gate A 与 Gate B 均 PASS；详见 docs/RESEARCH_011_* 与 eval_risk_budget.py）
     d = get_strategy_defaults("lowvol_indz")
     assert d["rebalance_days"] == 45
-    assert d["top_k"] == 30
+    assert d["top_k"] == 8
     # 无 override 的策略回退全局默认
     d2 = get_strategy_defaults("ml_rank")
     assert d2["rebalance_days"] >= 1

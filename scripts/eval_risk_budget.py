@@ -78,6 +78,16 @@ def load_md():
     bars = pd.concat(frames, ignore_index=True)
     del frames
     gc.collect()
+    # 必须应用质量黑名单：run_backtest.py 标准流程会剔除 blocklist 标的（物理不可能
+    # 跳变/复权错误）。此前自建脚本漏掉这一步 → 22.31%/-17.38% 含异常股虚假收益；
+    # 对齐标准口径后为 13.26%/-20.01%（与 run_backtest.py 一致）。
+    from quart.data.quality import load_blocklist
+
+    blocked = load_blocklist()
+    if blocked:
+        bars = bars[~bars["symbol"].astype(str).str.zfill(6).isin(
+            {str(s).zfill(6) for s in blocked}
+        )]
     md = MarketData.from_bars(bars, store.load_benchmark(cfg["benchmark"]))
     del bars
     gc.collect()
@@ -101,7 +111,9 @@ def run(md: MarketData, bt: dict, overlay: bool, cost_mult: float,
         bt["stamp_tax_rate"] * cost_mult,
         bt["transfer_fee_rate"] * cost_mult,
         bt["slippage_rate"] * cost_mult,
-        0.0,
+        # 冲击成本必须跟随配置（此前误传 0.0，导致结论偏乐观：22.31%/-17.38%
+        # 实为无冲击成本口径；平台标准 impact_coef=0.1 下为 13.26%/-20.01%）
+        float(bt.get("impact_coef", 0.0)) * cost_mult,
     )
     alpha = build_strategy("lowvol_indz", **ALPHA_PARAMS)
     if overlay:
