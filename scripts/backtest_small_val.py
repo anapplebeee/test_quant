@@ -265,12 +265,19 @@ class SmallCapStrategy(BaseStrategy):
         p = self.p
         if p["calendar"] == "none":
             return 1.0
-        if p["calendar"] == "simple":
-            if d.month == 1 or (d.month == 4 and d.day >= 20):
-                return 0.0
-            return 1.0
-        if d.month == 1 or (d.month == 4 and 15 <= d.day <= 30):
+        # 日历窗口参数化（步骤1/3：4月窗口起点终点、1月开关）
+        apr_start = int(p.get("cal_apr_start", 20))
+        apr_end_day = int(p.get("cal_apr_end_day", 0))      # 0=到月末
+        may_end_day = int(p.get("cal_may_end_day", 0))      # >0 时 5 月该日(含)前仍空仓
+        jan_on = bool(p.get("cal_jan_on", True))
+        if d.month == 4 and d.day >= apr_start:
             return 0.0
+        if may_end_day > 0 and d.month == 5 and d.day <= may_end_day:
+            return 0.0
+        if jan_on and d.month == 1:
+            return 0.0
+        if p["calendar"] == "simple":
+            return 1.0
         if d.month == 12 and d.day >= 15:
             return 0.5
         if d.month == 6 and int(self.day_no.iloc[i]) > int(self.month_len.iloc[i]) - 5:
@@ -351,16 +358,18 @@ class SmallCapStrategy(BaseStrategy):
         ranked = fm_row.reindex(cand).sort_values().index.tolist()
         if not p["use_score"]:
             return ranked
-        # 二级因子：市值最小 score_top 只内综合打分
+        # 二级因子：市值最小 score_top 只内综合打分（权重可参数化，3.5 因子减法门禁用）
         cand2 = ranked[: int(p["score_top"])]
         cap_r = fm_row.reindex(cand2).rank(ascending=True, pct=True)
         ret_r = self.ret20.iloc[i].reindex(cand2).rank(ascending=True, pct=True)
         to_r = self.turn20.iloc[i].reindex(cand2).rank(ascending=True, pct=True)
+        score = (float(p.get("w_cap", 0.40)) * cap_r.fillna(cap_r.max())
+                 + float(p.get("w_rev", 0.25)) * ret_r.fillna(ret_r.max())
+                 + float(p.get("w_to", 0.20)) * to_r.fillna(to_r.max()))
+        w_roe = float(p.get("w_roe", 0.15))
         roe = self._snap["roe"].reindex(cand2) if not self._snap.empty else None
-        score = 0.40 * cap_r.fillna(cap_r.max()) + 0.25 * ret_r.fillna(ret_r.max()) \
-            + 0.20 * to_r.fillna(to_r.max())
-        if roe is not None:
-            score = score + 0.15 * (1.0 - roe.rank(ascending=True, pct=True)).fillna(0.85)
+        if roe is not None and w_roe > 0:
+            score = score + w_roe * (1.0 - roe.rank(ascending=True, pct=True)).fillna(0.85)
         return score.sort_values().index.tolist()
 
     def _buffer_picks(self, ranked: list[str]) -> list[str]:
