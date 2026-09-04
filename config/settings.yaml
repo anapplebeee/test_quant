@@ -142,6 +142,31 @@ strategy:
       stop_loss: 0.08
       port_dd_limit: 0.12
       half_mode_days: 30
+    # 小市值多因子月度轮动(RESEARCH-015 胜出 H5, 2026-09-04)。权威口径
+    # (2019-2026/3万/主板+创业+科创/全成本1x/黑名单158只)：CAGR 30.88%/Sharpe 1.18/
+    # MDD -35.05%/终值 233,078；vs 同池等权 +12.8pp、vs 沪深300 +28.2pp。
+    # 红线：MDD -35% 不满足 -20%，status=研究不入 allowlist。
+    # 分年度除 2023(-8.9%) 全正；成本 0-3x = 39.1/30.9/22.7/13.9 平滑衰减。
+    # 依赖 data/factors/fundamental_daily*.parquet + financials.parquet(PIT)。
+    small_value:
+      n: 10
+      score_top: 60
+      use_score: true
+      mcap_min: 1500000000      # 15 亿
+      mcap_max: 6000000000      # 60 亿
+      price_min: 3.0
+      price_max: 25.0
+      rev_min: 300000000
+      min_list_days: 730
+      min_avg_amount: 50000000
+      recency_st_days: 250
+      max_limit_up60: 3
+      max_ret20: 0.40
+      mcap_floor60: 1200000000  # 12 亿
+      use_calendar_flat: true
+      reb_day: 1
+      buf_mult: 0.0
+      max_weight_pct: 0.15
   min_price: 2.0
 
 risk:

@@ -10,6 +10,7 @@ from quart.strategy.index_enhancement import IndexEnhancementStrategy
 from quart.strategy.lowvol_composite import LowVolCompositeStrategy
 from quart.strategy.ml_rank import MLRankStrategy
 from quart.strategy.momentum import MomentumRotationStrategy, PathMomentumStrategy
+from quart.strategy.small_value import SmallValueStrategy
 from quart.strategy.three_layer import ThreeLayerStrategy
 
 REGISTRY: dict[str, type[BaseStrategy]] = {
@@ -28,6 +29,8 @@ REGISTRY: dict[str, type[BaseStrategy]] = {
     "hot_rotation": HotRotationStrategy,
     # ETF 动量轮动：每周动量 Top-n 风险 ETF，否则持防御债（真实 ETF 标的，小 panel 专用）
     "etf_momentum": ETFMomentumStrategy,
+    # 小市值多因子月度轮动（RESEARCH-015 胜出 H5：避雷池+PIT财务+二级因子打分 Top10）
+    "small_value": SmallValueStrategy,
 }
 
 #: 非策略参数的配置键，传入策略前必须剥离
