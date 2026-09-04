@@ -126,6 +126,22 @@ strategy:
       n_leaders: 3
       stop_loss: 0.10
       momentum_days: 5
+    # ETF 动量轮动(2026-09-04 移植 etf.py 至正式策略)：真实 ETF 标的，
+    # 需以 9 只 ETF 小 panel 喂引擎(scripts/backtest_etf.py)，不入 A 股全市场流程。
+    # 默认参数对齐原 etf.py：0.6×20日 + 0.4×60日动量、>MA60、每周调仓 Top2、-8%止损、
+    # 组合回撤-12%半仓30日。实证(指数版 2014-2026)年化≈7.6% 仅小幅超沪深300、不敌等权，
+    # 仅回测研究，不入 allowlist。
+    etf_momentum:
+      risk_etfs: "510300,510500,159915,588000,512890,518880,159920,513500"
+      defense_etf: "511010"
+      top_n: 2
+      mom_short_days: 20
+      mom_long_days: 60
+      short_weight: 0.6
+      ma_window: 60
+      stop_loss: 0.08
+      port_dd_limit: 0.12
+      half_mode_days: 30
   min_price: 2.0
 
 risk:

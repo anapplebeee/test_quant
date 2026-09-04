@@ -73,6 +73,11 @@ STRATEGY_META: dict[str, dict[str, str]] = {
         "status": "研究",
         "desc": "板块热度选热门板块×板块内选龙头(动量或ML分数)，3万集中3票+10%止损。单板块实证优于多板块，收益集中2025初小盘牛、regime依赖强，仅限回测研究。",
     },
+    "etf_momentum": {
+        "label": "ETF动量轮动",
+        "status": "研究",
+        "desc": "真实ETF标的：每周动量(0.6×20日+0.4×60日,需>MA60)选Top2风险ETF，否则持国债ETF防御；含-8%止损与组合回撤-12%降半仓。需以9只ETF小panel喂引擎(见 scripts/backtest_etf.py)。实证(指数版)长期仅小幅超沪深300、不敌等权，仅限回测研究。",
+    },
 }
 
 

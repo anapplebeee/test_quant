@@ -3,6 +3,7 @@ from __future__ import annotations
 from quart.config import load_config
 from quart.strategy.base import BaseStrategy
 from quart.strategy.dual_ma import DualMAStrategy
+from quart.strategy.etf_momentum import ETFMomentumStrategy
 from quart.strategy.factor_portfolio import FactorPortfolioStrategy
 from quart.strategy.hot_rotation import HotRotationStrategy
 from quart.strategy.index_enhancement import IndexEnhancementStrategy
@@ -25,6 +26,8 @@ REGISTRY: dict[str, type[BaseStrategy]] = {
     "three_layer": ThreeLayerStrategy,
     # 热点龙头轮动：单板块默认(实证最优=Top1+3票+10%止损)；selector=momentum 免外部依赖
     "hot_rotation": HotRotationStrategy,
+    # ETF 动量轮动：每周动量 Top-n 风险 ETF，否则持防御债（真实 ETF 标的，小 panel 专用）
+    "etf_momentum": ETFMomentumStrategy,
 }
 
 #: 非策略参数的配置键，传入策略前必须剥离

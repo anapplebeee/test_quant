@@ -171,6 +171,39 @@ def fetch_index_daily(code: str, start_date: str, end_date: str) -> pd.DataFrame
     return _fetch_index_eastmoney(code, start_date, end_date)
 
 
+def fetch_etf_daily(code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """抓取单只 ETF 前复权日线（akshare fund_etf_hist_em，东财源，套用统一熔断/重试）。
+
+    返回列与 fetch_index_daily 一致：date/symbol/open/high/low/close/volume/amount。
+    ETF 也走东财(push2his)，复用 _EASTMONEY_BREAKER，批量期间东财限流自动短路。
+    """
+    import akshare as ak
+
+    if not _EASTMONEY_BREAKER.allow():
+        logger.debug("eastmoney breaker open, skip etf {}", code)
+        return _EMPTY.copy()
+    try:
+        raw = _retry(
+            lambda: ak.fund_etf_hist_em(
+                symbol=code, period="daily",
+                start_date=start_date, end_date=end_date, adjust="qfq",
+            ),
+            retries=5, base_delay=1.5,
+        )
+    except Exception as exc:
+        logger.debug("eastmoney etf {} failed: {}", code, str(exc)[:80])
+        if isinstance(exc, _RETRYABLE_EXC):
+            _EASTMONEY_BREAKER.failure()
+        return _EMPTY.copy()
+    _EASTMONEY_BREAKER.success()
+    if raw is None or raw.empty:
+        return _EMPTY.copy()
+    df = raw.rename(columns=OHLC_MAP)
+    df["symbol"] = code
+    keep = [c for c in [*list(OHLC_MAP.values()), "symbol"] if c in df.columns]
+    return _align_schema(df[keep], code)
+
+
 #: 东财源（个股 + 指数共用同一 host，共用一个熔断器）。
 #: 批量更新期间一旦东财持续断连，熔断后直接短路，全量切腾讯兜底，不再浪费重试等待。
 _EASTMONEY_BREAKER = _CircuitBreaker()
